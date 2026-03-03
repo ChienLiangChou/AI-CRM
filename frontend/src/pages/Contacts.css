@@ -1,0 +1,42 @@
+/* Contacts Specific CSS */
+.contacts-page {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 4rem);
+}
+
+.page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 2rem;
+}
+
+.subtitle {
+    color: var(--text-secondary);
+    font-size: 1.1rem;
+    margin-top: 0.25rem;
+}
+
+.contacts-list {
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.list-body {
+    flex: 1;
+    overflow-y: auto;
+}
+
+.score {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    font-weight: 700;
+    font-size: 0.9rem;
+}
