@@ -1,14 +1,42 @@
+from contextlib import asynccontextmanager
+import asyncio
+import os
+import logging
+
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List
 
 from . import crud, models, schemas
-from .database import engine, get_db
+from .database import engine, get_db, SessionLocal
+
+logger = logging.getLogger(__name__)
 
 models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="AI CRM API")
+
+async def _nudge_loop():
+    """Background task: check for follow-up nudges every 30 minutes."""
+    while True:
+        await asyncio.sleep(1800)
+        try:
+            db = SessionLocal()
+            result = crud.check_and_send_followup_nudges(db)
+            if result["sent"]:
+                logger.info(f"Sent {result['sent']} push notifications for {result['contacts']}")
+            db.close()
+        except Exception as e:
+            logger.error(f"Nudge loop error: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(_nudge_loop())
+    yield
+    task.cancel()
+
+app = FastAPI(title="AI CRM API", lifespan=lifespan)
 
 # Allow frontend requests
 app.add_middleware(
@@ -165,3 +193,45 @@ def market_trigger_workflow(req: schemas.MarketTriggerRequest, db: Session = Dep
 @app.post("/api/workflow/maintenance-report", response_model=schemas.MaintenanceReportResponse)
 def maintenance_report_workflow(req: schemas.MaintenanceReportRequest, db: Session = Depends(get_db)):
     return crud.workflow_maintenance_report(db, req.tenant_email, req.message, req.photos)
+
+# --- Push Notifications ---
+@app.get("/api/push/vapid-public-key", response_model=schemas.VapidPublicKeyResponse)
+def get_vapid_public_key():
+    key = os.getenv("VAPID_PUBLIC_KEY", "")
+    if not key:
+        raise HTTPException(status_code=500, detail="VAPID key not configured")
+    return {"public_key": key}
+
+@app.post("/api/push/subscribe")
+def push_subscribe(sub: schemas.PushSubscriptionRequest, db: Session = Depends(get_db)):
+    crud.save_push_subscription(db, sub)
+    return {"ok": True}
+
+@app.delete("/api/push/unsubscribe")
+def push_unsubscribe(req: schemas.PushUnsubscribeRequest, db: Session = Depends(get_db)):
+    crud.remove_push_subscription(db, req.endpoint)
+    return {"ok": True}
+
+@app.post("/api/push/test")
+def push_test(db: Session = Depends(get_db)):
+    """Send a test push notification to all subscribers."""
+    subs = db.query(models.PushSubscription).all()
+    if not subs:
+        raise HTTPException(status_code=404, detail="No push subscriptions found")
+    sent = 0
+    for sub in subs:
+        payload = {
+            "title": "AI CRM Test",
+            "body": "Push notifications are working!",
+            "tag": "test",
+            "data": {"url": "/dashboard"},
+        }
+        if crud._send_push(sub, payload):
+            sent += 1
+    return {"sent": sent, "total": len(subs)}
+
+@app.post("/api/push/check-nudges")
+def manual_check_nudges(db: Session = Depends(get_db)):
+    """Manually trigger follow-up nudge check."""
+    result = crud.check_and_send_followup_nudges(db)
+    return result

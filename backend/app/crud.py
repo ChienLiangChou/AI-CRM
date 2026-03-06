@@ -4,9 +4,13 @@ from . import models, schemas
 import re
 import json
 import os
+import logging
 from datetime import datetime, timedelta
 import google.generativeai as genai
+from pywebpush import webpush, WebPushException
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -937,3 +941,103 @@ Please reply with your earliest available time and quote.
         issue_type=issue_type,
         urgency=urgency
     )
+
+
+# --- Push Notifications ---
+def save_push_subscription(db: Session, sub: schemas.PushSubscriptionRequest):
+    existing = db.query(models.PushSubscription).filter(
+        models.PushSubscription.endpoint == sub.endpoint
+    ).first()
+    if existing:
+        existing.p256dh = sub.keys.p256dh
+        existing.auth = sub.keys.auth
+    else:
+        existing = models.PushSubscription(
+            endpoint=sub.endpoint,
+            p256dh=sub.keys.p256dh,
+            auth=sub.keys.auth,
+        )
+        db.add(existing)
+    db.commit()
+    return existing
+
+
+def remove_push_subscription(db: Session, endpoint: str):
+    sub = db.query(models.PushSubscription).filter(
+        models.PushSubscription.endpoint == endpoint
+    ).first()
+    if sub:
+        db.delete(sub)
+        db.commit()
+        return True
+    return False
+
+
+def _send_push(subscription_row: models.PushSubscription, payload: dict):
+    vapid_private = os.getenv("VAPID_PRIVATE_KEY")
+    vapid_claims_email = os.getenv("VAPID_CLAIMS_EMAIL", "mailto:admin@example.com")
+    if not vapid_private:
+        logger.warning("VAPID_PRIVATE_KEY not set, skipping push")
+        return False
+
+    sub_info = {
+        "endpoint": subscription_row.endpoint,
+        "keys": {
+            "p256dh": subscription_row.p256dh,
+            "auth": subscription_row.auth,
+        },
+    }
+    try:
+        webpush(
+            subscription_info=sub_info,
+            data=json.dumps(payload),
+            vapid_private_key=vapid_private,
+            vapid_claims={"sub": vapid_claims_email},
+        )
+        return True
+    except WebPushException as e:
+        logger.error(f"Push failed for {subscription_row.endpoint[:40]}...: {e}")
+        return False
+
+
+def check_and_send_followup_nudges(db: Session):
+    """Check for contacts needing follow-up and push notifications."""
+    now = datetime.utcnow()
+    upcoming = now + timedelta(hours=2)
+
+    due_contacts = db.query(models.Contact).filter(
+        models.Contact.next_followup_at != None,
+        models.Contact.next_followup_at <= upcoming,
+        models.Contact.status == "active",
+    ).all()
+
+    if not due_contacts:
+        return {"sent": 0, "contacts": []}
+
+    subscriptions = db.query(models.PushSubscription).all()
+    if not subscriptions:
+        return {"sent": 0, "contacts": [c.name for c in due_contacts]}
+
+    sent_count = 0
+    contact_names = []
+    for contact in due_contacts:
+        display_name = contact.name_zh or contact.name
+        priority = contact.followup_priority or "normal"
+        tag = "urgent" if priority == "urgent" else "followup"
+
+        payload = {
+            "title": f"Follow-up: {display_name}",
+            "body": f"{display_name} needs follow-up ({priority})",
+            "tag": tag,
+            "data": {
+                "url": f"/contacts",
+                "contactId": contact.id,
+            },
+        }
+
+        for sub in subscriptions:
+            if _send_push(sub, payload):
+                sent_count += 1
+        contact_names.append(display_name)
+
+    return {"sent": sent_count, "contacts": contact_names}

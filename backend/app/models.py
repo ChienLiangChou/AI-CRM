@@ -152,3 +152,14 @@ class Interaction(Base):
     
     contact = relationship("Contact", back_populates="interactions")
     property = relationship("Property")
+
+
+class PushSubscription(Base):
+    """Web Push subscription for notifications."""
+    __tablename__ = "push_subscriptions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    endpoint = Column(String, unique=True, index=True)
+    p256dh = Column(String)
+    auth = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)

@@ -1,5 +1,6 @@
 import { NavLink } from 'react-router-dom';
 import { LayoutDashboard, Users, Trello, Sparkles } from 'lucide-react';
+import NotificationToggle from './NotificationToggle';
 import './Layout.css';
 
 const Layout = ({ children }: { children: React.ReactNode }) => {
@@ -36,7 +37,8 @@ const Layout = ({ children }: { children: React.ReactNode }) => {
                 </nav>
 
                 <div className="sidebar-footer">
-                    <div className="user-profile">
+                    <NotificationToggle />
+                    <div className="user-profile mt-3">
                         <div className="avatar">KC</div>
                         <div className="user-info">
                             <span className="name">Kevin Chou</span>

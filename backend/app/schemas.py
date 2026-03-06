@@ -226,3 +226,18 @@ class MaintenanceReportResponse(BaseModel):
     vendor_notified: bool
     issue_type: Optional[str] = None
     urgency: Optional[str] = None
+
+# --- Push Notification Schemas ---
+class PushSubscriptionKeys(BaseModel):
+    p256dh: str
+    auth: str
+
+class PushSubscriptionRequest(BaseModel):
+    endpoint: str
+    keys: PushSubscriptionKeys
+
+class PushUnsubscribeRequest(BaseModel):
+    endpoint: str
+
+class VapidPublicKeyResponse(BaseModel):
+    public_key: str
