@@ -73,6 +73,20 @@ def create_contact_interaction(contact_id: int, interaction: schemas.Interaction
         raise HTTPException(status_code=404, detail="Contact not found")
     return crud.create_contact_interaction(db=db, contact_id=contact_id, interaction=interaction)
 
+@app.get("/api/contacts/{contact_id}/interactions", response_model=List[schemas.Interaction])
+def read_contact_interactions(contact_id: int, db: Session = Depends(get_db)):
+    db_contact = crud.get_contact(db, contact_id=contact_id)
+    if not db_contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    return crud.get_contact_interactions(db=db, contact_id=contact_id)
+
+@app.patch("/api/contacts/{contact_id}/stage", response_model=schemas.Contact)
+def update_contact_stage(contact_id: int, req: schemas.StageUpdateRequest, db: Session = Depends(get_db)):
+    db_contact = crud.update_contact_stage(db=db, contact_id=contact_id, stage_id=req.stage_id)
+    if not db_contact:
+        raise HTTPException(status_code=404, detail="Contact not found")
+    return db_contact
+
 # --- AI Features ---
 @app.get("/api/smart-search", response_model=schemas.SmartSearchResult)
 def smart_search(q: str, db: Session = Depends(get_db)):
@@ -96,3 +110,58 @@ def enrich_profile(contact_id: int, db: Session = Depends(get_db)):
 def scout_for_leads(req: schemas.ScoutRequest, db: Session = Depends(get_db)):
     return crud.scout_leads(db, req.query)
 
+# --- AI Dashboard Intelligence ---
+@app.get("/api/dashboard/nudges", response_model=schemas.NudgesResponse)
+def get_smart_nudges(db: Session = Depends(get_db)):
+    return crud.generate_smart_nudges(db)
+
+@app.get("/api/dashboard/segments", response_model=schemas.SegmentsResponse)
+def get_segments(db: Session = Depends(get_db)):
+    return crud.auto_segment_contacts(db)
+
+@app.get("/api/dashboard/insights", response_model=schemas.PipelineInsightsResponse)
+def get_pipeline_insights(db: Session = Depends(get_db)):
+    return crud.generate_pipeline_insights(db)
+
+# --- Properties ---
+@app.get("/api/properties", response_model=List[schemas.Property])
+def read_properties(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    return crud.get_properties(db, skip=skip, limit=limit)
+
+@app.get("/api/properties/{property_id}", response_model=schemas.Property)
+def read_property(property_id: int, db: Session = Depends(get_db)):
+    prop = crud.get_property(db, property_id)
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    return prop
+
+@app.post("/api/properties", response_model=schemas.Property)
+def create_property(prop: schemas.PropertyCreate, db: Session = Depends(get_db)):
+    return crud.create_property(db=db, prop=prop)
+
+@app.put("/api/properties/{property_id}", response_model=schemas.Property)
+def update_property(property_id: int, prop: schemas.PropertyUpdate, db: Session = Depends(get_db)):
+    db_prop = crud.update_property(db=db, property_id=property_id, prop=prop)
+    if not db_prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    return db_prop
+
+@app.delete("/api/properties/{property_id}", response_model=schemas.Property)
+def delete_property(property_id: int, db: Session = Depends(get_db)):
+    db_prop = crud.delete_property(db=db, property_id=property_id)
+    if not db_prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    return db_prop
+
+# --- Workflows ---
+@app.post("/api/workflow/voice-memo", response_model=schemas.VoiceMemoResponse)
+def voice_memo_workflow(req: schemas.VoiceMemoRequest, db: Session = Depends(get_db)):
+    return crud.workflow_voice_memo(db, req.audio_text)
+
+@app.post("/api/workflow/market-trigger", response_model=schemas.MarketTriggerResponse)
+def market_trigger_workflow(req: schemas.MarketTriggerRequest, db: Session = Depends(get_db)):
+    return crud.workflow_market_trigger(db, req.trigger, req.source)
+
+@app.post("/api/workflow/maintenance-report", response_model=schemas.MaintenanceReportResponse)
+def maintenance_report_workflow(req: schemas.MaintenanceReportRequest, db: Session = Depends(get_db)):
+    return crud.workflow_maintenance_report(db, req.tenant_email, req.message, req.photos)

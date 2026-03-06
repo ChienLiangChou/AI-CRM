@@ -1,0 +1,23 @@
+.dashboard-page {
+    max-width: 1200px;
+}
+
+.dashboard-page .glass-panel {
+    border-radius: 16px;
+    overflow: hidden;
+}
+
+/* Nudge cards */
+.dashboard-page .nudge-card {
+    transition: background 0.2s;
+}
+
+/* Segment bars animation */
+.dashboard-page .h-2 {
+    transition: width 0.6s ease-out;
+}
+
+/* Pipeline insight bars */
+.dashboard-page .h-3 {
+    transition: width 0.8s ease-out;
+}

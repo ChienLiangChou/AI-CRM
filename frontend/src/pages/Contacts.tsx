@@ -3,6 +3,7 @@ import { crmService } from '../services/api';
 import type { Contact, SmartSearchResult } from '../services/api';
 import { Sparkles, Filter, Plus } from 'lucide-react';
 import ContactModal from '../components/ContactModal';
+import AddContactModal from '../components/AddContactModal';
 import './Contacts.css';
 
 const Contacts = () => {
@@ -11,6 +12,7 @@ const Contacts = () => {
     const [searchResult, setSearchResult] = useState<SmartSearchResult | null>(null);
     const [loading, setLoading] = useState(false);
     const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
+    const [showAddModal, setShowAddModal] = useState(false);
 
     useEffect(() => {
         loadContacts();
@@ -60,6 +62,15 @@ const Contacts = () => {
         setSelectedContact(updated);
     };
 
+    const handleDeleteContact = (contactId: number) => {
+        setContacts(contacts.filter(c => c.id !== contactId));
+        setSelectedContact(null);
+    };
+
+    const handleContactCreated = (newContact: Contact) => {
+        setContacts(prev => [newContact, ...prev]);
+    };
+
     return (
         <div className="contacts-page animate-fade-in">
             <div className="page-header">
@@ -67,7 +78,7 @@ const Contacts = () => {
                     <h1>Contacts & Leads</h1>
                     <p className="subtitle">Manage and search your pipeline with AI.</p>
                 </div>
-                <button className="btn btn-primary">
+                <button className="btn btn-primary" onClick={() => setShowAddModal(true)}>
                     <Plus size={18} /> Add Contact
                 </button>
             </div>
@@ -117,7 +128,12 @@ const Contacts = () => {
                                         <div className="w-8 h-8 rounded-full bg-indigo-500/20 text-indigo-300 flex items-center justify-center font-bold text-xs">
                                             {contact.name.charAt(0)}
                                         </div>
-                                        {contact.name}
+                                        <div>
+                                            <div>{contact.name}</div>
+                                            {contact.tags && (
+                                                <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-white/5 text-gray-400">{contact.tags}</span>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
                                 <div className="col-span-3 text-sm text-gray-300">
@@ -145,6 +161,14 @@ const Contacts = () => {
                     contact={selectedContact}
                     onClose={() => setSelectedContact(null)}
                     onUpdate={handleUpdateContact}
+                    onDelete={handleDeleteContact}
+                />
+            )}
+
+            {showAddModal && (
+                <AddContactModal
+                    onClose={() => setShowAddModal(false)}
+                    onCreated={handleContactCreated}
                 />
             )}
         </div>
