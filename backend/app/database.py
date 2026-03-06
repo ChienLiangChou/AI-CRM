@@ -4,11 +4,9 @@ from sqlalchemy.ext.declarative import declarative_base
 
 import os
 
-# Use Render's persistent disk mount path (/data) if running on Render, otherwise local directory
-if os.environ.get("RENDER"):
-    SQLALCHEMY_DATABASE_URL = "sqlite:////data/sql_app.db"
-else:
-    SQLALCHEMY_DATABASE_URL = "sqlite:///./sql_app.db"
+# Use persistent disk if mounted, otherwise local directory
+data_dir = "/data" if os.path.isdir("/data") else "."
+SQLALCHEMY_DATABASE_URL = f"sqlite:///{data_dir}/sql_app.db"
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
