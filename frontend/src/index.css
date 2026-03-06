@@ -136,6 +136,7 @@ h3 {
   padding: 2rem;
   margin-left: var(--sidebar-width);
   max-width: 1400px;
+  width: 100%;
 }
 
 /* Buttons */

@@ -74,26 +74,28 @@ const Dashboard = () => {
     if (loading) return <div className="p-8 text-center text-gray-400"><div className="spinner mx-auto mb-3"></div>Loading AI Dashboard...</div>;
 
     return (
-        <div className="dashboard-page animate-fade-in p-6">
-            <header className="mb-8 flex justify-between items-start">
-                <div>
-                    <h1 className="text-3xl font-bold mb-2">Welcome back, <span className="text-gradient">Kevin</span></h1>
-                    <p className="text-gray-400">Here is what's happening in your pipeline today.</p>
+        <div className="dashboard-page animate-fade-in p-2 sm:p-6">
+            <header className="mb-6 sm:mb-8">
+                <div className="flex justify-between items-start gap-3">
+                    <div className="min-w-0">
+                        <h1 className="text-xl sm:text-3xl font-bold mb-1 sm:mb-2">Welcome back, <span className="text-gradient">Kevin</span></h1>
+                        <p className="text-gray-400 text-sm sm:text-base">Here is what's happening in your pipeline today.</p>
+                    </div>
+                    <button onClick={loadAll} className="btn btn-ghost text-xs sm:text-sm gap-2 flex items-center shrink-0">
+                        <RefreshCw size={14} /> Refresh
+                    </button>
                 </div>
-                <button onClick={loadAll} className="btn btn-ghost text-sm gap-2 flex items-center">
-                    <RefreshCw size={14} /> Refresh
-                </button>
             </header>
 
             {/* Voice Memo Quick Input */}
-            <div className="glass-panel mb-8">
-                <div className="p-5 border-b border-white/10">
-                    <h2 className="text-lg font-bold flex items-center gap-2">
+            <div className="glass-panel mb-6 sm:mb-8">
+                <div className="p-4 sm:p-5 border-b border-white/10">
+                    <h2 className="text-base sm:text-lg font-bold flex items-center gap-2">
                         <Mic size={18} className="text-green-400" /> 語音備忘錄 Quick Entry
                     </h2>
                 </div>
-                <div className="p-5">
-                    <div className="flex gap-3">
+                <div className="p-4 sm:p-5">
+                    <div className="flex flex-col sm:flex-row gap-3">
                         <textarea
                             value={memoText}
                             onChange={(e) => setMemoText(e.target.value)}
@@ -153,40 +155,40 @@ const Dashboard = () => {
             </div>
 
             {/* Metrics Row */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                <div className="glass-card flex items-center gap-4">
-                    <div className="p-3 bg-blue-500/20 rounded-xl text-blue-400">
-                        <Users size={28} />
+            <div className="grid grid-cols-3 gap-3 sm:gap-6 mb-6 sm:mb-8">
+                <div className="glass-card flex flex-col sm:flex-row items-center gap-2 sm:gap-4 text-center sm:text-left p-3 sm:p-6">
+                    <div className="p-2 sm:p-3 bg-blue-500/20 rounded-xl text-blue-400">
+                        <Users size={22} className="sm:w-7 sm:h-7" />
                     </div>
                     <div>
-                        <p className="text-sm text-gray-400 font-medium">Total Contacts</p>
-                        <h3 className="text-2xl font-bold">{totalLeads}</h3>
+                        <p className="text-[10px] sm:text-sm text-gray-400 font-medium">Total</p>
+                        <h3 className="text-xl sm:text-2xl font-bold">{totalLeads}</h3>
                     </div>
                 </div>
 
-                <div className="glass-card flex items-center gap-4 border-l-4 border-l-red-500 hover:border-l-red-400 transition-colors">
-                    <div className="p-3 bg-red-500/20 rounded-xl text-red-500">
-                        <Target size={28} />
+                <div className="glass-card flex flex-col sm:flex-row items-center gap-2 sm:gap-4 text-center sm:text-left p-3 sm:p-6 border-l-2 sm:border-l-4 border-l-red-500">
+                    <div className="p-2 sm:p-3 bg-red-500/20 rounded-xl text-red-500">
+                        <Target size={22} className="sm:w-7 sm:h-7" />
                     </div>
                     <div>
-                        <p className="text-sm text-gray-400 font-medium">Hot Leads ({'>'}80 Score)</p>
-                        <h3 className="text-2xl font-bold">{hotLeads}</h3>
+                        <p className="text-[10px] sm:text-sm text-gray-400 font-medium">Hot Leads</p>
+                        <h3 className="text-xl sm:text-2xl font-bold">{hotLeads}</h3>
                     </div>
                 </div>
 
-                <div className="glass-card flex items-center gap-4 border-l-4 border-l-purple-500">
-                    <div className="p-3 bg-purple-500/20 rounded-xl text-purple-400">
-                        <TrendingUp size={28} />
+                <div className="glass-card flex flex-col sm:flex-row items-center gap-2 sm:gap-4 text-center sm:text-left p-3 sm:p-6 border-l-2 sm:border-l-4 border-l-purple-500">
+                    <div className="p-2 sm:p-3 bg-purple-500/20 rounded-xl text-purple-400">
+                        <TrendingUp size={22} className="sm:w-7 sm:h-7" />
                     </div>
                     <div>
-                        <p className="text-sm text-gray-400 font-medium">Avg Lead Score</p>
-                        <h3 className="text-2xl font-bold">{avgScore}</h3>
+                        <p className="text-[10px] sm:text-sm text-gray-400 font-medium">Avg Score</p>
+                        <h3 className="text-xl sm:text-2xl font-bold">{avgScore}</h3>
                     </div>
                 </div>
             </div>
 
             {/* Two-column layout: Nudges + Segments */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6 mb-6 sm:mb-8">
 
                 {/* AI Smart Nudges */}
                 <div className="glass-panel">

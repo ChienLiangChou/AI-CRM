@@ -3,10 +3,18 @@ import { LayoutDashboard, Users, Trello, Sparkles } from 'lucide-react';
 import NotificationToggle from './NotificationToggle';
 import './Layout.css';
 
+const navItems = [
+    { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
+    { to: '/contacts', icon: Users, label: 'Contacts' },
+    { to: '/pipeline', icon: Trello, label: 'Pipeline' },
+    { to: '/find-leads', icon: Sparkles, label: 'Leads' },
+];
+
 const Layout = ({ children }: { children: React.ReactNode }) => {
     return (
         <div className="app-container">
-            <aside className="sidebar glass-panel">
+            {/* Desktop sidebar */}
+            <aside className="sidebar glass-panel desktop-only">
                 <div className="sidebar-header">
                     <div className="logo">
                         <Sparkles className="logo-icon" size={28} />
@@ -15,25 +23,14 @@ const Layout = ({ children }: { children: React.ReactNode }) => {
                 </div>
 
                 <nav className="sidebar-nav">
-                    <NavLink to="/dashboard" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
-                        <LayoutDashboard size={20} />
-                        <span>Dashboard</span>
-                    </NavLink>
-
-                    <NavLink to="/contacts" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
-                        <Users size={20} />
-                        <span>Contacts</span>
-                    </NavLink>
-
-                    <NavLink to="/pipeline" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
-                        <Trello size={20} />
-                        <span>Pipeline</span>
-                    </NavLink>
-
-                    <NavLink to="/find-leads" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''} mt-4 !text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/10`}>
-                        <Sparkles size={20} />
-                        <span>Find Leads (AI)</span>
-                    </NavLink>
+                    {navItems.map(({ to, icon: Icon, label }) => (
+                        <NavLink key={to} to={to} className={({ isActive }) =>
+                            `nav-item ${isActive ? 'active' : ''}${to === '/find-leads' ? ' mt-4 !text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/10' : ''}`
+                        }>
+                            <Icon size={20} />
+                            <span>{label}</span>
+                        </NavLink>
+                    ))}
                 </nav>
 
                 <div className="sidebar-footer">
@@ -48,9 +45,30 @@ const Layout = ({ children }: { children: React.ReactNode }) => {
                 </div>
             </aside>
 
+            {/* Mobile top bar */}
+            <header className="mobile-topbar mobile-only">
+                <div className="logo">
+                    <Sparkles className="logo-icon" size={20} />
+                    <span className="text-gradient text-lg font-extrabold">AI CRM</span>
+                </div>
+                <NotificationToggle />
+            </header>
+
             <main className="main-content">
                 {children}
             </main>
+
+            {/* Mobile bottom tab bar */}
+            <nav className="mobile-tab-bar mobile-only">
+                {navItems.map(({ to, icon: Icon, label }) => (
+                    <NavLink key={to} to={to} className={({ isActive }) =>
+                        `tab-item ${isActive ? 'tab-active' : ''}`
+                    }>
+                        <Icon size={20} />
+                        <span>{label}</span>
+                    </NavLink>
+                ))}
+            </nav>
         </div>
     );
 };
