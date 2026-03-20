@@ -36,7 +36,7 @@ self.addEventListener("fetch", (event) => {
 });
 
 self.addEventListener("push", (event) => {
-  let data = { title: "AI CRM", body: "You have a new notification" };
+  let data = { title: "SKC Agent OS", body: "You have a new notification" };
   try {
     data = event.data.json();
   } catch {
@@ -50,7 +50,7 @@ self.addEventListener("push", (event) => {
     tag: data.tag || "default",
     renotify: true,
     data: data.data || {},
-    actions: [{ action: "open", title: "Open CRM" }],
+    actions: [{ action: "open", title: "Open SKC Agent OS" }],
   };
 
   event.waitUntil(self.registration.showNotification(data.title, options));

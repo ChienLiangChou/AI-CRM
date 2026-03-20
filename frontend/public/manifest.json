@@ -1,7 +1,7 @@
 {
-  "name": "AI CRM — Real Estate",
-  "short_name": "AI CRM",
-  "description": "AI-powered real estate CRM with smart follow-ups and push notifications",
+  "name": "SKC Agent OS",
+  "short_name": "SKC Agent OS",
+  "description": "SKC Agent OS for real estate operations, smart follow-ups, and push notifications",
   "start_url": "/dashboard",
   "display": "standalone",
   "background_color": "#0f172a",

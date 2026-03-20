@@ -8,6 +8,7 @@ const navItems = [
     { to: '/contacts', icon: Users, label: 'Contacts' },
     { to: '/pipeline', icon: Trello, label: 'Pipeline' },
     { to: '/find-leads', icon: Sparkles, label: 'Leads' },
+    { to: '/agents', icon: Sparkles, label: 'Agents' },
 ];
 
 const Layout = ({ children }: { children: React.ReactNode }) => {
@@ -18,7 +19,7 @@ const Layout = ({ children }: { children: React.ReactNode }) => {
                 <div className="sidebar-header">
                     <div className="logo">
                         <Sparkles className="logo-icon" size={28} />
-                        <span className="text-gradient">AI CRM</span>
+                        <span className="text-gradient">SKC Agent OS</span>
                     </div>
                 </div>
 
@@ -49,7 +50,7 @@ const Layout = ({ children }: { children: React.ReactNode }) => {
             <header className="mobile-topbar mobile-only">
                 <div className="logo">
                     <Sparkles className="logo-icon" size={20} />
-                    <span className="text-gradient text-lg font-extrabold">AI CRM</span>
+                    <span className="text-gradient text-lg font-extrabold">SKC Agent OS</span>
                 </div>
                 <NotificationToggle />
             </header>

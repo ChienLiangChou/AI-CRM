@@ -10,14 +10,24 @@ from typing import List
 
 from . import crud, models, schemas
 from .database import engine, get_db, SessionLocal
+from .agents import router as agents_router
+from .agents import models as agent_models
 
 logger = logging.getLogger(__name__)
 
+# Ensure both CRM and agent tables exist
 models.Base.metadata.create_all(bind=engine)
+agent_models.Base.metadata.create_all(bind=engine)
 
 
 async def _nudge_loop():
-    """Background task: check for follow-up nudges every 30 minutes."""
+    """
+    Legacy background task: check for follow-up nudges every 30 minutes.
+
+    This loop is separate from the review-only agent layer. It continues to
+    power the existing push reminder behavior and does not create AgentRun or
+    AgentApproval records.
+    """
     while True:
         await asyncio.sleep(1800)
         try:
@@ -30,13 +40,30 @@ async def _nudge_loop():
             logger.error(f"Nudge loop error: {e}")
 
 
+async def _agent_worker_loop():
+    """
+    Background task placeholder for agent processing.
+
+    In this MVP phase, the worker is intentionally conservative and does not
+    perform any external side effects. It can be extended in later phases
+    to manage queued/failed agent runs if needed.
+    """
+    while True:
+        # Sleep for a while; future phases can add lightweight maintenance here.
+        await asyncio.sleep(300)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task = asyncio.create_task(_nudge_loop())
-    yield
-    task.cancel()
+    nudge_task = asyncio.create_task(_nudge_loop())
+    agent_task = asyncio.create_task(_agent_worker_loop())
+    try:
+        yield
+    finally:
+        nudge_task.cancel()
+        agent_task.cancel()
 
-app = FastAPI(title="AI CRM API", lifespan=lifespan)
+app = FastAPI(title="SKC Agent OS API", lifespan=lifespan)
 
 # Allow frontend requests
 app.add_middleware(
@@ -47,9 +74,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Agent routes (additive-only, do not change existing APIs)
+app.include_router(agents_router.router, prefix="/api/agents", tags=["agents"])
+
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to AI CRM API"}
+    return {"message": "Welcome to SKC Agent OS API"}
 
 
 # --- Pipeline Stages ---
@@ -221,7 +251,7 @@ def push_test(db: Session = Depends(get_db)):
     sent = 0
     for sub in subs:
         payload = {
-            "title": "AI CRM Test",
+            "title": "SKC Agent OS Test",
             "body": "Push notifications are working!",
             "tag": "test",
             "data": {"url": "/dashboard"},
