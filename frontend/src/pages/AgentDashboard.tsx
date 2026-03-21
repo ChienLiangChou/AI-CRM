@@ -7,6 +7,7 @@ import OperationsCompliancePanel from '../components/agents/OperationsCompliance
 import BuyerMatchPanel from '../components/agents/BuyerMatchPanel';
 import StrategyCoordinationPanel from '../components/agents/StrategyCoordinationPanel';
 import MlsAuthPanel from '../components/agents/MlsAuthPanel';
+import DailyMarketScanPanel from '../components/agents/DailyMarketScanPanel';
 import type {
     AgentRun,
     AgentApproval,
@@ -515,6 +516,7 @@ const AgentDashboard = () => {
             <BuyerMatchPanel />
             <OperationsCompliancePanel />
             <StrategyCoordinationPanel />
+            <DailyMarketScanPanel />
             <MlsAuthPanel />
         </div>
     );
