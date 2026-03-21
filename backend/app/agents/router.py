@@ -11,6 +11,7 @@ from . import (
     buyer_match,
     conversation_closer,
     listing_cma,
+    mls_auth,
     models,
     ops,
     orchestrator,
@@ -21,6 +22,10 @@ from . import (
 
 
 router = APIRouter()
+
+
+def _bad_request_from_value_error(error: ValueError) -> HTTPException:
+    return HTTPException(status_code=400, detail=str(error))
 
 
 def _serialize_conversation_closer_result(raw_result: str | None):
@@ -227,6 +232,117 @@ def list_run_audit_logs(
         .limit(limit)
     )
     return q.all()
+
+
+@router.get(
+    "/mls-auth/status",
+    response_model=agent_schemas.MlsAuthStatusResponse,
+    summary="Get current Authenticated MLS access status.",
+)
+def get_mls_auth_status(
+    provider: agent_schemas.MlsAuthProviderKey = "stratus_authenticated",
+    db: Session = Depends(get_db),
+):
+    """
+    Return the current internal-only, manual-simulated MLS auth/session status.
+
+    This endpoint does not execute browser login, collect secrets, or bypass OTP.
+    """
+    return mls_auth.load_persisted_status(db, provider=provider)
+
+
+@router.get(
+    "/mls-auth/history",
+    response_model=agent_schemas.MlsAuthHistoryResponse,
+    summary="Get persisted Authenticated MLS attempt history.",
+)
+def get_mls_auth_history(
+    provider: agent_schemas.MlsAuthProviderKey = "stratus_authenticated",
+    db: Session = Depends(get_db),
+):
+    """
+    Return persisted MLS auth attempts newest-first.
+
+    Safe empty collections are returned when no attempts exist yet.
+    """
+    return mls_auth.load_persisted_history(db, provider=provider)
+
+
+@router.get(
+    "/mls-auth/audit-logs",
+    response_model=List[agent_schemas.AgentAuditLog],
+    summary="Get chronological Authenticated MLS audit logs.",
+)
+def list_mls_auth_audit_logs(
+    provider: agent_schemas.MlsAuthProviderKey = "stratus_authenticated",
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    """
+    Return chronological MLS auth lifecycle audit logs for the provider.
+
+    Safe empty collections are returned when no auth task exists yet.
+    """
+    task = (
+        db.query(models.AgentTask)
+        .filter(
+            models.AgentTask.agent_type == "mls_auth",
+            models.AgentTask.subject_type == provider,
+        )
+        .first()
+    )
+    if task is None:
+        return []
+
+    return (
+        db.query(models.AgentAuditLog)
+        .filter(models.AgentAuditLog.task_id == task.id)
+        .order_by(models.AgentAuditLog.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+
+
+@router.post(
+    "/mls-auth/start",
+    response_model=agent_schemas.MlsAuthStartResponse,
+    summary="Start an internal-only Authenticated MLS login attempt.",
+)
+def start_mls_auth_attempt(
+    request: agent_schemas.MlsAuthStartRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Begin an internal-only, manual-simulated MLS auth attempt.
+
+    This endpoint may reuse an existing in-progress or awaiting-OTP attempt
+    and will not create parallel active attempts for the same provider.
+    """
+    try:
+        return mls_auth.start_auth_attempt_persisted(db, request=request)
+    except ValueError as error:
+        raise _bad_request_from_value_error(error) from error
+
+
+@router.post(
+    "/mls-auth/submit-otp",
+    response_model=agent_schemas.MlsAuthSubmitOtpResponse,
+    summary="Submit OTP for an existing Authenticated MLS attempt.",
+)
+def submit_mls_auth_otp(
+    request: agent_schemas.MlsAuthSubmitOtpRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Resume an existing MLS auth attempt with a human-supplied OTP.
+
+    OTP submission is bound to the provider, attempt reference, and
+    session reference. OTP values are never persisted.
+    """
+    try:
+        return mls_auth.submit_otp_for_attempt_persisted(db, request=request)
+    except ValueError as error:
+        raise _bad_request_from_value_error(error) from error
 
 
 @router.get(

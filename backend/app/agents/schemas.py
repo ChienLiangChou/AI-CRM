@@ -10,6 +10,7 @@ AgentType = Literal[
     "listing_cma",
     "buyer_match",
     "strategy_coordination",
+    "mls_auth",
 ]
 TaskStatus = Literal[
     "queued",
@@ -331,6 +332,92 @@ class BuyerMatchLatestResponse(BaseModel):
     status: Optional[RunStatus] = None
     error: Optional[str] = None
     result: Optional[BuyerMatchResultResponse] = None
+
+
+MlsAuthProviderKey = Literal["stratus_authenticated"]
+MlsAuthState = Literal[
+    "available",
+    "unauthenticated",
+    "auth_in_progress",
+    "awaiting_otp",
+    "expired",
+    "failed",
+]
+MlsAuthFailureReason = Literal[
+    "invalid_credentials",
+    "otp_invalid",
+    "otp_expired",
+    "otp_timeout",
+    "session_expired",
+    "provider_unavailable",
+    "login_page_changed",
+    "network_error",
+    "unknown_auth_failure",
+]
+MlsAuthMode = Literal["manual_simulated"]
+
+
+class MlsAuthStartRequest(BaseModel):
+    provider: MlsAuthProviderKey = "stratus_authenticated"
+    mode: MlsAuthMode = "manual_simulated"
+
+
+class MlsAuthSubmitOtpRequest(BaseModel):
+    provider: MlsAuthProviderKey = "stratus_authenticated"
+    attempt_reference: str
+    session_reference: str
+    otp_code: str
+
+
+class MlsAuthStatusResponse(BaseModel):
+    provider: MlsAuthProviderKey
+    state: MlsAuthState = "unauthenticated"
+    available: bool = False
+    internal_only: bool = True
+    mode: MlsAuthMode = "manual_simulated"
+    last_checked_at: Optional[datetime] = None
+    last_success_at: Optional[datetime] = None
+    last_failure_at: Optional[datetime] = None
+    failure_reason: Optional[MlsAuthFailureReason] = None
+    session_reference: Optional[str] = None
+    active_attempt_reference: Optional[str] = None
+    otp_requested_at: Optional[datetime] = None
+    otp_timeout_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+
+
+class MlsAuthAttemptRecord(BaseModel):
+    attempt_reference: str
+    provider: MlsAuthProviderKey
+    state: MlsAuthState
+    internal_only: bool = True
+    mode: MlsAuthMode = "manual_simulated"
+    session_reference: str
+    started_at: datetime
+    updated_at: datetime
+    finished_at: Optional[datetime] = None
+    otp_required: bool = False
+    otp_requested_at: Optional[datetime] = None
+    otp_timeout_at: Optional[datetime] = None
+    otp_submitted_at: Optional[datetime] = None
+    failure_reason: Optional[MlsAuthFailureReason] = None
+
+
+class MlsAuthStartResponse(BaseModel):
+    status: MlsAuthStatusResponse
+    attempt: MlsAuthAttemptRecord
+    reused_existing_attempt: bool = False
+
+
+class MlsAuthSubmitOtpResponse(BaseModel):
+    status: MlsAuthStatusResponse
+    attempt: MlsAuthAttemptRecord
+    otp_accepted: bool = False
+
+
+class MlsAuthHistoryResponse(BaseModel):
+    current_status: MlsAuthStatusResponse
+    attempts: list[MlsAuthAttemptRecord] = []
 
 
 StrategyCoordinationSourceType = Literal["external", "internal"]

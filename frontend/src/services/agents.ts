@@ -251,6 +251,89 @@ export interface BuyerMatchLatestResponse {
     result: BuyerMatchResultResponse | null;
 }
 
+export type MlsAuthProviderKey = 'stratus_authenticated';
+export type MlsAuthState =
+    | 'available'
+    | 'unauthenticated'
+    | 'auth_in_progress'
+    | 'awaiting_otp'
+    | 'expired'
+    | 'failed';
+export type MlsAuthFailureReason =
+    | 'invalid_credentials'
+    | 'otp_invalid'
+    | 'otp_expired'
+    | 'otp_timeout'
+    | 'session_expired'
+    | 'provider_unavailable'
+    | 'login_page_changed'
+    | 'network_error'
+    | 'unknown_auth_failure';
+export type MlsAuthMode = 'manual_simulated';
+
+export interface MlsAuthStartRequest {
+    provider?: MlsAuthProviderKey;
+    mode?: MlsAuthMode;
+}
+
+export interface MlsAuthSubmitOtpRequest {
+    provider?: MlsAuthProviderKey;
+    attempt_reference: string;
+    session_reference: string;
+    otp_code: string;
+}
+
+export interface MlsAuthStatusResponse {
+    provider: MlsAuthProviderKey;
+    state: MlsAuthState;
+    available: boolean;
+    internal_only: boolean;
+    mode: MlsAuthMode;
+    last_checked_at?: string | null;
+    last_success_at?: string | null;
+    last_failure_at?: string | null;
+    failure_reason?: MlsAuthFailureReason | null;
+    session_reference?: string | null;
+    active_attempt_reference?: string | null;
+    otp_requested_at?: string | null;
+    otp_timeout_at?: string | null;
+    expires_at?: string | null;
+}
+
+export interface MlsAuthAttemptRecord {
+    attempt_reference: string;
+    provider: MlsAuthProviderKey;
+    state: MlsAuthState;
+    internal_only: boolean;
+    mode: MlsAuthMode;
+    session_reference: string;
+    started_at: string;
+    updated_at: string;
+    finished_at?: string | null;
+    otp_required: boolean;
+    otp_requested_at?: string | null;
+    otp_timeout_at?: string | null;
+    otp_submitted_at?: string | null;
+    failure_reason?: MlsAuthFailureReason | null;
+}
+
+export interface MlsAuthStartResponse {
+    status: MlsAuthStatusResponse;
+    attempt: MlsAuthAttemptRecord;
+    reused_existing_attempt: boolean;
+}
+
+export interface MlsAuthSubmitOtpResponse {
+    status: MlsAuthStatusResponse;
+    attempt: MlsAuthAttemptRecord;
+    otp_accepted: boolean;
+}
+
+export interface MlsAuthHistoryResponse {
+    current_status: MlsAuthStatusResponse;
+    attempts: MlsAuthAttemptRecord[];
+}
+
 export interface StrategyCoordinationListingReference {
     listing_ref: string;
     property_id?: number | null;
@@ -652,6 +735,89 @@ const normalizeBuyerMatchLatest = (
         status: typeof value?.status === 'string' ? value.status : null,
         error: typeof value?.error === 'string' ? value.error : null,
         result: normalizeBuyerMatchResult(value?.result),
+    };
+};
+
+const normalizeMlsAuthStatus = (
+    value: Partial<MlsAuthStatusResponse> | null | undefined,
+): MlsAuthStatusResponse => {
+    return {
+        provider: value?.provider === 'stratus_authenticated' ? value.provider : 'stratus_authenticated',
+        state:
+            value?.state === 'available' ||
+            value?.state === 'auth_in_progress' ||
+            value?.state === 'awaiting_otp' ||
+            value?.state === 'expired' ||
+            value?.state === 'failed'
+                ? value.state
+                : 'unauthenticated',
+        available: value?.available === true,
+        internal_only: value?.internal_only !== false,
+        mode: 'manual_simulated',
+        last_checked_at:
+            typeof value?.last_checked_at === 'string' ? value.last_checked_at : null,
+        last_success_at:
+            typeof value?.last_success_at === 'string' ? value.last_success_at : null,
+        last_failure_at:
+            typeof value?.last_failure_at === 'string' ? value.last_failure_at : null,
+        failure_reason:
+            typeof value?.failure_reason === 'string' ? value.failure_reason : null,
+        session_reference:
+            typeof value?.session_reference === 'string' ? value.session_reference : null,
+        active_attempt_reference:
+            typeof value?.active_attempt_reference === 'string'
+                ? value.active_attempt_reference
+                : null,
+        otp_requested_at:
+            typeof value?.otp_requested_at === 'string' ? value.otp_requested_at : null,
+        otp_timeout_at:
+            typeof value?.otp_timeout_at === 'string' ? value.otp_timeout_at : null,
+        expires_at: typeof value?.expires_at === 'string' ? value.expires_at : null,
+    };
+};
+
+const normalizeMlsAuthAttempt = (
+    value: Partial<MlsAuthAttemptRecord> | null | undefined,
+): MlsAuthAttemptRecord => {
+    return {
+        attempt_reference:
+            typeof value?.attempt_reference === 'string' ? value.attempt_reference : 'unknown',
+        provider: value?.provider === 'stratus_authenticated' ? value.provider : 'stratus_authenticated',
+        state:
+            value?.state === 'available' ||
+            value?.state === 'auth_in_progress' ||
+            value?.state === 'awaiting_otp' ||
+            value?.state === 'expired' ||
+            value?.state === 'failed'
+                ? value.state
+                : 'unauthenticated',
+        internal_only: value?.internal_only !== false,
+        mode: 'manual_simulated',
+        session_reference:
+            typeof value?.session_reference === 'string' ? value.session_reference : '',
+        started_at: typeof value?.started_at === 'string' ? value.started_at : '',
+        updated_at: typeof value?.updated_at === 'string' ? value.updated_at : '',
+        finished_at: typeof value?.finished_at === 'string' ? value.finished_at : null,
+        otp_required: value?.otp_required === true,
+        otp_requested_at:
+            typeof value?.otp_requested_at === 'string' ? value.otp_requested_at : null,
+        otp_timeout_at:
+            typeof value?.otp_timeout_at === 'string' ? value.otp_timeout_at : null,
+        otp_submitted_at:
+            typeof value?.otp_submitted_at === 'string' ? value.otp_submitted_at : null,
+        failure_reason:
+            typeof value?.failure_reason === 'string' ? value.failure_reason : null,
+    };
+};
+
+const normalizeMlsAuthHistory = (
+    value: Partial<MlsAuthHistoryResponse> | null | undefined,
+): MlsAuthHistoryResponse => {
+    return {
+        current_status: normalizeMlsAuthStatus(value?.current_status),
+        attempts: ensureArray<Partial<MlsAuthAttemptRecord>>(value?.attempts).map(
+            normalizeMlsAuthAttempt,
+        ),
     };
 };
 
@@ -1111,6 +1277,56 @@ export const agentsService = {
                 params: { limit },
             },
         );
+        return ensureArray<AgentAuditLog>(res.data);
+    },
+
+    startMlsAuthAttempt: async (
+        payload: MlsAuthStartRequest = { provider: 'stratus_authenticated', mode: 'manual_simulated' },
+    ): Promise<MlsAuthStartResponse> => {
+        const res = await api.post<MlsAuthStartResponse>('/agents/mls-auth/start', payload);
+        return {
+            status: normalizeMlsAuthStatus(res.data?.status),
+            attempt: normalizeMlsAuthAttempt(res.data?.attempt),
+            reused_existing_attempt: res.data?.reused_existing_attempt === true,
+        };
+    },
+
+    submitMlsAuthOtp: async (
+        payload: MlsAuthSubmitOtpRequest,
+    ): Promise<MlsAuthSubmitOtpResponse> => {
+        const res = await api.post<MlsAuthSubmitOtpResponse>('/agents/mls-auth/submit-otp', payload);
+        return {
+            status: normalizeMlsAuthStatus(res.data?.status),
+            attempt: normalizeMlsAuthAttempt(res.data?.attempt),
+            otp_accepted: res.data?.otp_accepted === true,
+        };
+    },
+
+    getMlsAuthStatus: async (
+        provider: MlsAuthProviderKey = 'stratus_authenticated',
+    ): Promise<MlsAuthStatusResponse> => {
+        const res = await api.get<MlsAuthStatusResponse>('/agents/mls-auth/status', {
+            params: { provider },
+        });
+        return normalizeMlsAuthStatus(res.data);
+    },
+
+    getMlsAuthHistory: async (
+        provider: MlsAuthProviderKey = 'stratus_authenticated',
+    ): Promise<MlsAuthHistoryResponse> => {
+        const res = await api.get<MlsAuthHistoryResponse>('/agents/mls-auth/history', {
+            params: { provider },
+        });
+        return normalizeMlsAuthHistory(res.data);
+    },
+
+    getMlsAuthAuditLogs: async (
+        provider: MlsAuthProviderKey = 'stratus_authenticated',
+        limit = 100,
+    ): Promise<AgentAuditLog[]> => {
+        const res = await api.get<AgentAuditLog[]>('/agents/mls-auth/audit-logs', {
+            params: { provider, limit },
+        });
         return ensureArray<AgentAuditLog>(res.data);
     },
 
