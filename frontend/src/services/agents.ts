@@ -334,6 +334,170 @@ export interface MlsAuthHistoryResponse {
     attempts: MlsAuthAttemptRecord[];
 }
 
+export type DailyMarketScanMode =
+    | 'client_match'
+    | 'competitor_watch'
+    | 'full_daily_scan';
+export type DailyMarketScanRunMode = 'manual_preview' | 'simulated_preview';
+export type DailyMarketScanSourcePreference =
+    | 'auto'
+    | 'authenticated_mls_browser_first'
+    | 'public_only';
+export type DailyMarketScanProviderKey =
+    | 'authenticated_mls_browser'
+    | 'public_listing';
+export type DailyMarketScanProviderAuthState =
+    | 'not_required'
+    | 'authenticated'
+    | 'unauthenticated'
+    | 'expired'
+    | 'failed';
+export type DailyMarketScanProviderAvailability = 'available' | 'limited' | 'unavailable';
+export type DailyMarketScanProviderConfidence = 'high' | 'medium' | 'low';
+export type DailyMarketScanProviderAttemptStatus =
+    | 'completed'
+    | 'partial'
+    | 'failed'
+    | 'skipped'
+    | 'unauthenticated'
+    | 'expired';
+export type DailyMarketScanWorkflowStatus =
+    | 'completed'
+    | 'partial'
+    | 'failed'
+    | 'no_providers'
+    | 'no_findings';
+export type DailyMarketScanCompetitorMode =
+    | 'condo_same_building'
+    | 'area_nearby_non_condo';
+
+export interface DailyMarketScanListingReference {
+    listing_ref: string;
+    property_id?: number | null;
+    label?: string | null;
+}
+
+export interface DailyMarketScanRunRequest {
+    scan_mode?: DailyMarketScanMode;
+    run_mode?: DailyMarketScanRunMode;
+    source_preference?: DailyMarketScanSourcePreference;
+    contact_ids: number[];
+    property_ids: number[];
+    listing_refs: DailyMarketScanListingReference[];
+    max_subjects?: number;
+}
+
+export interface DailyMarketScanProviderDescriptor {
+    provider_key: DailyMarketScanProviderKey;
+    display_name: string;
+    authentication_required: boolean;
+    auth_state: DailyMarketScanProviderAuthState;
+    availability: DailyMarketScanProviderAvailability;
+    detail_level: string;
+    confidence_level: DailyMarketScanProviderConfidence;
+    fallback_capable: boolean;
+    notes: string[];
+}
+
+export interface DailyMarketScanFailureMetadata {
+    provider_key?: DailyMarketScanProviderKey | null;
+    code: string;
+    message?: string | null;
+    retryable: boolean;
+    fallback_attempted: boolean;
+    fallback_used: boolean;
+}
+
+export interface DailyMarketScanSourceAttempt {
+    provider_key: DailyMarketScanProviderKey;
+    source_used: string;
+    status: DailyMarketScanProviderAttemptStatus;
+    auth_state: DailyMarketScanProviderAuthState;
+    fallback_used: boolean;
+    failure_metadata: DailyMarketScanFailureMetadata[];
+    notes: string[];
+}
+
+export interface DailyMarketScanFinding {
+    address: string;
+    mls_number?: string | null;
+    property_id?: number | null;
+    listing_ref?: string | null;
+    source_used: string;
+    why_it_matches: string[];
+    tradeoffs: string[];
+    why_relevant: string[];
+    competitor_notes: string[];
+}
+
+export interface DailyMarketScanClientMatchScan {
+    workflow: 'client_match';
+    status: DailyMarketScanWorkflowStatus;
+    contact_id: number;
+    criteria_summary?: string | null;
+    source_attempts: DailyMarketScanSourceAttempt[];
+    findings: DailyMarketScanFinding[];
+    fallback_used: boolean;
+    failure_metadata: DailyMarketScanFailureMetadata[];
+}
+
+export interface DailyMarketScanCompetitorSubject {
+    contact_id?: number | null;
+    property_id?: number | null;
+    listing_ref?: string | null;
+    competitor_mode: DailyMarketScanCompetitorMode;
+}
+
+export interface DailyMarketScanCompetitorWatchScan {
+    workflow: 'competitor_watch';
+    status: DailyMarketScanWorkflowStatus;
+    subject: DailyMarketScanCompetitorSubject;
+    source_attempts: DailyMarketScanSourceAttempt[];
+    findings: DailyMarketScanFinding[];
+    fallback_used: boolean;
+    failure_metadata: DailyMarketScanFailureMetadata[];
+}
+
+export interface DailyMarketScanScopeSummary {
+    requested_subject_count: number;
+    effective_subject_count: number;
+    max_subjects: number;
+    decision: 'accepted' | 'constrained' | 'rejected';
+    notes: string[];
+}
+
+export interface DailyMarketScanExecutionPolicy {
+    mode: 'internal_logging_review_only';
+    can_auto_send: boolean;
+    can_auto_contact_clients: boolean;
+    can_create_client_outputs_without_approval: boolean;
+}
+
+export interface DailyMarketScanSummary {
+    scan_mode: DailyMarketScanMode;
+    run_mode: DailyMarketScanRunMode;
+    scope: DailyMarketScanScopeSummary;
+    provider_order: DailyMarketScanProviderKey[];
+}
+
+export interface DailyMarketScanResultResponse {
+    scan_summary: DailyMarketScanSummary;
+    execution_policy: DailyMarketScanExecutionPolicy;
+    provider_catalog: DailyMarketScanProviderDescriptor[];
+    client_match_scans: DailyMarketScanClientMatchScan[];
+    competitor_watch_scans: DailyMarketScanCompetitorWatchScan[];
+    risk_flags: string[];
+    failure_metadata: DailyMarketScanFailureMetadata[];
+    operator_notes: string[];
+}
+
+export interface DailyMarketScanLatestResponse {
+    run_id: number | null;
+    status: string | null;
+    error: string | null;
+    result: DailyMarketScanResultResponse | null;
+}
+
 export interface StrategyCoordinationListingReference {
     listing_ref: string;
     property_id?: number | null;
@@ -818,6 +982,259 @@ const normalizeMlsAuthHistory = (
         attempts: ensureArray<Partial<MlsAuthAttemptRecord>>(value?.attempts).map(
             normalizeMlsAuthAttempt,
         ),
+    };
+};
+
+const normalizeDailyMarketScanFailureMetadata = (
+    value: Partial<DailyMarketScanFailureMetadata> | null | undefined,
+): DailyMarketScanFailureMetadata => {
+    return {
+        provider_key:
+            value?.provider_key === 'authenticated_mls_browser' ||
+            value?.provider_key === 'public_listing'
+                ? value.provider_key
+                : null,
+        code: typeof value?.code === 'string' ? value.code : 'unknown_failure',
+        message: typeof value?.message === 'string' ? value.message : null,
+        retryable: value?.retryable === true,
+        fallback_attempted: value?.fallback_attempted === true,
+        fallback_used: value?.fallback_used === true,
+    };
+};
+
+const normalizeDailyMarketScanSourceAttempt = (
+    value: Partial<DailyMarketScanSourceAttempt> | null | undefined,
+): DailyMarketScanSourceAttempt => {
+    return {
+        provider_key:
+            value?.provider_key === 'authenticated_mls_browser'
+                ? 'authenticated_mls_browser'
+                : 'public_listing',
+        source_used: typeof value?.source_used === 'string' ? value.source_used : 'unknown',
+        status:
+            value?.status === 'completed' ||
+            value?.status === 'partial' ||
+            value?.status === 'failed' ||
+            value?.status === 'skipped' ||
+            value?.status === 'unauthenticated' ||
+            value?.status === 'expired'
+                ? value.status
+                : 'failed',
+        auth_state:
+            value?.auth_state === 'authenticated' ||
+            value?.auth_state === 'unauthenticated' ||
+            value?.auth_state === 'expired' ||
+            value?.auth_state === 'failed'
+                ? value.auth_state
+                : 'not_required',
+        fallback_used: value?.fallback_used === true,
+        failure_metadata: ensureArray<Partial<DailyMarketScanFailureMetadata>>(
+            value?.failure_metadata,
+        ).map(normalizeDailyMarketScanFailureMetadata),
+        notes: ensureArray<string>(value?.notes),
+    };
+};
+
+const normalizeDailyMarketScanFinding = (
+    value: Partial<DailyMarketScanFinding> | null | undefined,
+): DailyMarketScanFinding => {
+    return {
+        address: typeof value?.address === 'string' ? value.address : 'Unknown address',
+        mls_number: typeof value?.mls_number === 'string' ? value.mls_number : null,
+        property_id: typeof value?.property_id === 'number' ? value.property_id : null,
+        listing_ref: typeof value?.listing_ref === 'string' ? value.listing_ref : null,
+        source_used: typeof value?.source_used === 'string' ? value.source_used : 'unknown',
+        why_it_matches: ensureArray<string>(value?.why_it_matches),
+        tradeoffs: ensureArray<string>(value?.tradeoffs),
+        why_relevant: ensureArray<string>(value?.why_relevant),
+        competitor_notes: ensureArray<string>(value?.competitor_notes),
+    };
+};
+
+const normalizeDailyMarketScanProviderDescriptor = (
+    value: Partial<DailyMarketScanProviderDescriptor> | null | undefined,
+): DailyMarketScanProviderDescriptor => {
+    return {
+        provider_key:
+            value?.provider_key === 'authenticated_mls_browser'
+                ? 'authenticated_mls_browser'
+                : 'public_listing',
+        display_name: typeof value?.display_name === 'string' ? value.display_name : 'Unknown provider',
+        authentication_required: value?.authentication_required === true,
+        auth_state:
+            value?.auth_state === 'authenticated' ||
+            value?.auth_state === 'unauthenticated' ||
+            value?.auth_state === 'expired' ||
+            value?.auth_state === 'failed'
+                ? value.auth_state
+                : 'not_required',
+        availability:
+            value?.availability === 'limited' || value?.availability === 'unavailable'
+                ? value.availability
+                : 'available',
+        detail_level: typeof value?.detail_level === 'string' ? value.detail_level : 'standard_detail',
+        confidence_level:
+            value?.confidence_level === 'high' ||
+            value?.confidence_level === 'low'
+                ? value.confidence_level
+                : 'medium',
+        fallback_capable: value?.fallback_capable === true,
+        notes: ensureArray<string>(value?.notes),
+    };
+};
+
+const normalizeDailyMarketScanClientMatchScan = (
+    value: Partial<DailyMarketScanClientMatchScan> | null | undefined,
+): DailyMarketScanClientMatchScan => {
+    return {
+        workflow: 'client_match',
+        status:
+            value?.status === 'completed' ||
+            value?.status === 'partial' ||
+            value?.status === 'failed' ||
+            value?.status === 'no_providers' ||
+            value?.status === 'no_findings'
+                ? value.status
+                : 'completed',
+        contact_id: typeof value?.contact_id === 'number' ? value.contact_id : 0,
+        criteria_summary:
+            typeof value?.criteria_summary === 'string' ? value.criteria_summary : null,
+        source_attempts: ensureArray<Partial<DailyMarketScanSourceAttempt>>(
+            value?.source_attempts,
+        ).map(normalizeDailyMarketScanSourceAttempt),
+        findings: ensureArray<Partial<DailyMarketScanFinding>>(value?.findings).map(
+            normalizeDailyMarketScanFinding,
+        ),
+        fallback_used: value?.fallback_used === true,
+        failure_metadata: ensureArray<Partial<DailyMarketScanFailureMetadata>>(
+            value?.failure_metadata,
+        ).map(normalizeDailyMarketScanFailureMetadata),
+    };
+};
+
+const normalizeDailyMarketScanCompetitorSubject = (
+    value: Partial<DailyMarketScanCompetitorSubject> | null | undefined,
+): DailyMarketScanCompetitorSubject => {
+    return {
+        contact_id: typeof value?.contact_id === 'number' ? value.contact_id : null,
+        property_id: typeof value?.property_id === 'number' ? value.property_id : null,
+        listing_ref: typeof value?.listing_ref === 'string' ? value.listing_ref : null,
+        competitor_mode:
+            value?.competitor_mode === 'area_nearby_non_condo'
+                ? 'area_nearby_non_condo'
+                : 'condo_same_building',
+    };
+};
+
+const normalizeDailyMarketScanCompetitorWatchScan = (
+    value: Partial<DailyMarketScanCompetitorWatchScan> | null | undefined,
+): DailyMarketScanCompetitorWatchScan => {
+    return {
+        workflow: 'competitor_watch',
+        status:
+            value?.status === 'completed' ||
+            value?.status === 'partial' ||
+            value?.status === 'failed' ||
+            value?.status === 'no_providers' ||
+            value?.status === 'no_findings'
+                ? value.status
+                : 'completed',
+        subject: normalizeDailyMarketScanCompetitorSubject(value?.subject),
+        source_attempts: ensureArray<Partial<DailyMarketScanSourceAttempt>>(
+            value?.source_attempts,
+        ).map(normalizeDailyMarketScanSourceAttempt),
+        findings: ensureArray<Partial<DailyMarketScanFinding>>(value?.findings).map(
+            normalizeDailyMarketScanFinding,
+        ),
+        fallback_used: value?.fallback_used === true,
+        failure_metadata: ensureArray<Partial<DailyMarketScanFailureMetadata>>(
+            value?.failure_metadata,
+        ).map(normalizeDailyMarketScanFailureMetadata),
+    };
+};
+
+const normalizeDailyMarketScanScopeSummary = (
+    value: Partial<DailyMarketScanScopeSummary> | null | undefined,
+): DailyMarketScanScopeSummary => {
+    return {
+        requested_subject_count:
+            typeof value?.requested_subject_count === 'number' ? value.requested_subject_count : 0,
+        effective_subject_count:
+            typeof value?.effective_subject_count === 'number' ? value.effective_subject_count : 0,
+        max_subjects: typeof value?.max_subjects === 'number' ? value.max_subjects : 25,
+        decision:
+            value?.decision === 'constrained' || value?.decision === 'rejected'
+                ? value.decision
+                : 'accepted',
+        notes: ensureArray<string>(value?.notes),
+    };
+};
+
+const normalizeDailyMarketScanExecutionPolicy = (
+    value: Partial<DailyMarketScanExecutionPolicy> | null | undefined,
+): DailyMarketScanExecutionPolicy => {
+    return {
+        mode: 'internal_logging_review_only',
+        can_auto_send: value?.can_auto_send === true,
+        can_auto_contact_clients: value?.can_auto_contact_clients === true,
+        can_create_client_outputs_without_approval:
+            value?.can_create_client_outputs_without_approval === true,
+    };
+};
+
+const normalizeDailyMarketScanSummary = (
+    value: Partial<DailyMarketScanSummary> | null | undefined,
+): DailyMarketScanSummary => {
+    return {
+        scan_mode:
+            value?.scan_mode === 'client_match' ||
+            value?.scan_mode === 'competitor_watch'
+                ? value.scan_mode
+                : 'full_daily_scan',
+        run_mode: value?.run_mode === 'simulated_preview' ? 'simulated_preview' : 'manual_preview',
+        scope: normalizeDailyMarketScanScopeSummary(value?.scope),
+        provider_order: ensureArray<DailyMarketScanProviderKey>(value?.provider_order).filter(
+            (item): item is DailyMarketScanProviderKey =>
+                item === 'authenticated_mls_browser' || item === 'public_listing',
+        ),
+    };
+};
+
+const normalizeDailyMarketScanResult = (
+    value: Partial<DailyMarketScanResultResponse> | null | undefined,
+): DailyMarketScanResultResponse | null => {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    return {
+        scan_summary: normalizeDailyMarketScanSummary(value.scan_summary),
+        execution_policy: normalizeDailyMarketScanExecutionPolicy(value.execution_policy),
+        provider_catalog: ensureArray<Partial<DailyMarketScanProviderDescriptor>>(
+            value.provider_catalog,
+        ).map(normalizeDailyMarketScanProviderDescriptor),
+        client_match_scans: ensureArray<Partial<DailyMarketScanClientMatchScan>>(
+            value.client_match_scans,
+        ).map(normalizeDailyMarketScanClientMatchScan),
+        competitor_watch_scans: ensureArray<Partial<DailyMarketScanCompetitorWatchScan>>(
+            value.competitor_watch_scans,
+        ).map(normalizeDailyMarketScanCompetitorWatchScan),
+        risk_flags: ensureArray<string>(value.risk_flags),
+        failure_metadata: ensureArray<Partial<DailyMarketScanFailureMetadata>>(
+            value.failure_metadata,
+        ).map(normalizeDailyMarketScanFailureMetadata),
+        operator_notes: ensureArray<string>(value.operator_notes),
+    };
+};
+
+const normalizeDailyMarketScanLatest = (
+    value: Partial<DailyMarketScanLatestResponse> | null | undefined,
+): DailyMarketScanLatestResponse => {
+    return {
+        run_id: typeof value?.run_id === 'number' ? value.run_id : null,
+        status: typeof value?.status === 'string' ? value.status : null,
+        error: typeof value?.error === 'string' ? value.error : null,
+        result: normalizeDailyMarketScanResult(value?.result),
     };
 };
 
@@ -1327,6 +1744,47 @@ export const agentsService = {
         const res = await api.get<AgentAuditLog[]>('/agents/mls-auth/audit-logs', {
             params: { provider, limit },
         });
+        return ensureArray<AgentAuditLog>(res.data);
+    },
+
+    triggerDailyMarketScanRunOnce: async (
+        payload: DailyMarketScanRunRequest,
+    ): Promise<AgentRun> => {
+        const res = await api.post<AgentRun>('/agents/daily-market-scan/run-once', payload);
+        return res.data;
+    },
+
+    getDailyMarketScanRuns: async (limit = 50): Promise<AgentRun[]> => {
+        const res = await api.get<AgentRun[]>('/agents/daily-market-scan/runs', {
+            params: { limit },
+        });
+        return ensureArray<AgentRun>(res.data);
+    },
+
+    getLatestDailyMarketScanResult: async (): Promise<DailyMarketScanLatestResponse> => {
+        const res = await api.get<DailyMarketScanLatestResponse>('/agents/daily-market-scan/latest');
+        return normalizeDailyMarketScanLatest(res.data);
+    },
+
+    getDailyMarketScanRunReport: async (
+        runId: number,
+    ): Promise<DailyMarketScanResultResponse> => {
+        const res = await api.get<DailyMarketScanResultResponse>(
+            `/agents/daily-market-scan/runs/${runId}/report`,
+        );
+        return normalizeDailyMarketScanResult(res.data) as DailyMarketScanResultResponse;
+    },
+
+    getDailyMarketScanRunAuditLogs: async (
+        runId: number,
+        limit = 100,
+    ): Promise<AgentAuditLog[]> => {
+        const res = await api.get<AgentAuditLog[]>(
+            `/agents/daily-market-scan/runs/${runId}/audit-logs`,
+            {
+                params: { limit },
+            },
+        );
         return ensureArray<AgentAuditLog>(res.data);
     },
 
