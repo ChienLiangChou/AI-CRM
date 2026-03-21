@@ -291,25 +291,44 @@ class PublicListingProvider(BaseMarketScanProvider):
             fallback_used=fallback_used,
         )
 
-    def _candidate_urls(self, context: Any) -> list[str]:
-        urls: list[str] = []
+    def _candidate_reference_values(self, context: Any) -> list[str]:
+        values: list[str] = []
         seen: set[str] = set()
         listing = context.get("listing") if isinstance(context, dict) else None
         property_snapshot = context.get("property") if isinstance(context, dict) else None
+        candidate_listings = (
+            context.get("candidate_listings") if isinstance(context, dict) else None
+        )
+        candidate_properties = (
+            context.get("candidate_properties") if isinstance(context, dict) else None
+        )
 
-        for raw_value in [
+        candidates: list[Any] = [
             listing.get("listing_ref") if isinstance(listing, dict) else None,
             listing.get("listing_url") if isinstance(listing, dict) else None,
             property_snapshot.get("listing_url")
             if isinstance(property_snapshot, dict)
             else None,
-        ]:
-            normalized = public_listing_fetcher.normalize_public_listing_url(raw_value)
-            if normalized is None or normalized in seen:
+        ]
+        if isinstance(candidate_listings, list):
+            for item in candidate_listings:
+                if isinstance(item, dict):
+                    candidates.append(item.get("listing_ref"))
+                    candidates.append(item.get("listing_url"))
+        if isinstance(candidate_properties, list):
+            for item in candidate_properties:
+                if isinstance(item, dict):
+                    candidates.append(item.get("listing_url"))
+
+        for raw_value in candidates:
+            if raw_value is None:
                 continue
-            seen.add(normalized)
-            urls.append(normalized)
-        return urls
+            text = str(raw_value).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            values.append(text)
+        return values
 
     def _fetch_records(
         self,
@@ -319,18 +338,39 @@ class PublicListingProvider(BaseMarketScanProvider):
         list[agent_schemas.DailyMarketScanFailureMetadata],
         list[str],
     ]:
-        urls = self._candidate_urls(context)
-        if not urls:
+        raw_references = self._candidate_reference_values(context)
+        if not raw_references:
             return (
                 [],
                 [
                     self._failure(
                         code="public_reference_missing",
-                        message="Public competitor retrieval requires an exact allowlisted public URL.",
+                        message="Public retrieval requires an exact allowlisted public URL.",
                         retryable=False,
                     )
                 ],
-                ["No allowlisted public URL was available for this competitor-watch subject."],
+                ["No exact public URL was available in the current constrained context."],
+            )
+
+        urls: list[str] = []
+        seen_urls: set[str] = set()
+        for raw_value in raw_references:
+            normalized = public_listing_fetcher.normalize_public_listing_url(raw_value)
+            if normalized is None or normalized in seen_urls:
+                continue
+            seen_urls.add(normalized)
+            urls.append(normalized)
+        if not urls:
+            return (
+                [],
+                [
+                    self._failure(
+                        code="public_source_not_allowlisted",
+                        message="The provided public URL is not allowlisted for retrieval.",
+                        retryable=False,
+                    )
+                ],
+                ["Only exact allowlisted public URLs are permitted in this step."],
             )
 
         failure_metadata: list[agent_schemas.DailyMarketScanFailureMetadata] = []
@@ -372,6 +412,187 @@ class PublicListingProvider(BaseMarketScanProvider):
             public_listing_normalizer.dedupe_public_listing_records(records),
             failure_metadata,
             notes,
+        )
+
+    def _contact_area_tokens(self, context: Any) -> set[str]:
+        contact = context.get("contact") if isinstance(context, dict) else None
+        if not isinstance(contact, dict):
+            return set()
+        tokens: set[str] = set()
+        for item in contact.get("preferred_areas", []):
+            text = str(item).strip().lower()
+            if text:
+                tokens.add(text)
+        return tokens
+
+    def _contact_property_type(self, context: Any) -> str | None:
+        contact = context.get("contact") if isinstance(context, dict) else None
+        if not isinstance(contact, dict):
+            return None
+        property_preferences = contact.get("property_preferences")
+        if not isinstance(property_preferences, dict):
+            return None
+        property_type = property_preferences.get("property_type")
+        if isinstance(property_type, str) and property_type.strip():
+            return property_type.strip().lower()
+        types = property_preferences.get("types")
+        if isinstance(types, list) and types:
+            first = str(types[0]).strip().lower()
+            return first or None
+        return None
+
+    def _evaluate_client_match(
+        self,
+        *,
+        record: public_listing_normalizer.CanonicalPublicListingRecord,
+        context: Any,
+    ) -> tuple[bool, bool, list[str], list[str]]:
+        contact = context.get("contact") if isinstance(context, dict) else None
+        if not isinstance(contact, dict):
+            return (False, True, [], ["Missing contact context for public client-match evaluation."])
+
+        score = 0.0
+        criteria_used = False
+        hard_conflict = False
+        why_it_matches: list[str] = []
+        tradeoffs: list[str] = []
+
+        budget_min = contact.get("budget_min")
+        budget_max = contact.get("budget_max")
+        if isinstance(budget_min, (int, float)) or isinstance(budget_max, (int, float)):
+            criteria_used = True
+            if record.list_price is None:
+                tradeoffs.append("Public listing price was unavailable for budget comparison.")
+            elif isinstance(budget_min, (int, float)) and isinstance(budget_max, (int, float)):
+                if budget_min <= record.list_price <= budget_max:
+                    score += 2.0
+                    why_it_matches.append("Public list price fits the current buyer budget range.")
+                elif record.list_price > budget_max:
+                    hard_conflict = True
+                    tradeoffs.append("Public list price is above the current buyer budget range.")
+                else:
+                    hard_conflict = True
+                    tradeoffs.append("Public list price sits below the stated range and needs manual review.")
+            elif isinstance(budget_max, (int, float)):
+                if record.list_price <= budget_max:
+                    score += 1.5
+                    why_it_matches.append("Public list price is within the buyer's stated ceiling.")
+                else:
+                    hard_conflict = True
+                    tradeoffs.append("Public list price is above the buyer's stated ceiling.")
+            elif isinstance(budget_min, (int, float)):
+                if record.list_price >= budget_min:
+                    score += 1.0
+                    why_it_matches.append("Public list price is at or above the buyer's stated floor.")
+                else:
+                    hard_conflict = True
+                    tradeoffs.append("Public list price is below the buyer's stated floor.")
+
+        preferred_type = self._contact_property_type(context)
+        if preferred_type:
+            criteria_used = True
+            if record.property_type and record.property_type.lower() == preferred_type:
+                score += 1.5
+                why_it_matches.append("Public property type matches the buyer's stated preference.")
+            elif record.property_type:
+                tradeoffs.append("Public property type differs from the buyer's stated preference.")
+
+        area_tokens = self._contact_area_tokens(context)
+        if area_tokens:
+            criteria_used = True
+            haystack = " ".join(
+                part
+                for part in [
+                    record.city,
+                    record.neighborhood,
+                    record.address,
+                ]
+                if part
+            ).lower()
+            if any(token in haystack for token in area_tokens):
+                score += 1.0
+                why_it_matches.append("Public location aligns with the buyer's preferred area.")
+            else:
+                tradeoffs.append("Public location sits outside the buyer's current preferred areas.")
+
+        return (score >= 2.0 and not hard_conflict, criteria_used, why_it_matches, tradeoffs)
+
+    def _scan_client_matches_real(
+        self,
+        context: Any,
+    ) -> agent_schemas.DailyMarketScanProviderScanResult:
+        if self.availability == "unavailable":
+            return self.build_scan_result(
+                status="failed",
+                failure_metadata=[
+                    self._failure(
+                        code="provider_unavailable",
+                        message="Public listing provider is unavailable.",
+                        retryable=True,
+                    )
+                ],
+                notes=[PUBLIC_RETRIEVAL_NOTE],
+            )
+
+        records, failure_metadata, notes = self._fetch_records(context)
+        if not records:
+            return self.build_scan_result(
+                status="failed",
+                source_used="public_listing:realtor_ca_public",
+                failure_metadata=failure_metadata,
+                notes=notes,
+            )
+
+        findings: list[agent_schemas.DailyMarketScanFinding] = []
+        weak_confidence = False
+        criteria_used = False
+
+        for record in records:
+            matched, used_criteria, why_it_matches, tradeoffs = self._evaluate_client_match(
+                record=record,
+                context=context,
+            )
+            criteria_used = criteria_used or used_criteria
+            if not matched:
+                weak_confidence = weak_confidence or used_criteria
+                continue
+            findings.append(
+                agent_schemas.DailyMarketScanFinding(
+                    address=record.address,
+                    mls_number=record.external_listing_id,
+                    listing_ref=record.source_url,
+                    source_used="public_listing:realtor_ca_public",
+                    why_it_matches=why_it_matches,
+                    tradeoffs=tradeoffs + list(record.notes),
+                )
+            )
+
+        if not findings:
+            failure_metadata.append(
+                self._failure(
+                    code=(
+                        "public_client_match_confidence_low"
+                        if criteria_used and weak_confidence
+                        else "public_client_match_no_matches"
+                    ),
+                    message=(
+                        "Public client-match confidence was too weak for a reliable candidate match."
+                        if criteria_used and weak_confidence
+                        else "No constrained public listings matched the current client criteria."
+                    ),
+                    retryable=False,
+                )
+            )
+
+        status: agent_schemas.DailyMarketScanProviderAttemptStatus = (
+            "partial" if findings and failure_metadata else "completed"
+        )
+        return self.build_scan_result(
+            status=status,
+            source_used="public_listing:realtor_ca_public",
+            findings=findings,
+            failure_metadata=failure_metadata,
+            notes=notes,
         )
 
     def _subject_building_key(self, context: Any) -> str | None:
@@ -629,7 +850,9 @@ class PublicListingProvider(BaseMarketScanProvider):
     def scan_client_matches(
         self, context: Any
     ) -> agent_schemas.DailyMarketScanProviderScanResult:
-        return self._stub_scan_result("Client match scan")
+        if not isinstance(context, dict) or "contact" not in context:
+            return self._stub_scan_result("Client match scan")
+        return self._scan_client_matches_real(context)
 
     def scan_condo_competitors(
         self, context: Any

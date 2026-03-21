@@ -96,6 +96,28 @@ def _dedupe_int_list(values: Any) -> list[int]:
     return deduped
 
 
+def _safe_json_list(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item).strip() for item in parsed if str(item).strip()]
+
+
+def _safe_json_dict(raw: str | None) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _normalize_listing_refs(
     raw: Any,
 ) -> list[agent_schemas.DailyMarketScanListingReference]:
@@ -144,6 +166,8 @@ def _contact_snapshot(contact: crm_models.Contact) -> dict[str, Any]:
         "client_type": contact.client_type,
         "budget_min": contact.budget_min,
         "budget_max": contact.budget_max,
+        "preferred_areas": _safe_json_list(contact.preferred_areas),
+        "property_preferences": _safe_json_dict(contact.property_preferences),
     }
 
 
@@ -610,7 +634,11 @@ def _build_client_match_scans(
     for contact in selected_subjects.get("contacts", []):
         execution = _execute_provider_chain(
             workflow="client_match",
-            context={"contact": contact},
+            context={
+                "contact": contact,
+                "candidate_properties": selected_subjects.get("properties", []),
+                "candidate_listings": selected_subjects.get("listings", []),
+            },
             ordered_providers=ordered_providers,
         )
         scans.append(

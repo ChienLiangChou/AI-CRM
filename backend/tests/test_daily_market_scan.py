@@ -289,6 +289,13 @@ PUBLIC_LISTING_AREA_HTML = """
 </html>
 """
 
+PUBLIC_LISTING_EMPTY_HTML = """
+<html>
+  <head><title>Empty public page</title></head>
+  <body><div>No structured listing data here.</div></body>
+</html>
+"""
+
 
 def build_public_page(url: str, html: str):
     return public_listing_fetcher.PublicListingFetchedPage(
@@ -304,6 +311,10 @@ def fake_realtor_fetch(url: str):
     if "area-search" in url:
         return build_public_page(url, PUBLIC_LISTING_AREA_HTML)
     return build_public_page(url, PUBLIC_LISTING_SEARCH_HTML)
+
+
+def fake_empty_realtor_fetch(url: str):
+    return build_public_page(url, PUBLIC_LISTING_EMPTY_HTML)
 
 
 class DailyMarketScanContractTests(unittest.TestCase):
@@ -485,7 +496,7 @@ class DailyMarketScanContractTests(unittest.TestCase):
         deduped = public_listing_normalizer.dedupe_public_listing_records(duplicated)
         self.assertEqual(len(deduped), 3)
 
-    def test_public_listing_provider_keeps_client_match_stub_only(self):
+    def test_public_listing_provider_keeps_stub_only_without_contact_context(self):
         provider = market_scan_providers.PublicListingProvider(fetch_page=fake_realtor_fetch)
 
         result = provider.scan_client_matches({"contact_id": 42})
@@ -493,6 +504,131 @@ class DailyMarketScanContractTests(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.findings, [])
         self.assertIn("stub-only", " ".join(result.notes).lower())
+
+    def test_public_listing_provider_returns_client_match_from_exact_public_reference(self):
+        provider = market_scan_providers.PublicListingProvider(fetch_page=fake_realtor_fetch)
+
+        result = provider.scan_client_matches(
+            {
+                "contact": {
+                    "contact_id": 42,
+                    "budget_min": 800000,
+                    "budget_max": 900000,
+                    "preferred_areas": ["Toronto"],
+                    "property_preferences": {"property_type": "condo"},
+                },
+                "candidate_properties": [
+                    {
+                        "property_id": 17,
+                        "listing_url": "https://www.realtor.ca/real-estate/building-search",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(len(result.findings), 1)
+        self.assertEqual(result.findings[0].mls_number, "C7654321")
+        self.assertEqual(result.findings[0].source_used, "public_listing:realtor_ca_public")
+        self.assertIn("budget", " ".join(result.findings[0].why_it_matches).lower())
+
+    def test_public_listing_provider_client_match_missing_reference_fails_soft(self):
+        provider = market_scan_providers.PublicListingProvider(fetch_page=fake_realtor_fetch)
+
+        result = provider.scan_client_matches(
+            {
+                "contact": {
+                    "contact_id": 42,
+                    "budget_min": 800000,
+                    "budget_max": 900000,
+                    "preferred_areas": ["Toronto"],
+                    "property_preferences": {"property_type": "condo"},
+                },
+                "candidate_properties": [],
+                "candidate_listings": [],
+            }
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.failure_metadata[0].code, "public_reference_missing")
+
+    def test_public_listing_provider_client_match_non_allowlisted_url_fails_soft(self):
+        provider = market_scan_providers.PublicListingProvider(fetch_page=fake_realtor_fetch)
+
+        result = provider.scan_client_matches(
+            {
+                "contact": {
+                    "contact_id": 42,
+                    "budget_min": 800000,
+                    "budget_max": 900000,
+                    "preferred_areas": ["Toronto"],
+                    "property_preferences": {"property_type": "condo"},
+                },
+                "candidate_properties": [
+                    {"property_id": 17, "listing_url": "https://example.com/listing/17"}
+                ],
+            }
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(
+            result.failure_metadata[0].code,
+            "public_source_not_allowlisted",
+        )
+
+    def test_public_listing_provider_client_match_parse_no_records_fails_soft(self):
+        provider = market_scan_providers.PublicListingProvider(
+            fetch_page=fake_empty_realtor_fetch
+        )
+
+        result = provider.scan_client_matches(
+            {
+                "contact": {
+                    "contact_id": 42,
+                    "budget_min": 800000,
+                    "budget_max": 900000,
+                    "preferred_areas": ["Toronto"],
+                    "property_preferences": {"property_type": "condo"},
+                },
+                "candidate_properties": [
+                    {
+                        "property_id": 17,
+                        "listing_url": "https://www.realtor.ca/real-estate/building-search",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.failure_metadata[0].code, "public_parse_no_records")
+
+    def test_public_listing_provider_client_match_weak_match_returns_no_findings(self):
+        provider = market_scan_providers.PublicListingProvider(fetch_page=fake_realtor_fetch)
+
+        result = provider.scan_client_matches(
+            {
+                "contact": {
+                    "contact_id": 42,
+                    "budget_min": 400000,
+                    "budget_max": 500000,
+                    "preferred_areas": ["North York"],
+                    "property_preferences": {"property_type": "detached"},
+                },
+                "candidate_properties": [
+                    {
+                        "property_id": 17,
+                        "listing_url": "https://www.realtor.ca/real-estate/building-search",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.findings, [])
+        self.assertEqual(
+            result.failure_metadata[-1].code,
+            "public_client_match_confidence_low",
+        )
 
     def test_public_listing_provider_returns_same_building_competitor_from_real_page(self):
         provider = market_scan_providers.PublicListingProvider(fetch_page=fake_realtor_fetch)
@@ -563,8 +699,24 @@ class DailyMarketScanRunnerTests(unittest.TestCase):
         self.db.close()
         self.engine.dispose()
 
-    def create_contact(self, name: str = "Daily Market Scan Contact"):
-        contact = crm_models.Contact(name=name, client_type="buyer", status="active")
+    def create_contact(
+        self,
+        name: str = "Daily Market Scan Contact",
+        *,
+        budget_min: float | None = None,
+        budget_max: float | None = None,
+        preferred_areas: str | None = None,
+        property_preferences: str | None = None,
+    ):
+        contact = crm_models.Contact(
+            name=name,
+            client_type="buyer",
+            status="active",
+            budget_min=budget_min,
+            budget_max=budget_max,
+            preferred_areas=preferred_areas,
+            property_preferences=property_preferences,
+        )
         self.db.add(contact)
         self.db.commit()
         self.db.refresh(contact)
@@ -745,7 +897,25 @@ class DailyMarketScanRunnerTests(unittest.TestCase):
         )
 
     def test_zero_findings_is_recorded_without_failing_run(self):
-        contact = self.create_contact()
+        contact = self.create_contact(
+            budget_min=400000,
+            budget_max=500000,
+            preferred_areas='["North York"]',
+            property_preferences='{"property_type":"detached"}',
+        )
+        condo_property = self.create_property(
+            property_type="condo",
+            street="20 Stewart St",
+            unit="706",
+            postal_code="M5V1B1",
+            listing_url="https://www.realtor.ca/real-estate/building-search",
+        )
+        provider_registry = {
+            "authenticated_mls_browser": StubAuthenticatedUnavailableProvider(),
+            "public_listing": market_scan_providers.PublicListingProvider(
+                fetch_page=fake_realtor_fetch
+            ),
+        }
         run = daily_market_scan.run_daily_market_scan_once(
             self.db,
             {
@@ -753,7 +923,9 @@ class DailyMarketScanRunnerTests(unittest.TestCase):
                 "run_mode": "manual_preview",
                 "source_preference": "public_only",
                 "contact_ids": [contact.id],
+                "property_ids": [condo_property.id],
             },
+            provider_registry=provider_registry,
         )
 
         result = json.loads(run.result)
@@ -762,6 +934,53 @@ class DailyMarketScanRunnerTests(unittest.TestCase):
         self.assertIn(
             daily_market_scan.ZERO_FINDINGS_RECORDED_RISK_FLAG,
             result["risk_flags"],
+        )
+
+    def test_client_match_real_public_provider_retrieval_is_constrained_and_persisted(self):
+        contact = self.create_contact(
+            budget_min=800000,
+            budget_max=900000,
+            preferred_areas='["Toronto"]',
+            property_preferences='{"property_type":"condo"}',
+        )
+        condo_property = self.create_property(
+            property_type="condo",
+            street="20 Stewart St",
+            unit="706",
+            postal_code="M5V1B1",
+            listing_url="https://www.realtor.ca/real-estate/building-search",
+        )
+        provider_registry = {
+            "authenticated_mls_browser": StubAuthenticatedUnavailableProvider(),
+            "public_listing": market_scan_providers.PublicListingProvider(
+                fetch_page=fake_realtor_fetch
+            ),
+        }
+
+        run = daily_market_scan.run_daily_market_scan_once(
+            self.db,
+            {
+                "scan_mode": "client_match",
+                "run_mode": "manual_preview",
+                "source_preference": "public_only",
+                "contact_ids": [contact.id],
+                "property_ids": [condo_property.id],
+            },
+            provider_registry=provider_registry,
+        )
+
+        result = json.loads(run.result)
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(len(result["client_match_scans"]), 1)
+        self.assertEqual(result["client_match_scans"][0]["status"], "completed")
+        self.assertEqual(len(result["client_match_scans"][0]["findings"]), 1)
+        self.assertEqual(
+            result["client_match_scans"][0]["findings"][0]["source_used"],
+            "public_listing:realtor_ca_public",
+        )
+        self.assertEqual(
+            result["client_match_scans"][0]["source_attempts"][0]["provider_key"],
+            "public_listing",
         )
 
     def test_route_surface_is_scoped_and_safe(self):
