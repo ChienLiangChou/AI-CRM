@@ -16,6 +16,7 @@ from app import models as crm_models
 from app.agents import models as agent_models
 from app.agents import daily_market_scan
 from app.agents import market_scan_providers
+from app.agents import public_listing_fetcher, public_listing_normalizer
 from app.agents import router as agent_router
 from app.agents import schemas as agent_schemas
 from app.agents import service as agent_service
@@ -151,6 +152,158 @@ class StubFailingAuthenticatedProvider(market_scan_providers.BaseMarketScanProvi
 
     def scan_area_competitors(self, context):
         raise RuntimeError("simulated_provider_failure")
+
+
+PUBLIC_LISTING_SEARCH_HTML = """
+<html>
+  <head>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "ItemList",
+        "itemListElement": [
+          {
+            "@type": "ListItem",
+            "position": 1,
+            "item": {
+              "@type": "Apartment",
+              "name": "20 Stewart St #706, Toronto",
+              "url": "https://www.realtor.ca/real-estate/1",
+              "identifier": "C1234567",
+              "address": {
+                "@type": "PostalAddress",
+                "streetAddress": "706 20 Stewart St",
+                "addressLocality": "Toronto",
+                "postalCode": "M5V1B1"
+              },
+              "offers": {
+                "@type": "Offer",
+                "price": "799000",
+                "availability": "https://schema.org/InStock"
+              }
+            }
+          },
+          {
+            "@type": "ListItem",
+            "position": 2,
+            "item": {
+              "@type": "Apartment",
+              "name": "20 Stewart St #1205, Toronto",
+              "url": "https://www.realtor.ca/real-estate/2",
+              "identifier": "C7654321",
+              "address": {
+                "@type": "PostalAddress",
+                "streetAddress": "1205 20 Stewart St",
+                "addressLocality": "Toronto",
+                "postalCode": "M5V1B2"
+              },
+              "offers": {
+                "@type": "Offer",
+                "price": "845000",
+                "availability": "https://schema.org/InStock"
+              }
+            }
+          },
+          {
+            "@type": "ListItem",
+            "position": 3,
+            "item": {
+              "@type": "SingleFamilyResidence",
+              "name": "88 King St W, Toronto",
+              "url": "https://www.realtor.ca/real-estate/3",
+              "identifier": "W1112223",
+              "address": {
+                "@type": "PostalAddress",
+                "streetAddress": "88 King St W",
+                "addressLocality": "Toronto",
+                "postalCode": "M5H1A1"
+              },
+              "offers": {
+                "@type": "Offer",
+                "price": "1399000",
+                "availability": "https://schema.org/InStock"
+              }
+            }
+          }
+        ]
+      }
+    </script>
+  </head>
+</html>
+"""
+
+PUBLIC_LISTING_AREA_HTML = """
+<html>
+  <head>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "ItemList",
+        "itemListElement": [
+          {
+            "@type": "ListItem",
+            "position": 1,
+            "item": {
+              "@type": "SingleFamilyResidence",
+              "name": "90 King St W, Toronto",
+              "url": "https://www.realtor.ca/real-estate/4",
+              "identifier": "W9000001",
+              "address": {
+                "@type": "PostalAddress",
+                "streetAddress": "90 King St W",
+                "addressLocality": "Toronto",
+                "postalCode": "M5H1B1"
+              },
+              "offers": {
+                "@type": "Offer",
+                "price": "1499000",
+                "availability": "https://schema.org/InStock"
+              }
+            }
+          },
+          {
+            "@type": "ListItem",
+            "position": 2,
+            "item": {
+              "@type": "SingleFamilyResidence",
+              "name": "14 Elm St, Toronto",
+              "url": "https://www.realtor.ca/real-estate/5",
+              "identifier": "W9000002",
+              "address": {
+                "@type": "PostalAddress",
+                "streetAddress": "14 Elm St",
+                "addressLocality": "Toronto",
+                "postalCode": "M4B1A1"
+              },
+              "offers": {
+                "@type": "Offer",
+                "price": "1299000",
+                "availability": "https://schema.org/InStock"
+              }
+            }
+          }
+        ]
+      }
+    </script>
+  </head>
+</html>
+"""
+
+
+def build_public_page(url: str, html: str):
+    return public_listing_fetcher.PublicListingFetchedPage(
+        url=url,
+        host="www.realtor.ca",
+        html=html,
+        status_code=200,
+        content_type="text/html",
+    )
+
+
+def fake_realtor_fetch(url: str):
+    if "area-search" in url:
+        return build_public_page(url, PUBLIC_LISTING_AREA_HTML)
+    return build_public_page(url, PUBLIC_LISTING_SEARCH_HTML)
 
 
 class DailyMarketScanContractTests(unittest.TestCase):
@@ -317,6 +470,80 @@ class DailyMarketScanContractTests(unittest.TestCase):
         self.assertEqual(area_scan.subject.competitor_mode, "area_nearby_non_condo")
         self.assertEqual(client_scan.workflow, "client_match")
 
+    def test_public_listing_normalizer_extracts_and_dedupes_structured_records(self):
+        page = build_public_page(
+            "https://www.realtor.ca/real-estate/building-search",
+            PUBLIC_LISTING_SEARCH_HTML,
+        )
+
+        normalized = public_listing_normalizer.normalize_public_listing_records(page)
+        self.assertEqual(len(normalized), 3)
+        self.assertEqual(normalized[0].source_family, "realtor_ca_public")
+        self.assertEqual(normalized[0].city, "Toronto")
+
+        duplicated = normalized + [normalized[1]]
+        deduped = public_listing_normalizer.dedupe_public_listing_records(duplicated)
+        self.assertEqual(len(deduped), 3)
+
+    def test_public_listing_provider_keeps_client_match_stub_only(self):
+        provider = market_scan_providers.PublicListingProvider(fetch_page=fake_realtor_fetch)
+
+        result = provider.scan_client_matches({"contact_id": 42})
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.findings, [])
+        self.assertIn("stub-only", " ".join(result.notes).lower())
+
+    def test_public_listing_provider_returns_same_building_competitor_from_real_page(self):
+        provider = market_scan_providers.PublicListingProvider(fetch_page=fake_realtor_fetch)
+
+        result = provider.scan_condo_competitors(
+            {
+                "property": {
+                    "unit": "706",
+                    "street": "20 Stewart St",
+                    "city": "Toronto",
+                    "postal_code": "M5V1B1",
+                    "listing_url": "https://www.realtor.ca/real-estate/building-search",
+                }
+            }
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(len(result.findings), 1)
+        self.assertEqual(result.findings[0].mls_number, "C7654321")
+        self.assertEqual(result.findings[0].source_used, "public_listing:realtor_ca_public")
+        self.assertIn("same-building", " ".join(result.findings[0].competitor_notes).lower())
+
+    def test_public_listing_provider_returns_area_competitor_with_postal_confidence(self):
+        provider = market_scan_providers.PublicListingProvider(fetch_page=fake_realtor_fetch)
+
+        result = provider.scan_area_competitors(
+            {
+                "property": {
+                    "street": "88 King St W",
+                    "city": "Toronto",
+                    "postal_code": "M5H1A1",
+                    "listing_url": "https://www.realtor.ca/real-estate/area-search",
+                }
+            }
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(len(result.findings), 1)
+        self.assertEqual(result.findings[0].mls_number, "W9000001")
+        self.assertIn("nearby-area", " ".join(result.findings[0].competitor_notes).lower())
+
+    def test_public_listing_provider_fails_soft_when_public_reference_missing(self):
+        provider = market_scan_providers.PublicListingProvider(fetch_page=fake_realtor_fetch)
+
+        result = provider.scan_condo_competitors(
+            {"property": {"street": "20 Stewart St", "city": "Toronto"}}
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.failure_metadata[0].code, "public_reference_missing")
+
 
 class DailyMarketScanRunnerTests(unittest.TestCase):
     def setUp(self):
@@ -343,12 +570,25 @@ class DailyMarketScanRunnerTests(unittest.TestCase):
         self.db.refresh(contact)
         return contact
 
-    def create_property(self, *, property_type: str, street: str):
+    def create_property(
+        self,
+        *,
+        property_type: str,
+        street: str,
+        unit: str | None = None,
+        postal_code: str | None = None,
+        neighborhood: str | None = None,
+        listing_url: str | None = None,
+    ):
         property_record = crm_models.Property(
+            unit=unit,
             street=street,
             city="Toronto",
+            postal_code=postal_code,
+            neighborhood=neighborhood,
             property_type=property_type,
             status="listed_for_sale",
+            listing_url=listing_url,
         )
         self.db.add(property_record)
         self.db.commit()
@@ -624,6 +864,61 @@ class DailyMarketScanRunnerTests(unittest.TestCase):
             agent_router.get_daily_market_scan_run_report(run.id, db=self.db)
 
         self.assertEqual(report_error.exception.status_code, 404)
+
+    def test_competitor_watch_real_public_provider_retrieval_is_backend_only(self):
+        condo_property = self.create_property(
+            property_type="condo",
+            street="20 Stewart St",
+            unit="706",
+            postal_code="M5V1B1",
+            listing_url="https://www.realtor.ca/real-estate/building-search",
+        )
+        detached_property = self.create_property(
+            property_type="detached",
+            street="88 King St W",
+            postal_code="M5H1A1",
+            listing_url="https://www.realtor.ca/real-estate/area-search",
+        )
+        provider_registry = {
+            "authenticated_mls_browser": StubAuthenticatedUnavailableProvider(),
+            "public_listing": market_scan_providers.PublicListingProvider(
+                fetch_page=fake_realtor_fetch
+            ),
+        }
+
+        run = daily_market_scan.run_daily_market_scan_once(
+            self.db,
+            {
+                "scan_mode": "competitor_watch",
+                "run_mode": "manual_preview",
+                "source_preference": "public_only",
+                "property_ids": [condo_property.id, detached_property.id],
+            },
+            provider_registry=provider_registry,
+        )
+
+        result = json.loads(run.result)
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(len(result["client_match_scans"]), 0)
+        self.assertEqual(len(result["competitor_watch_scans"]), 2)
+        modes = [
+            item["subject"]["competitor_mode"]
+            for item in result["competitor_watch_scans"]
+        ]
+        self.assertEqual(
+            modes,
+            ["condo_same_building", "area_nearby_non_condo"],
+        )
+        first_findings = result["competitor_watch_scans"][0]["findings"]
+        second_findings = result["competitor_watch_scans"][1]["findings"]
+        self.assertEqual(len(first_findings), 1)
+        self.assertEqual(len(second_findings), 1)
+        self.assertEqual(first_findings[0]["source_used"], "public_listing:realtor_ca_public")
+        self.assertEqual(second_findings[0]["source_used"], "public_listing:realtor_ca_public")
+        self.assertNotIn(
+            daily_market_scan.ZERO_FINDINGS_RECORDED_RISK_FLAG,
+            result["risk_flags"],
+        )
 
 
 if __name__ == "__main__":
