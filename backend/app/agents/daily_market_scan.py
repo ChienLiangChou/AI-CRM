@@ -159,12 +159,19 @@ def _property_snapshot(property_record: crm_models.Property) -> dict[str, Any]:
     )
     return {
         "property_id": property_record.id,
+        "unit": property_record.unit,
+        "street": property_record.street,
         "address": address,
         "city": property_record.city,
+        "postal_code": property_record.postal_code,
+        "neighborhood": property_record.neighborhood,
         "property_type": property_record.property_type,
         "status": property_record.status,
         "listing_price": property_record.listing_price,
+        "bedrooms": property_record.bedrooms,
+        "bathrooms": property_record.bathrooms,
         "mls_number": property_record.mls_number,
+        "listing_url": property_record.listing_url,
     }
 
 
@@ -251,6 +258,12 @@ def resolve_subjects(
                 "property_id": listing.property_id,
                 "label": listing.label,
                 "property_type": property_record.property_type if property_record else None,
+                "unit": property_record.unit if property_record else None,
+                "street": property_record.street if property_record else None,
+                "city": property_record.city if property_record else None,
+                "postal_code": property_record.postal_code if property_record else None,
+                "neighborhood": property_record.neighborhood if property_record else None,
+                "listing_url": property_record.listing_url if property_record else None,
             }
         )
 
@@ -532,6 +545,8 @@ def _execute_provider_chain(
         source_attempts.append(source_attempt)
         failure_metadata.extend(provider_result.failure_metadata)
 
+        if provider_result.status == "failed":
+            had_execution_failure = True
         if provider_result.status == "partial":
             had_partial_result = True
 
@@ -650,16 +665,21 @@ def _build_competitor_watch_scans(
         )
 
     for listing_snapshot in selected_subjects.get("listings", []):
+        competitor_mode = (
+            _competitor_mode_for_property(listing_snapshot)
+            if listing_snapshot.get("property_type")
+            else "condo_same_building"
+        )
         subject = agent_schemas.DailyMarketScanCompetitorSubject(
             property_id=listing_snapshot.get("property_id"),
             listing_ref=listing_snapshot["listing_ref"],
-            competitor_mode="condo_same_building",
+            competitor_mode=competitor_mode,
         )
         execution = _execute_provider_chain(
             workflow="competitor_watch",
             context={
                 "subject": _model_dump(subject),
-                "competitor_mode": "condo_same_building",
+                "competitor_mode": competitor_mode,
                 "listing": listing_snapshot,
             },
             ordered_providers=ordered_providers,
