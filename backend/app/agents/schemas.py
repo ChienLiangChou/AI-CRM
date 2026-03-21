@@ -10,6 +10,7 @@ AgentType = Literal[
     "listing_cma",
     "buyer_match",
     "strategy_coordination",
+    "daily_market_scan",
     "mls_auth",
 ]
 TaskStatus = Literal[
@@ -418,6 +419,192 @@ class MlsAuthSubmitOtpResponse(BaseModel):
 class MlsAuthHistoryResponse(BaseModel):
     current_status: MlsAuthStatusResponse
     attempts: list[MlsAuthAttemptRecord] = []
+
+
+DailyMarketScanMode = Literal[
+    "client_match",
+    "competitor_watch",
+    "full_daily_scan",
+]
+DailyMarketScanRunMode = Literal["manual_preview", "simulated_preview"]
+DailyMarketScanSourcePreference = Literal[
+    "auto",
+    "authenticated_mls_browser_first",
+    "public_only",
+]
+DailyMarketScanProviderKey = Literal[
+    "authenticated_mls_browser",
+    "public_listing",
+]
+DailyMarketScanProviderAuthState = Literal[
+    "not_required",
+    "authenticated",
+    "unauthenticated",
+    "expired",
+    "failed",
+]
+DailyMarketScanProviderAvailability = Literal["available", "limited", "unavailable"]
+DailyMarketScanProviderConfidence = Literal["high", "medium", "low"]
+DailyMarketScanProviderAttemptStatus = Literal[
+    "completed",
+    "partial",
+    "failed",
+    "skipped",
+    "unauthenticated",
+    "expired",
+]
+DailyMarketScanWorkflowType = Literal["client_match", "competitor_watch"]
+DailyMarketScanCompetitorMode = Literal[
+    "condo_same_building",
+    "area_nearby_non_condo",
+]
+DailyMarketScanWorkflowStatus = Literal[
+    "completed",
+    "partial",
+    "failed",
+    "no_providers",
+    "no_findings",
+]
+DailyMarketScanExecutionMode = Literal["internal_logging_review_only"]
+DailyMarketScanScopeDecision = Literal["accepted", "constrained", "rejected"]
+
+
+class DailyMarketScanListingReference(BaseModel):
+    listing_ref: str
+    property_id: Optional[int] = None
+    label: Optional[str] = None
+
+
+class DailyMarketScanRunRequest(BaseModel):
+    scan_mode: DailyMarketScanMode = "full_daily_scan"
+    run_mode: DailyMarketScanRunMode = "manual_preview"
+    source_preference: DailyMarketScanSourcePreference = "auto"
+    contact_ids: list[int] = []
+    property_ids: list[int] = []
+    listing_refs: list[DailyMarketScanListingReference] = []
+    max_subjects: int = 25
+
+
+class DailyMarketScanProviderDescriptor(BaseModel):
+    provider_key: DailyMarketScanProviderKey
+    display_name: str
+    authentication_required: bool
+    auth_state: DailyMarketScanProviderAuthState
+    availability: DailyMarketScanProviderAvailability
+    detail_level: str
+    confidence_level: DailyMarketScanProviderConfidence
+    fallback_capable: bool = False
+    notes: list[str] = []
+
+
+class DailyMarketScanFailureMetadata(BaseModel):
+    provider_key: Optional[DailyMarketScanProviderKey] = None
+    code: str
+    message: Optional[str] = None
+    retryable: bool = False
+    fallback_attempted: bool = False
+    fallback_used: bool = False
+
+
+class DailyMarketScanSourceAttempt(BaseModel):
+    provider_key: DailyMarketScanProviderKey
+    source_used: str
+    status: DailyMarketScanProviderAttemptStatus
+    auth_state: DailyMarketScanProviderAuthState
+    fallback_used: bool = False
+    failure_metadata: list[DailyMarketScanFailureMetadata] = []
+    notes: list[str] = []
+
+
+class DailyMarketScanFinding(BaseModel):
+    address: str
+    mls_number: Optional[str] = None
+    property_id: Optional[int] = None
+    listing_ref: Optional[str] = None
+    source_used: str
+    why_it_matches: list[str] = []
+    tradeoffs: list[str] = []
+    why_relevant: list[str] = []
+    competitor_notes: list[str] = []
+
+
+class DailyMarketScanProviderScanResult(BaseModel):
+    provider_key: DailyMarketScanProviderKey
+    source_used: str
+    status: DailyMarketScanProviderAttemptStatus
+    auth_state: DailyMarketScanProviderAuthState
+    fallback_used: bool = False
+    findings: list[DailyMarketScanFinding] = []
+    failure_metadata: list[DailyMarketScanFailureMetadata] = []
+    notes: list[str] = []
+
+
+class DailyMarketScanClientMatchScan(BaseModel):
+    workflow: Literal["client_match"] = "client_match"
+    status: DailyMarketScanWorkflowStatus = "completed"
+    contact_id: int
+    criteria_summary: Optional[str] = None
+    source_attempts: list[DailyMarketScanSourceAttempt] = []
+    findings: list[DailyMarketScanFinding] = []
+    fallback_used: bool = False
+    failure_metadata: list[DailyMarketScanFailureMetadata] = []
+
+
+class DailyMarketScanCompetitorSubject(BaseModel):
+    contact_id: Optional[int] = None
+    property_id: Optional[int] = None
+    listing_ref: Optional[str] = None
+    competitor_mode: DailyMarketScanCompetitorMode
+
+
+class DailyMarketScanCompetitorWatchScan(BaseModel):
+    workflow: Literal["competitor_watch"] = "competitor_watch"
+    status: DailyMarketScanWorkflowStatus = "completed"
+    subject: DailyMarketScanCompetitorSubject
+    source_attempts: list[DailyMarketScanSourceAttempt] = []
+    findings: list[DailyMarketScanFinding] = []
+    fallback_used: bool = False
+    failure_metadata: list[DailyMarketScanFailureMetadata] = []
+
+
+class DailyMarketScanScopeSummary(BaseModel):
+    requested_subject_count: int
+    effective_subject_count: int
+    max_subjects: int
+    decision: DailyMarketScanScopeDecision
+    notes: list[str] = []
+
+
+class DailyMarketScanExecutionPolicy(BaseModel):
+    mode: DailyMarketScanExecutionMode = "internal_logging_review_only"
+    can_auto_send: bool = False
+    can_auto_contact_clients: bool = False
+    can_create_client_outputs_without_approval: bool = False
+
+
+class DailyMarketScanSummary(BaseModel):
+    scan_mode: DailyMarketScanMode
+    run_mode: DailyMarketScanRunMode
+    scope: DailyMarketScanScopeSummary
+    provider_order: list[DailyMarketScanProviderKey] = []
+
+
+class DailyMarketScanResultResponse(BaseModel):
+    scan_summary: DailyMarketScanSummary
+    execution_policy: DailyMarketScanExecutionPolicy
+    provider_catalog: list[DailyMarketScanProviderDescriptor] = []
+    client_match_scans: list[DailyMarketScanClientMatchScan] = []
+    competitor_watch_scans: list[DailyMarketScanCompetitorWatchScan] = []
+    risk_flags: list[str] = []
+    failure_metadata: list[DailyMarketScanFailureMetadata] = []
+    operator_notes: list[str] = []
+
+
+class DailyMarketScanLatestResponse(BaseModel):
+    run_id: Optional[int] = None
+    status: Optional[RunStatus] = None
+    error: Optional[str] = None
+    result: Optional[DailyMarketScanResultResponse] = None
 
 
 StrategyCoordinationSourceType = Literal["external", "internal"]
