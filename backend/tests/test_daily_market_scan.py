@@ -1,14 +1,24 @@
 import json
+import sys
+import types
 import unittest
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+
+pywebpush_stub = types.ModuleType("pywebpush")
+pywebpush_stub.webpush = lambda *args, **kwargs: None
+pywebpush_stub.WebPushException = Exception
+sys.modules.setdefault("pywebpush", pywebpush_stub)
 
 from app import models as crm_models
 from app.agents import models as agent_models
 from app.agents import daily_market_scan
 from app.agents import market_scan_providers
+from app.agents import router as agent_router
 from app.agents import schemas as agent_schemas
+from app.agents import service as agent_service
 from app.database import Base
 
 
@@ -513,6 +523,107 @@ class DailyMarketScanRunnerTests(unittest.TestCase):
             daily_market_scan.ZERO_FINDINGS_RECORDED_RISK_FLAG,
             result["risk_flags"],
         )
+
+    def test_route_surface_is_scoped_and_safe(self):
+        contact = self.create_contact()
+        run = agent_router.trigger_daily_market_scan_run_once(
+            agent_schemas.DailyMarketScanRunRequest(
+                scan_mode="client_match",
+                run_mode="manual_preview",
+                source_preference="public_only",
+                contact_ids=[contact.id],
+            ),
+            db=self.db,
+        )
+
+        other_task = agent_service.create_task(self.db, agent_type="buyer_match")
+        other_run = agent_service.create_run(
+            self.db,
+            task=other_task,
+            summary="Not a daily market scan run",
+        )
+        other_run = agent_service.update_run_status(
+            self.db,
+            other_run,
+            status="completed",
+            result="{}",
+        )
+
+        runs = agent_router.list_daily_market_scan_runs(db=self.db)
+        latest = agent_router.get_latest_daily_market_scan_result(db=self.db)
+        report = agent_router.get_daily_market_scan_run_report(run.id, db=self.db)
+        audit_logs = agent_router.list_daily_market_scan_run_audit_logs(run.id, db=self.db)
+
+        self.assertEqual([item.id for item in runs], [run.id])
+        self.assertEqual(latest["run_id"], run.id)
+        self.assertEqual(latest["status"], "completed")
+        self.assertIsNone(latest["error"])
+        self.assertIsNotNone(latest["result"])
+        self.assertEqual(report["execution_policy"]["mode"], "internal_logging_review_only")
+        self.assertFalse(report["execution_policy"]["can_auto_send"])
+        self.assertTrue(audit_logs)
+        self.assertEqual(audit_logs[0].action, "daily_market_scan_request_normalized")
+
+        with self.assertRaises(HTTPException) as report_error:
+            agent_router.get_daily_market_scan_run_report(other_run.id, db=self.db)
+        self.assertEqual(report_error.exception.status_code, 404)
+
+        with self.assertRaises(HTTPException) as audit_error:
+            agent_router.list_daily_market_scan_run_audit_logs(other_run.id, db=self.db)
+        self.assertEqual(audit_error.exception.status_code, 404)
+
+    def test_latest_route_returns_safe_empty_contract(self):
+        latest = agent_router.get_latest_daily_market_scan_result(db=self.db)
+
+        self.assertEqual(
+            latest,
+            {
+                "run_id": None,
+                "status": None,
+                "error": None,
+                "result": None,
+            },
+        )
+
+    def test_latest_route_fails_soft_for_malformed_result(self):
+        task = agent_service.create_task(self.db, agent_type="daily_market_scan")
+        run = agent_service.create_run(
+            self.db,
+            task=task,
+            summary="Malformed daily market scan result",
+        )
+        run = agent_service.update_run_status(
+            self.db,
+            run,
+            status="completed",
+            result="{not-json}",
+        )
+
+        latest = agent_router.get_latest_daily_market_scan_result(db=self.db)
+
+        self.assertEqual(latest["run_id"], run.id)
+        self.assertEqual(latest["status"], "completed")
+        self.assertIsNone(latest["error"])
+        self.assertIsNone(latest["result"])
+
+    def test_report_route_returns_404_for_missing_structured_report(self):
+        task = agent_service.create_task(self.db, agent_type="daily_market_scan")
+        run = agent_service.create_run(
+            self.db,
+            task=task,
+            summary="Malformed daily market scan result",
+        )
+        run = agent_service.update_run_status(
+            self.db,
+            run,
+            status="completed",
+            result="{not-json}",
+        )
+
+        with self.assertRaises(HTTPException) as report_error:
+            agent_router.get_daily_market_scan_run_report(run.id, db=self.db)
+
+        self.assertEqual(report_error.exception.status_code, 404)
 
 
 if __name__ == "__main__":

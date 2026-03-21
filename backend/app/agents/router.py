@@ -10,6 +10,7 @@ from ..database import get_db
 from . import (
     buyer_match,
     conversation_closer,
+    daily_market_scan,
     listing_cma,
     mls_auth,
     models,
@@ -101,6 +102,25 @@ def _serialize_strategy_coordination_result(raw_result: str | None):
             )
             return model.model_dump()
         model = agent_schemas.StrategyCoordinationResultResponse.parse_obj(parsed)
+        return model.dict()
+    except (ValidationError, TypeError, ValueError):
+        return None
+
+
+def _serialize_daily_market_scan_result(raw_result: str | None):
+    if not raw_result:
+        return None
+
+    try:
+        parsed = json.loads(raw_result)
+    except json.JSONDecodeError:
+        return None
+
+    try:
+        if hasattr(agent_schemas.DailyMarketScanResultResponse, "model_validate"):
+            model = agent_schemas.DailyMarketScanResultResponse.model_validate(parsed)
+            return model.model_dump()
+        model = agent_schemas.DailyMarketScanResultResponse.parse_obj(parsed)
         return model.dict()
     except (ValidationError, TypeError, ValueError):
         return None
@@ -343,6 +363,136 @@ def submit_mls_auth_otp(
         return mls_auth.submit_otp_for_attempt_persisted(db, request=request)
     except ValueError as error:
         raise _bad_request_from_value_error(error) from error
+
+
+@router.post(
+    "/daily-market-scan/run-once",
+    response_model=agent_schemas.AgentRun,
+    summary="Trigger a single Daily Market Scan run (MVP).",
+)
+def trigger_daily_market_scan_run_once(
+    request: agent_schemas.DailyMarketScanRunRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Manually trigger the Daily Market Scan layer to:
+    - normalize scan scope
+    - plan provider order
+    - execute stub provider paths
+    - persist internal-only, review-only scan output
+
+    This endpoint does NOT create approvals, drafts, CRM notes, or client-facing
+    actions.
+    """
+    return daily_market_scan.run_daily_market_scan_once(db, request)
+
+
+@router.get(
+    "/daily-market-scan/runs",
+    response_model=List[agent_schemas.AgentRun],
+    summary="List recent Daily Market Scan runs.",
+)
+def list_daily_market_scan_runs(
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(models.AgentTask.agent_type == "daily_market_scan")
+        .order_by(models.AgentRun.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+@router.get(
+    "/daily-market-scan/latest",
+    response_model=agent_schemas.DailyMarketScanLatestResponse,
+    summary="Get the latest Daily Market Scan result.",
+)
+def get_latest_daily_market_scan_result(db: Session = Depends(get_db)):
+    run = (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(models.AgentTask.agent_type == "daily_market_scan")
+        .order_by(models.AgentRun.created_at.desc())
+        .first()
+    )
+
+    if run is None:
+        return {
+            "run_id": None,
+            "status": None,
+            "error": None,
+            "result": None,
+        }
+
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "error": run.error,
+        "result": _serialize_daily_market_scan_result(run.result),
+    }
+
+
+@router.get(
+    "/daily-market-scan/runs/{run_id}/report",
+    response_model=agent_schemas.DailyMarketScanResultResponse,
+    summary="Get a structured Daily Market Scan report for a run.",
+)
+def get_daily_market_scan_run_report(
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    run = (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(
+            models.AgentRun.id == run_id,
+            models.AgentTask.agent_type == "daily_market_scan",
+        )
+        .first()
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    result = _serialize_daily_market_scan_result(run.result)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    return result
+
+
+@router.get(
+    "/daily-market-scan/runs/{run_id}/audit-logs",
+    response_model=List[agent_schemas.AgentAuditLog],
+    summary="List audit logs for a Daily Market Scan run.",
+)
+def list_daily_market_scan_run_audit_logs(
+    run_id: int,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    run = (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(
+            models.AgentRun.id == run_id,
+            models.AgentTask.agent_type == "daily_market_scan",
+        )
+        .first()
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    return (
+        db.query(models.AgentAuditLog)
+        .filter(models.AgentAuditLog.run_id == run.id)
+        .order_by(models.AgentAuditLog.created_at.asc())
+        .limit(limit)
+        .all()
+    )
 
 
 @router.get(
