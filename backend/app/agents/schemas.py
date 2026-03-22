@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 AgentType = Literal[
@@ -804,3 +804,61 @@ class AgentOpsAuditItem(BaseModel):
 class AgentOpsRunAuditResponse(BaseModel):
     run: AgentOpsRunItem
     audit_logs: list[AgentOpsAuditItem]
+
+
+OpenClawNeedsInputKind = Literal[
+    "pending_approval",
+    "failed_run",
+    "strategy_human_review",
+    "daily_market_scan_attention",
+]
+
+
+class OpenClawGuardrails(BaseModel):
+    read_only: bool = True
+    approvals_truth_in_skc: bool = True
+    audit_truth_in_skc: bool = True
+    no_send: bool = True
+    no_crm_mutation: bool = True
+
+
+class OpenClawNeedsInputItem(BaseModel):
+    kind: OpenClawNeedsInputKind
+    agent_type: AgentType
+    run_id: Optional[int] = None
+    approval_id: Optional[int] = None
+    title: str
+    summary: str
+    created_at: datetime
+
+
+class OpenClawModuleCard(BaseModel):
+    agent_type: AgentType
+    label: str
+    latest_run_id: Optional[int] = None
+    latest_run_status: Optional[RunStatus] = None
+    latest_run_created_at: Optional[datetime] = None
+    latest_run_finished_at: Optional[datetime] = None
+    latest_run_error: Optional[str] = None
+    pending_approvals: int = 0
+    has_pending_approvals: bool = False
+    summary: Optional[str] = None
+    highlights: list[str] = Field(default_factory=list)
+    risk_flags: list[str] = Field(default_factory=list)
+    operator_notes: list[str] = Field(default_factory=list)
+
+
+class OpenClawControlRoomResponse(BaseModel):
+    as_of: datetime
+    guardrails: OpenClawGuardrails = Field(default_factory=OpenClawGuardrails)
+    needs_input_today: list[OpenClawNeedsInputItem] = Field(default_factory=list)
+    pending_approvals: list[AgentOpsApprovalItem] = Field(default_factory=list)
+    recent_failures: list[AgentOpsRunItem] = Field(default_factory=list)
+    recent_runs: list[AgentOpsRunItem] = Field(default_factory=list)
+    latest_strategy_coordination: StrategyCoordinationLatestResponse = Field(
+        default_factory=StrategyCoordinationLatestResponse
+    )
+    latest_daily_market_scan: DailyMarketScanLatestResponse = Field(
+        default_factory=DailyMarketScanLatestResponse
+    )
+    module_cards: list[OpenClawModuleCard] = Field(default_factory=list)
