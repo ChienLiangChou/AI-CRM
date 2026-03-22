@@ -14,6 +14,7 @@ from . import (
     listing_cma,
     mls_auth,
     models,
+    openclaw_control_room,
     ops,
     orchestrator,
     schemas as agent_schemas,
@@ -1117,6 +1118,24 @@ def list_conversation_closer_run_audit_logs(
         .limit(limit)
         .all()
     )
+
+
+@router.get(
+    "/openclaw/control-room",
+    response_model=agent_schemas.OpenClawControlRoomResponse,
+    summary="Get the read-only OpenClaw control-room snapshot.",
+)
+def get_openclaw_control_room(
+    db: Session = Depends(get_db),
+):
+    """
+    Return a normalized, read-only operator snapshot for OpenClaw Phase 1.
+
+    This endpoint does not trigger runs, mutate CRM records, approve actions,
+    or create audit entries. SKC remains the source of truth for approvals,
+    audit logs, and all business logic.
+    """
+    return openclaw_control_room.get_control_room_snapshot(db)
 
 
 @router.get(
