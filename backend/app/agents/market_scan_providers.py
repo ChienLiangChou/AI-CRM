@@ -291,6 +291,22 @@ class PublicListingProvider(BaseMarketScanProvider):
             fallback_used=fallback_used,
         )
 
+    def _parse_failure(
+        self,
+        parse_health: public_listing_normalizer.PublicListingParseHealth,
+    ) -> agent_schemas.DailyMarketScanFailureMetadata:
+        messages = {
+            "public_structured_data_missing": "The public page did not expose recognizable structured listing data.",
+            "public_structured_payload_empty": "The public page exposed structured data tags, but the payload was empty or unusable.",
+            "public_parse_drift": "The public page structured data no longer matched the expected listing shape.",
+        }
+        code = parse_health.failure_code or "public_parse_drift"
+        return self._failure(
+            code=code,
+            message=messages.get(code, "Public page parsing failed to produce usable listing records."),
+            retryable=False,
+        )
+
     def _candidate_reference_values(self, context: Any) -> list[str]:
         values: list[str] = []
         seen: set[str] = set()
@@ -354,9 +370,13 @@ class PublicListingProvider(BaseMarketScanProvider):
 
         urls: list[str] = []
         seen_urls: set[str] = set()
+        rejected_reference_count = 0
         for raw_value in raw_references:
             normalized = public_listing_fetcher.normalize_public_listing_url(raw_value)
-            if normalized is None or normalized in seen_urls:
+            if normalized is None:
+                rejected_reference_count += 1
+                continue
+            if normalized in seen_urls:
                 continue
             seen_urls.add(normalized)
             urls.append(normalized)
@@ -374,7 +394,14 @@ class PublicListingProvider(BaseMarketScanProvider):
             )
 
         failure_metadata: list[agent_schemas.DailyMarketScanFailureMetadata] = []
-        notes: list[str] = [PUBLIC_RETRIEVAL_NOTE]
+        notes: list[str] = [
+            PUBLIC_RETRIEVAL_NOTE,
+            f"Source health: received {len(raw_references)} constrained public reference(s) and accepted {len(urls)} allowlisted URL(s).",
+        ]
+        if rejected_reference_count:
+            notes.append(
+                f"Source health: rejected {rejected_reference_count} invalid or non-allowlisted public reference(s)."
+            )
         records: list[public_listing_normalizer.CanonicalPublicListingRecord] = []
 
         for url in urls:
@@ -390,26 +417,30 @@ class PublicListingProvider(BaseMarketScanProvider):
                 )
                 continue
 
-            normalized = public_listing_normalizer.dedupe_public_listing_records(
-                public_listing_normalizer.normalize_public_listing_records(page)
+            notes.extend(public_listing_fetcher.source_health_notes(page))
+            normalized, parse_health = public_listing_normalizer.parse_public_listing_page(
+                page
             )
+            notes.extend(public_listing_normalizer.parse_health_notes(parse_health))
+            normalized = public_listing_normalizer.dedupe_public_listing_records(normalized)
             if not normalized:
-                failure_metadata.append(
-                    self._failure(
-                        code="public_parse_no_records",
-                        message="The public page did not expose usable structured listing records.",
-                        retryable=False,
-                    )
-                )
+                failure_metadata.append(self._parse_failure(parse_health))
                 continue
-            notes.append(f"Retrieved {len(normalized)} normalized public record(s) from {page.host}.")
+            notes.append(
+                f"Retrieved {len(normalized)} normalized public record(s) from {page.host} after page-level dedupe."
+            )
             records.extend(normalized)
 
         if not records:
             return ([], failure_metadata, notes)
 
+        deduped_records = public_listing_normalizer.dedupe_public_listing_records(records)
+        if len(deduped_records) != len(records):
+            notes.append(
+                f"Parser health: cross-page dedupe kept {len(deduped_records)} of {len(records)} normalized public record(s)."
+            )
         return (
-            public_listing_normalizer.dedupe_public_listing_records(records),
+            deduped_records,
             failure_metadata,
             notes,
         )
@@ -563,7 +594,13 @@ class PublicListingProvider(BaseMarketScanProvider):
                     listing_ref=record.source_url,
                     source_used="public_listing:realtor_ca_public",
                     why_it_matches=why_it_matches,
-                    tradeoffs=tradeoffs + list(record.notes),
+                    tradeoffs=tradeoffs
+                    + (
+                        [f"Public record completeness {public_listing_normalizer.record_completeness_score(record)}/4."]
+                        if public_listing_normalizer.record_completeness_score(record) < 4
+                        else []
+                    )
+                    + list(record.notes),
                 )
             )
 
@@ -695,6 +732,9 @@ class PublicListingProvider(BaseMarketScanProvider):
         competitor_mode: agent_schemas.DailyMarketScanCompetitorMode,
     ) -> agent_schemas.DailyMarketScanFinding:
         competitor_notes = list(record.notes)
+        completeness_score = public_listing_normalizer.record_completeness_score(record)
+        if completeness_score < 4:
+            competitor_notes.append(f"Public record completeness {completeness_score}/4.")
         if competitor_mode == "condo_same_building":
             competitor_notes.append("Public same-building match only; confidence is lower than MLS-authenticated sources.")
         else:
@@ -756,8 +796,8 @@ class PublicListingProvider(BaseMarketScanProvider):
                     failure_metadata=failure_metadata
                     + [
                         self._failure(
-                            code="same_building_confidence_low",
-                            message="Subject building metadata was insufficient for same-building confidence.",
+                            code="public_subject_building_evidence_weak",
+                            message="Subject building metadata was insufficient for reliable same-building confidence.",
                             retryable=False,
                         )
                     ],
@@ -795,6 +835,20 @@ class PublicListingProvider(BaseMarketScanProvider):
         subject_city = (self._subject_city(context) or "").strip().lower()
         subject_neighborhood = (self._subject_neighborhood(context) or "").strip().lower()
         subject_postal_prefix = self._subject_postal_prefix(context)
+        if not subject_neighborhood and not subject_postal_prefix:
+            return self.build_scan_result(
+                status="completed",
+                source_used="public_listing:realtor_ca_public",
+                failure_metadata=failure_metadata
+                + [
+                    self._failure(
+                        code="public_subject_area_evidence_weak",
+                        message="Subject area metadata was insufficient for reliable nearby-area confidence.",
+                        retryable=False,
+                    )
+                ],
+                notes=notes,
+            )
         low_confidence = False
 
         for record in records:
@@ -826,7 +880,7 @@ class PublicListingProvider(BaseMarketScanProvider):
             failure_metadata.append(
                 self._failure(
                     code=(
-                        "area_match_confidence_low"
+                        "public_area_match_confidence_low"
                         if low_confidence
                         else "public_source_no_matches"
                     ),

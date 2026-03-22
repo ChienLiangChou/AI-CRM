@@ -33,6 +33,20 @@ class PublicListingFetchedPage:
     html: str
     status_code: int
     content_type: str | None = None
+    normalized_from_input: bool = False
+
+
+def source_health_notes(page: PublicListingFetchedPage) -> list[str]:
+    normalization_note = (
+        "Source health: allowlisted public URL was normalized from the original input."
+        if page.normalized_from_input
+        else "Source health: allowlisted public URL passed normalization without change."
+    )
+    content_type = page.content_type or "unknown"
+    return [
+        normalization_note,
+        f"Source health: HTTP {page.status_code} with content type {content_type}.",
+    ]
 
 
 def normalize_public_listing_url(value: str | None) -> str | None:
@@ -62,6 +76,7 @@ def fetch_public_listing_page(
     *,
     timeout_seconds: float = DEFAULT_FETCH_TIMEOUT_SECONDS,
 ) -> PublicListingFetchedPage:
+    input_url = str(url).strip()
     normalized_url = normalize_public_listing_url(url)
     if normalized_url is None:
         raise PublicListingFetchError(
@@ -84,10 +99,15 @@ def fetch_public_listing_page(
             content_type = response.headers.get("Content-Type")
             body = response.read(MAX_FETCH_BYTES + 1)
     except HTTPError as exc:
+        blocked = exc.code in {401, 403, 429}
         raise PublicListingFetchError(
-            code="public_fetch_http_error",
-            message=f"Public listing fetch failed with HTTP {exc.code}.",
-            retryable=500 <= exc.code < 600,
+            code="public_fetch_http_blocked" if blocked else "public_fetch_http_error",
+            message=(
+                f"Public listing fetch was blocked with HTTP {exc.code}."
+                if blocked
+                else f"Public listing fetch failed with HTTP {exc.code}."
+            ),
+            retryable=(500 <= exc.code < 600) and not blocked,
         ) from exc
     except URLError as exc:
         raise PublicListingFetchError(
@@ -122,4 +142,5 @@ def fetch_public_listing_page(
         html=body.decode("utf-8", errors="replace"),
         status_code=status_code,
         content_type=content_type,
+        normalized_from_input=normalized_url != input_url,
     )

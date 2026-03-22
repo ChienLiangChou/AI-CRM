@@ -2,6 +2,9 @@ import json
 import sys
 import types
 import unittest
+from pathlib import Path
+from unittest.mock import patch
+from urllib.error import HTTPError
 
 from fastapi import HTTPException
 from sqlalchemy import create_engine
@@ -21,6 +24,9 @@ from app.agents import router as agent_router
 from app.agents import schemas as agent_schemas
 from app.agents import service as agent_service
 from app.database import Base
+
+
+FIXTURE_DIR = Path(__file__).with_name("fixtures")
 
 
 class StubPublicProvider(market_scan_providers.BaseMarketScanProvider):
@@ -296,6 +302,35 @@ PUBLIC_LISTING_EMPTY_HTML = """
 </html>
 """
 
+PUBLIC_LISTING_EMPTY_STRUCTURED_HTML = """
+<html>
+  <head>
+    <script type="application/ld+json">[]</script>
+  </head>
+  <body><div>Structured tag present, but empty payload.</div></body>
+</html>
+"""
+
+PUBLIC_LISTING_MARKUP_DRIFT_HTML = (
+    FIXTURE_DIR / "realtor_ca_public_markup_drift_variant.html"
+).read_text(encoding="utf-8")
+
+
+class FakeUrlopenResponse:
+    def __init__(self, *, body: bytes, content_type: str, status: int = 200):
+        self._body = body
+        self.headers = {"Content-Type": content_type}
+        self.status = status
+
+    def read(self, _size: int = -1):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
 
 def build_public_page(url: str, html: str):
     return public_listing_fetcher.PublicListingFetchedPage(
@@ -315,6 +350,10 @@ def fake_realtor_fetch(url: str):
 
 def fake_empty_realtor_fetch(url: str):
     return build_public_page(url, PUBLIC_LISTING_EMPTY_HTML)
+
+
+def fake_empty_structured_realtor_fetch(url: str):
+    return build_public_page(url, PUBLIC_LISTING_EMPTY_STRUCTURED_HTML)
 
 
 class DailyMarketScanContractTests(unittest.TestCase):
@@ -481,6 +520,44 @@ class DailyMarketScanContractTests(unittest.TestCase):
         self.assertEqual(area_scan.subject.competitor_mode, "area_nearby_non_condo")
         self.assertEqual(client_scan.workflow, "client_match")
 
+    def test_public_listing_fetcher_classifies_http_blocked(self):
+        with patch(
+            "app.agents.public_listing_fetcher.urlopen",
+            side_effect=HTTPError(
+                url="https://www.realtor.ca/real-estate/1",
+                code=403,
+                msg="Forbidden",
+                hdrs=None,
+                fp=None,
+            ),
+        ):
+            with self.assertRaises(public_listing_fetcher.PublicListingFetchError) as exc_info:
+                public_listing_fetcher.fetch_public_listing_page(
+                    "https://www.realtor.ca/real-estate/1"
+                )
+
+        self.assertEqual(exc_info.exception.code, "public_fetch_http_blocked")
+        self.assertFalse(exc_info.exception.retryable)
+
+    def test_public_listing_fetcher_rejects_unsupported_content_type(self):
+        with patch(
+            "app.agents.public_listing_fetcher.urlopen",
+            return_value=FakeUrlopenResponse(
+                body=b'{"unexpected": "json"}',
+                content_type="application/json",
+            ),
+        ):
+            with self.assertRaises(public_listing_fetcher.PublicListingFetchError) as exc_info:
+                public_listing_fetcher.fetch_public_listing_page(
+                    "https://www.realtor.ca/real-estate/1"
+                )
+
+        self.assertEqual(
+            exc_info.exception.code,
+            "public_fetch_content_type_unsupported",
+        )
+        self.assertFalse(exc_info.exception.retryable)
+
     def test_public_listing_normalizer_extracts_and_dedupes_structured_records(self):
         page = build_public_page(
             "https://www.realtor.ca/real-estate/building-search",
@@ -495,6 +572,25 @@ class DailyMarketScanContractTests(unittest.TestCase):
         duplicated = normalized + [normalized[1]]
         deduped = public_listing_normalizer.dedupe_public_listing_records(duplicated)
         self.assertEqual(len(deduped), 3)
+
+    def test_public_listing_normalizer_reports_parse_health_and_fixture_guard(self):
+        page = build_public_page(
+            "https://www.realtor.ca/real-estate/fixture-drift",
+            PUBLIC_LISTING_MARKUP_DRIFT_HTML,
+        )
+
+        normalized, parse_health = public_listing_normalizer.parse_public_listing_page(
+            page
+        )
+
+        self.assertEqual(len(normalized), 2)
+        self.assertTrue(parse_health.structured_data_present)
+        self.assertIsNone(parse_health.failure_code)
+        self.assertEqual(parse_health.json_ld_script_count, 1)
+        self.assertGreaterEqual(parse_health.candidate_node_count, 2)
+        self.assertEqual(parse_health.completeness_min, 2)
+        self.assertEqual(parse_health.completeness_max, 4)
+        self.assertEqual(normalized[0].source_family, "realtor_ca_public")
 
     def test_public_listing_provider_keeps_stub_only_without_contact_context(self):
         provider = market_scan_providers.PublicListingProvider(fetch_page=fake_realtor_fetch)
@@ -600,7 +696,39 @@ class DailyMarketScanContractTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "failed")
-        self.assertEqual(result.failure_metadata[0].code, "public_parse_no_records")
+        self.assertEqual(
+            result.failure_metadata[0].code,
+            "public_structured_data_missing",
+        )
+
+    def test_public_listing_provider_classifies_empty_structured_payload(self):
+        provider = market_scan_providers.PublicListingProvider(
+            fetch_page=fake_empty_structured_realtor_fetch
+        )
+
+        result = provider.scan_client_matches(
+            {
+                "contact": {
+                    "contact_id": 42,
+                    "budget_min": 800000,
+                    "budget_max": 900000,
+                    "preferred_areas": ["Toronto"],
+                    "property_preferences": {"property_type": "condo"},
+                },
+                "candidate_properties": [
+                    {
+                        "property_id": 17,
+                        "listing_url": "https://www.realtor.ca/real-estate/building-search",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(
+            result.failure_metadata[0].code,
+            "public_structured_payload_empty",
+        )
 
     def test_public_listing_provider_client_match_weak_match_returns_no_findings(self):
         provider = market_scan_providers.PublicListingProvider(fetch_page=fake_realtor_fetch)
@@ -629,6 +757,32 @@ class DailyMarketScanContractTests(unittest.TestCase):
             result.failure_metadata[-1].code,
             "public_client_match_confidence_low",
         )
+
+    def test_public_listing_provider_reports_source_and_parser_health_notes(self):
+        provider = market_scan_providers.PublicListingProvider(fetch_page=fake_realtor_fetch)
+
+        result = provider.scan_client_matches(
+            {
+                "contact": {
+                    "contact_id": 42,
+                    "budget_min": 800000,
+                    "budget_max": 900000,
+                    "preferred_areas": ["Toronto"],
+                    "property_preferences": {"property_type": "condo"},
+                },
+                "candidate_properties": [
+                    {
+                        "property_id": 17,
+                        "listing_url": "https://www.realtor.ca/real-estate/building-search",
+                    }
+                ],
+            }
+        )
+
+        notes_text = " ".join(result.notes)
+        self.assertIn("Source health:", notes_text)
+        self.assertIn("Parser health:", notes_text)
+        self.assertIn("Parser completeness:", notes_text)
 
     def test_public_listing_provider_returns_same_building_competitor_from_real_page(self):
         provider = market_scan_providers.PublicListingProvider(fetch_page=fake_realtor_fetch)
@@ -679,6 +833,26 @@ class DailyMarketScanContractTests(unittest.TestCase):
 
         self.assertEqual(result.status, "failed")
         self.assertEqual(result.failure_metadata[0].code, "public_reference_missing")
+
+    def test_public_listing_provider_classifies_weak_area_subject_evidence(self):
+        provider = market_scan_providers.PublicListingProvider(fetch_page=fake_realtor_fetch)
+
+        result = provider.scan_area_competitors(
+            {
+                "property": {
+                    "street": "88 King St W",
+                    "city": "Toronto",
+                    "listing_url": "https://www.realtor.ca/real-estate/area-search",
+                }
+            }
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.findings, [])
+        self.assertEqual(
+            result.failure_metadata[-1].code,
+            "public_subject_area_evidence_weak",
+        )
 
 
 class DailyMarketScanRunnerTests(unittest.TestCase):

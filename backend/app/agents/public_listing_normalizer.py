@@ -34,6 +34,19 @@ class CanonicalPublicListingRecord:
     notes: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class PublicListingParseHealth:
+    json_ld_script_count: int
+    json_ld_object_count: int
+    candidate_node_count: int
+    usable_record_count: int
+    structured_data_present: bool
+    completeness_min: int = 0
+    completeness_max: int = 0
+    completeness_average: float = 0.0
+    failure_code: str | None = None
+
+
 def _clean_text(value: Any) -> str | None:
     if value is None:
         return None
@@ -236,12 +249,31 @@ def _extract_property_type(node: dict[str, Any]) -> str | None:
     return _clean_text(node.get("propertyType"))
 
 
-def normalize_public_listing_records(
+def record_completeness_score(record: CanonicalPublicListingRecord) -> int:
+    return sum(
+        1
+        for present in [
+            bool(record.address),
+            record.list_price is not None,
+            bool(record.property_type),
+            bool(record.external_listing_id or record.source_url),
+        ]
+        if present
+    )
+
+
+def parse_public_listing_page(
     page: PublicListingFetchedPage,
-) -> list[CanonicalPublicListingRecord]:
+) -> tuple[list[CanonicalPublicListingRecord], PublicListingParseHealth]:
+    script_count = len(list(JSON_LD_SCRIPT_PATTERN.finditer(page.html)))
+    payloads = _extract_json_ld_objects(page.html)
     records: list[CanonicalPublicListingRecord] = []
-    for payload in _extract_json_ld_objects(page.html):
-        for node in _iter_candidate_nodes(payload):
+    candidate_node_count = 0
+
+    for payload in payloads:
+        nodes = _iter_candidate_nodes(payload)
+        candidate_node_count += len(nodes)
+        for node in nodes:
             source_url = _extract_source_url(node, page.url)
             identifier = _extract_identifier(node)
             street, city, postal_code = _extract_address_parts(node)
@@ -252,27 +284,79 @@ def normalize_public_listing_records(
                 continue
 
             offer = _extract_offer(node) or {}
-            record = CanonicalPublicListingRecord(
-                source_family="realtor_ca_public",
-                source_url=source_url,
-                external_listing_id=identifier,
-                address=address,
-                street=street,
-                unit=_coerce_unit(street),
-                city=city,
-                postal_code=postal_code,
-                neighborhood=_clean_text(node.get("areaServed"))
-                or _clean_text(node.get("neighborhood")),
-                property_type=_extract_property_type(node),
-                list_price=_coerce_float(offer.get("price") or node.get("price")),
-                listing_status=_clean_text(offer.get("availability") or node.get("availability")),
-                bedrooms=_coerce_int(node.get("numberOfBedrooms") or node.get("bedrooms")),
-                bathrooms=_coerce_float(
-                    node.get("numberOfBathroomsTotal") or node.get("bathrooms")
-                ),
-                notes=_extract_notes(node, page),
+            records.append(
+                CanonicalPublicListingRecord(
+                    source_family="realtor_ca_public",
+                    source_url=source_url,
+                    external_listing_id=identifier,
+                    address=address,
+                    street=street,
+                    unit=_coerce_unit(street),
+                    city=city,
+                    postal_code=postal_code,
+                    neighborhood=_clean_text(node.get("areaServed"))
+                    or _clean_text(node.get("neighborhood")),
+                    property_type=_extract_property_type(node),
+                    list_price=_coerce_float(offer.get("price") or node.get("price")),
+                    listing_status=_clean_text(offer.get("availability") or node.get("availability")),
+                    bedrooms=_coerce_int(node.get("numberOfBedrooms") or node.get("bedrooms")),
+                    bathrooms=_coerce_float(
+                        node.get("numberOfBathroomsTotal") or node.get("bathrooms")
+                    ),
+                    notes=_extract_notes(node, page),
+                )
             )
-            records.append(record)
+
+    completeness_scores = [record_completeness_score(item) for item in records]
+    failure_code = None
+    if script_count == 0:
+        failure_code = "public_structured_data_missing"
+    elif not payloads or candidate_node_count == 0:
+        failure_code = "public_structured_payload_empty"
+    elif not records:
+        failure_code = "public_parse_drift"
+
+    parse_health = PublicListingParseHealth(
+        json_ld_script_count=script_count,
+        json_ld_object_count=len(payloads),
+        candidate_node_count=candidate_node_count,
+        usable_record_count=len(records),
+        structured_data_present=script_count > 0,
+        completeness_min=min(completeness_scores) if completeness_scores else 0,
+        completeness_max=max(completeness_scores) if completeness_scores else 0,
+        completeness_average=(
+            sum(completeness_scores) / len(completeness_scores)
+            if completeness_scores
+            else 0.0
+        ),
+        failure_code=failure_code,
+    )
+    return records, parse_health
+
+
+def parse_health_notes(parse_health: PublicListingParseHealth) -> list[str]:
+    notes = [
+        "Parser health: "
+        f"JSON-LD scripts={parse_health.json_ld_script_count}, "
+        f"objects={parse_health.json_ld_object_count}, "
+        f"candidate nodes={parse_health.candidate_node_count}, "
+        f"usable records={parse_health.usable_record_count}.",
+    ]
+    if parse_health.usable_record_count > 0:
+        notes.append(
+            "Parser completeness: "
+            f"{parse_health.completeness_min}-{parse_health.completeness_max}/4 "
+            f"(avg {parse_health.completeness_average:.1f}/4)."
+        )
+    elif parse_health.failure_code:
+        notes.append(f"Parser health classified failure as {parse_health.failure_code}.")
+    return notes
+
+
+def normalize_public_listing_records(
+    page: PublicListingFetchedPage,
+) -> list[CanonicalPublicListingRecord]:
+    records, _ = parse_public_listing_page(page)
     return records
 
 
