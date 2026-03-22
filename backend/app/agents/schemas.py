@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 AgentType = Literal[
@@ -12,6 +12,7 @@ AgentType = Literal[
     "strategy_coordination",
     "daily_market_scan",
     "mls_auth",
+    "transaction_paperwork",
 ]
 TaskStatus = Literal[
     "queued",
@@ -711,6 +712,153 @@ class StrategyCoordinationLatestResponse(BaseModel):
     status: Optional[RunStatus] = None
     error: Optional[str] = None
     result: Optional[StrategyCoordinationResultResponse] = None
+
+
+TransactionPaperworkSourceDocType = Literal[
+    "aps",
+    "agreement_to_lease",
+    "transaction_related_document",
+]
+TransactionPaperworkConfirmationState = Literal[
+    "not_required",
+    "required",
+    "confirmed",
+]
+TransactionPaperworkQuestionReason = Literal[
+    "commission_confirmation_required",
+    "split_confirmation_required",
+    "referral_fee_confirmation_required",
+    "marketing_fee_confirmation_required",
+    "missing_field",
+    "low_confidence_field",
+    "conflicting_field",
+]
+TransactionPaperworkValueType = Literal[
+    "text",
+    "date",
+    "currency",
+    "boolean",
+    "multiline",
+    "selection",
+]
+TransactionPaperworkTemplateFieldType = TransactionPaperworkValueType
+TransactionPaperworkTemplateFillMode = Literal[
+    "fill_pdf_fields",
+    "overlay_coordinates",
+]
+
+
+class TransactionPaperworkEvidenceReference(BaseModel):
+    source_doc_type: TransactionPaperworkSourceDocType
+    source_page: int
+    evidence_anchor: Optional[str] = None
+    evidence_snippet: Optional[str] = None
+    document_label: Optional[str] = None
+
+
+class TransactionPaperworkCanonicalDealFact(BaseModel):
+    field_key: str
+    section_key: str
+    label: str
+    value: Optional[str] = None
+    confidence: float = 0.0
+    confirmation_state: TransactionPaperworkConfirmationState = "not_required"
+    requires_kevin_confirmation: bool = False
+    evidence: list[TransactionPaperworkEvidenceReference] = Field(
+        default_factory=list
+    )
+    notes: list[str] = Field(default_factory=list)
+
+
+class TransactionPaperworkCanonicalDealFacts(BaseModel):
+    facts: list[TransactionPaperworkCanonicalDealFact] = Field(
+        default_factory=list
+    )
+    unresolved_field_keys: list[str] = Field(default_factory=list)
+    operator_notes: list[str] = Field(default_factory=list)
+
+
+class TransactionPaperworkFieldTraceability(BaseModel):
+    template_field_key: str
+    final_value: Optional[str] = None
+    source_doc_type: Optional[TransactionPaperworkSourceDocType] = None
+    source_page: Optional[int] = None
+    evidence_anchor: Optional[str] = None
+    evidence_snippet: Optional[str] = None
+    confidence: float = 0.0
+    transform_used: Optional[str] = None
+    confirmed_by_kevin: bool = False
+
+
+class TransactionPaperworkQuestionItem(BaseModel):
+    field_key: str
+    prompt: str
+    reason: TransactionPaperworkQuestionReason
+    required: bool = True
+    suggested_value: Optional[str] = None
+    confidence: Optional[float] = None
+    evidence: list[TransactionPaperworkEvidenceReference] = Field(
+        default_factory=list
+    )
+
+
+class TransactionPaperworkQuestionPacket(BaseModel):
+    questions: list[TransactionPaperworkQuestionItem] = Field(default_factory=list)
+    blocking_field_keys: list[str] = Field(default_factory=list)
+    operator_notes: list[str] = Field(default_factory=list)
+
+
+class TransactionPaperworkTemplateFieldDescriptor(BaseModel):
+    key: str
+    label: str
+    section_key: str
+    field_type: TransactionPaperworkTemplateFieldType = "text"
+    canonical_fact_keys: list[str] = Field(default_factory=list)
+    requires_kevin_confirmation: bool = False
+    notes: list[str] = Field(default_factory=list)
+
+
+class TransactionPaperworkTemplateSection(BaseModel):
+    key: str
+    label: str
+    fields: list[TransactionPaperworkTemplateFieldDescriptor] = Field(
+        default_factory=list
+    )
+
+
+class TransactionPaperworkTemplateMetadata(BaseModel):
+    template_id: str
+    display_name: str
+    template_version: str
+    source_template_path: str
+    source_template_checksum_sha256: str
+    preserve_original_layout: bool = True
+    preferred_fill_order: list[TransactionPaperworkTemplateFillMode] = Field(
+        default_factory=lambda: ["fill_pdf_fields", "overlay_coordinates"]
+    )
+    sections: list[TransactionPaperworkTemplateSection] = Field(
+        default_factory=list
+    )
+    notes: list[str] = Field(default_factory=list)
+
+
+class TransactionPaperworkTemplateInspection(BaseModel):
+    template_id: str
+    display_name: str
+    template_version: str
+    source_template_path: str
+    source_template_checksum_sha256: str
+    template_present: bool
+    inspection_method: str
+    page_count: Optional[int] = None
+    pdf_version: Optional[str] = None
+    pdf_form_type: Optional[str] = None
+    native_field_fill_supported: bool = False
+    overlay_fill_supported: bool = False
+    ready_fill_modes: list[TransactionPaperworkTemplateFillMode] = Field(
+        default_factory=list
+    )
+    notes: list[str] = Field(default_factory=list)
 
 
 class AgentOpsReviewModel(BaseModel):
