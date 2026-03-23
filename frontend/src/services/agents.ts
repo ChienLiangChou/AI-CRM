@@ -586,6 +586,234 @@ export interface StrategyCoordinationLatestResponse {
     result: StrategyCoordinationResultResponse | null;
 }
 
+export type EventStrategyReviewSourceMode =
+    | 'manual_summary'
+    | 'manual_url_bundle'
+    | 'curated_search_query';
+export type EventStrategyReviewImportance =
+    | 'noise'
+    | 'watchlist'
+    | 'strategy_review_required';
+export type EventStrategyReviewPerspectiveStatus = 'active' | 'placeholder' | 'skipped';
+export type EventStrategyReviewExecutionMode = 'internal_review_only_non_executable';
+export type EventStrategyReviewExecutionPath =
+    | 'manual_summary_internal_report'
+    | 'manual_url_bundle_internal_report'
+    | 'curated_search_query_not_active_yet';
+export type EventStrategyReviewExecutionStatus = 'report_generated' | 'not_active_yet';
+export type EventStrategyReviewOutputMode =
+    | 'internal_report_only'
+    | 'html_report_package'
+    | 'social_post_draft_pack'
+    | 'email_newsletter_draft_pack'
+    | 'client_summary_draft_pack';
+export type EventStrategyReviewOutputModeStatus = 'first_class_v1' | 'planned_later';
+export type EventStrategyReviewPackageStatus = 'not_generated' | 'draft_ready' | 'blocked';
+export type EventStrategyReviewArtifactType =
+    | 'static_html_bundle'
+    | 'draft_pack'
+    | 'json_report';
+
+export interface EventStrategyReviewManualSummaryInput {
+    headline: string;
+    summary: string;
+    source_label?: string | null;
+    event_date?: string | null;
+}
+
+export interface EventStrategyReviewUrlSourceInput {
+    url: string;
+    title?: string | null;
+    publisher?: string | null;
+    published_at?: string | null;
+}
+
+export interface EventStrategyReviewManualUrlBundleInput {
+    items: EventStrategyReviewUrlSourceInput[];
+    submitted_item_count: number;
+}
+
+export interface EventStrategyReviewCuratedSearchQueryInput {
+    query: string;
+    geography_hint?: string | null;
+    topic_hints: string[];
+    allowed_domains: string[];
+    max_results: number;
+}
+
+export interface EventStrategyReviewRetrievalContract {
+    source_mode: EventStrategyReviewSourceMode;
+    manual_summary_input?: EventStrategyReviewManualSummaryInput | null;
+    manual_url_bundle_input?: EventStrategyReviewManualUrlBundleInput | null;
+    curated_search_query_input?: EventStrategyReviewCuratedSearchQueryInput | null;
+    live_retrieval_enabled: boolean;
+}
+
+export interface EventStrategyReviewRunRequest {
+    retrieval_contract: EventStrategyReviewRetrievalContract;
+    operator_notes?: string | null;
+    geo_focus: string[];
+}
+
+export interface EventStrategyReviewClusteredSource {
+    source_kind: EventStrategyReviewSourceMode;
+    title?: string | null;
+    url?: string | null;
+    publisher?: string | null;
+    published_at?: string | null;
+    source_label?: string | null;
+    notes: string[];
+}
+
+export interface EventStrategyReviewEventCluster {
+    source_mode: EventStrategyReviewSourceMode;
+    canonical_event_title: string;
+    canonical_summary: string;
+    taxonomy_tags: string[];
+    geography_tags: string[];
+    source_count: number;
+    cluster_strength: number;
+    duplicate_count: number;
+    sources: EventStrategyReviewClusteredSource[];
+    retrieval_notes: string[];
+}
+
+export interface EventStrategyReviewScoreBreakdown {
+    relevance_score: number;
+    geography_score: number;
+    recency_score: number;
+    source_credibility_score: number;
+    cluster_strength_score: number;
+    operator_usefulness_score: number;
+    total_score: number;
+    selection_notes: string[];
+}
+
+export interface EventStrategyReviewImportanceAssessment {
+    classification: EventStrategyReviewImportance;
+    reason: string;
+    confidence: number;
+}
+
+export interface EventStrategyReviewPerspectiveBlock {
+    status: EventStrategyReviewPerspectiveStatus;
+    summary: string;
+    why_it_matters: string[];
+    business_implications: string[];
+    recommended_internal_actions: string[];
+    cautions: string[];
+}
+
+export interface EventStrategyReviewPerspectiveBlocks {
+    follow_up: EventStrategyReviewPerspectiveBlock;
+    conversation_retention: EventStrategyReviewPerspectiveBlock;
+    listing_seller: EventStrategyReviewPerspectiveBlock;
+    cma_market: EventStrategyReviewPerspectiveBlock;
+    ops_compliance: EventStrategyReviewPerspectiveBlock;
+    buyer_renter: EventStrategyReviewPerspectiveBlock;
+}
+
+export interface EventStrategyReviewExecutionPolicy {
+    mode: EventStrategyReviewExecutionMode;
+    can_auto_send: boolean;
+    can_auto_publish: boolean;
+    can_auto_execute: boolean;
+    can_auto_deploy: boolean;
+}
+
+export interface EventStrategyReviewExecutionPlan {
+    source_mode: EventStrategyReviewSourceMode;
+    execution_path: EventStrategyReviewExecutionPath;
+    accepted_for_execution: boolean;
+    live_retrieval_enabled: boolean;
+    deduped_source_count: number;
+    duplicate_source_count: number;
+    operator_notes: string[];
+}
+
+export interface EventStrategyReviewRecommendedActions {
+    internal_actions: string[];
+    human_review_actions: string[];
+}
+
+export interface EventStrategyReviewSynthesis {
+    summary: string;
+    key_takeaways: string[];
+}
+
+export interface EventStrategyReviewOutputModeOption {
+    mode: EventStrategyReviewOutputMode;
+    status: EventStrategyReviewOutputModeStatus;
+    reason?: string | null;
+}
+
+export interface EventStrategyReviewReportResponse {
+    report_title: string;
+    retrieval_contract: EventStrategyReviewRetrievalContract;
+    event_cluster: EventStrategyReviewEventCluster;
+    score_breakdown: EventStrategyReviewScoreBreakdown;
+    importance_assessment: EventStrategyReviewImportanceAssessment;
+    execution_policy: EventStrategyReviewExecutionPolicy;
+    perspective_blocks: EventStrategyReviewPerspectiveBlocks;
+    strategy_synthesis: EventStrategyReviewSynthesis;
+    recommended_next_actions: EventStrategyReviewRecommendedActions;
+    output_mode_options: EventStrategyReviewOutputModeOption[];
+    operator_notes: string[];
+}
+
+export interface EventStrategyReviewExecutionResult {
+    source_mode: EventStrategyReviewSourceMode;
+    execution_status: EventStrategyReviewExecutionStatus;
+    execution_plan: EventStrategyReviewExecutionPlan;
+    report: EventStrategyReviewReportResponse | null;
+    inactive_reason?: string | null;
+    operator_notes: string[];
+}
+
+export interface EventStrategyReviewLatestResponse {
+    run_id: number | null;
+    status: string | null;
+    error: string | null;
+    result: EventStrategyReviewExecutionResult | null;
+}
+
+export interface EventStrategyReviewPackageRequest {
+    source_run_id?: number | null;
+    selected_output_mode: EventStrategyReviewOutputMode;
+    title_override?: string | null;
+    audience_label?: string | null;
+    operator_notes?: string | null;
+}
+
+export interface EventStrategyReviewPackageArtifact {
+    artifact_type: EventStrategyReviewArtifactType;
+    file_name?: string | null;
+    path?: string | null;
+    content_type?: string | null;
+    file_size_bytes?: number | null;
+    checksum_sha256?: string | null;
+    is_entrypoint: boolean;
+    label?: string | null;
+}
+
+export interface EventStrategyReviewPackageResult {
+    source_run_id?: number | null;
+    selected_output_mode: EventStrategyReviewOutputMode;
+    status: EventStrategyReviewPackageStatus;
+    requires_explicit_operator_step: boolean;
+    package_directory_path?: string | null;
+    artifacts: EventStrategyReviewPackageArtifact[];
+    operator_notes: string[];
+}
+
+export interface EventStrategyReviewPackageLatestResponse {
+    source_run_id: number;
+    package_run_id: number | null;
+    status: string | null;
+    error: string | null;
+    result: EventStrategyReviewPackageResult | null;
+}
+
 export interface AgentOpsReviewModel {
     manual_only: boolean;
     no_send: boolean;
@@ -1388,6 +1616,389 @@ const normalizeStrategyCoordinationLatest = (
     };
 };
 
+const normalizeEventStrategyReviewManualSummaryInput = (
+    value: Partial<EventStrategyReviewManualSummaryInput> | null | undefined,
+): EventStrategyReviewManualSummaryInput => {
+    return {
+        headline: typeof value?.headline === 'string' ? value.headline : '',
+        summary: typeof value?.summary === 'string' ? value.summary : '',
+        source_label: typeof value?.source_label === 'string' ? value.source_label : null,
+        event_date: typeof value?.event_date === 'string' ? value.event_date : null,
+    };
+};
+
+const normalizeEventStrategyReviewUrlSourceInput = (
+    value: Partial<EventStrategyReviewUrlSourceInput> | null | undefined,
+): EventStrategyReviewUrlSourceInput => {
+    return {
+        url: typeof value?.url === 'string' ? value.url : '',
+        title: typeof value?.title === 'string' ? value.title : null,
+        publisher: typeof value?.publisher === 'string' ? value.publisher : null,
+        published_at: typeof value?.published_at === 'string' ? value.published_at : null,
+    };
+};
+
+const normalizeEventStrategyReviewManualUrlBundleInput = (
+    value: Partial<EventStrategyReviewManualUrlBundleInput> | null | undefined,
+): EventStrategyReviewManualUrlBundleInput => {
+    return {
+        items: ensureArray<Partial<EventStrategyReviewUrlSourceInput>>(value?.items).map(
+            normalizeEventStrategyReviewUrlSourceInput,
+        ),
+        submitted_item_count:
+            typeof value?.submitted_item_count === 'number' ? value.submitted_item_count : 0,
+    };
+};
+
+const normalizeEventStrategyReviewCuratedSearchQueryInput = (
+    value: Partial<EventStrategyReviewCuratedSearchQueryInput> | null | undefined,
+): EventStrategyReviewCuratedSearchQueryInput => {
+    return {
+        query: typeof value?.query === 'string' ? value.query : '',
+        geography_hint:
+            typeof value?.geography_hint === 'string' ? value.geography_hint : null,
+        topic_hints: ensureArray<string>(value?.topic_hints),
+        allowed_domains: ensureArray<string>(value?.allowed_domains),
+        max_results: typeof value?.max_results === 'number' ? value.max_results : 10,
+    };
+};
+
+const normalizeEventStrategyReviewRetrievalContract = (
+    value: Partial<EventStrategyReviewRetrievalContract> | null | undefined,
+): EventStrategyReviewRetrievalContract => {
+    return {
+        source_mode:
+            value?.source_mode === 'manual_summary' ||
+            value?.source_mode === 'manual_url_bundle'
+                ? value.source_mode
+                : 'curated_search_query',
+        manual_summary_input: value?.manual_summary_input
+            ? normalizeEventStrategyReviewManualSummaryInput(value.manual_summary_input)
+            : null,
+        manual_url_bundle_input: value?.manual_url_bundle_input
+            ? normalizeEventStrategyReviewManualUrlBundleInput(value.manual_url_bundle_input)
+            : null,
+        curated_search_query_input: value?.curated_search_query_input
+            ? normalizeEventStrategyReviewCuratedSearchQueryInput(
+                value.curated_search_query_input,
+            )
+            : null,
+        live_retrieval_enabled: value?.live_retrieval_enabled === true,
+    };
+};
+
+const normalizeEventStrategyReviewClusteredSource = (
+    value: Partial<EventStrategyReviewClusteredSource> | null | undefined,
+): EventStrategyReviewClusteredSource => {
+    return {
+        source_kind:
+            value?.source_kind === 'manual_summary' ||
+            value?.source_kind === 'manual_url_bundle'
+                ? value.source_kind
+                : 'curated_search_query',
+        title: typeof value?.title === 'string' ? value.title : null,
+        url: typeof value?.url === 'string' ? value.url : null,
+        publisher: typeof value?.publisher === 'string' ? value.publisher : null,
+        published_at: typeof value?.published_at === 'string' ? value.published_at : null,
+        source_label: typeof value?.source_label === 'string' ? value.source_label : null,
+        notes: ensureArray<string>(value?.notes),
+    };
+};
+
+const normalizeEventStrategyReviewEventCluster = (
+    value: Partial<EventStrategyReviewEventCluster> | null | undefined,
+): EventStrategyReviewEventCluster => {
+    return {
+        source_mode:
+            value?.source_mode === 'manual_summary' ||
+            value?.source_mode === 'manual_url_bundle'
+                ? value.source_mode
+                : 'curated_search_query',
+        canonical_event_title:
+            typeof value?.canonical_event_title === 'string'
+                ? value.canonical_event_title
+                : '',
+        canonical_summary:
+            typeof value?.canonical_summary === 'string' ? value.canonical_summary : '',
+        taxonomy_tags: ensureArray<string>(value?.taxonomy_tags),
+        geography_tags: ensureArray<string>(value?.geography_tags),
+        source_count: typeof value?.source_count === 'number' ? value.source_count : 0,
+        cluster_strength: typeof value?.cluster_strength === 'number' ? value.cluster_strength : 0,
+        duplicate_count: typeof value?.duplicate_count === 'number' ? value.duplicate_count : 0,
+        sources: ensureArray<Partial<EventStrategyReviewClusteredSource>>(value?.sources).map(
+            normalizeEventStrategyReviewClusteredSource,
+        ),
+        retrieval_notes: ensureArray<string>(value?.retrieval_notes),
+    };
+};
+
+const normalizeEventStrategyReviewScoreBreakdown = (
+    value: Partial<EventStrategyReviewScoreBreakdown> | null | undefined,
+): EventStrategyReviewScoreBreakdown => {
+    return {
+        relevance_score: typeof value?.relevance_score === 'number' ? value.relevance_score : 0,
+        geography_score: typeof value?.geography_score === 'number' ? value.geography_score : 0,
+        recency_score: typeof value?.recency_score === 'number' ? value.recency_score : 0,
+        source_credibility_score:
+            typeof value?.source_credibility_score === 'number'
+                ? value.source_credibility_score
+                : 0,
+        cluster_strength_score:
+            typeof value?.cluster_strength_score === 'number' ? value.cluster_strength_score : 0,
+        operator_usefulness_score:
+            typeof value?.operator_usefulness_score === 'number'
+                ? value.operator_usefulness_score
+                : 0,
+        total_score: typeof value?.total_score === 'number' ? value.total_score : 0,
+        selection_notes: ensureArray<string>(value?.selection_notes),
+    };
+};
+
+const normalizeEventStrategyReviewImportanceAssessment = (
+    value: Partial<EventStrategyReviewImportanceAssessment> | null | undefined,
+): EventStrategyReviewImportanceAssessment => {
+    return {
+        classification:
+            value?.classification === 'noise' ||
+            value?.classification === 'strategy_review_required'
+                ? value.classification
+                : 'watchlist',
+        reason: typeof value?.reason === 'string' ? value.reason : '',
+        confidence: typeof value?.confidence === 'number' ? value.confidence : 0,
+    };
+};
+
+const normalizeEventStrategyReviewPerspectiveBlock = (
+    value: Partial<EventStrategyReviewPerspectiveBlock> | null | undefined,
+): EventStrategyReviewPerspectiveBlock => {
+    return {
+        status:
+            value?.status === 'active' || value?.status === 'skipped'
+                ? value.status
+                : 'placeholder',
+        summary: typeof value?.summary === 'string' ? value.summary : '',
+        why_it_matters: ensureArray<string>(value?.why_it_matters),
+        business_implications: ensureArray<string>(value?.business_implications),
+        recommended_internal_actions: ensureArray<string>(value?.recommended_internal_actions),
+        cautions: ensureArray<string>(value?.cautions),
+    };
+};
+
+const normalizeEventStrategyReviewPerspectiveBlocks = (
+    value: Partial<EventStrategyReviewPerspectiveBlocks> | null | undefined,
+): EventStrategyReviewPerspectiveBlocks => {
+    return {
+        follow_up: normalizeEventStrategyReviewPerspectiveBlock(value?.follow_up),
+        conversation_retention: normalizeEventStrategyReviewPerspectiveBlock(
+            value?.conversation_retention,
+        ),
+        listing_seller: normalizeEventStrategyReviewPerspectiveBlock(value?.listing_seller),
+        cma_market: normalizeEventStrategyReviewPerspectiveBlock(value?.cma_market),
+        ops_compliance: normalizeEventStrategyReviewPerspectiveBlock(value?.ops_compliance),
+        buyer_renter: normalizeEventStrategyReviewPerspectiveBlock(value?.buyer_renter),
+    };
+};
+
+const normalizeEventStrategyReviewExecutionPolicy = (
+    value: Partial<EventStrategyReviewExecutionPolicy> | null | undefined,
+): EventStrategyReviewExecutionPolicy => {
+    return {
+        mode: 'internal_review_only_non_executable',
+        can_auto_send: value?.can_auto_send === true,
+        can_auto_publish: value?.can_auto_publish === true,
+        can_auto_execute: value?.can_auto_execute === true,
+        can_auto_deploy: value?.can_auto_deploy === true,
+    };
+};
+
+const normalizeEventStrategyReviewExecutionPlan = (
+    value: Partial<EventStrategyReviewExecutionPlan> | null | undefined,
+): EventStrategyReviewExecutionPlan => {
+    return {
+        source_mode:
+            value?.source_mode === 'manual_summary' ||
+            value?.source_mode === 'manual_url_bundle'
+                ? value.source_mode
+                : 'curated_search_query',
+        execution_path:
+            value?.execution_path === 'manual_summary_internal_report' ||
+            value?.execution_path === 'manual_url_bundle_internal_report'
+                ? value.execution_path
+                : 'curated_search_query_not_active_yet',
+        accepted_for_execution: value?.accepted_for_execution === true,
+        live_retrieval_enabled: value?.live_retrieval_enabled === true,
+        deduped_source_count:
+            typeof value?.deduped_source_count === 'number' ? value.deduped_source_count : 0,
+        duplicate_source_count:
+            typeof value?.duplicate_source_count === 'number'
+                ? value.duplicate_source_count
+                : 0,
+        operator_notes: ensureArray<string>(value?.operator_notes),
+    };
+};
+
+const normalizeEventStrategyReviewRecommendedActions = (
+    value: Partial<EventStrategyReviewRecommendedActions> | null | undefined,
+): EventStrategyReviewRecommendedActions => {
+    return {
+        internal_actions: ensureArray<string>(value?.internal_actions),
+        human_review_actions: ensureArray<string>(value?.human_review_actions),
+    };
+};
+
+const normalizeEventStrategyReviewSynthesis = (
+    value: Partial<EventStrategyReviewSynthesis> | null | undefined,
+): EventStrategyReviewSynthesis => {
+    return {
+        summary: typeof value?.summary === 'string' ? value.summary : '',
+        key_takeaways: ensureArray<string>(value?.key_takeaways),
+    };
+};
+
+const normalizeEventStrategyReviewOutputModeOption = (
+    value: Partial<EventStrategyReviewOutputModeOption> | null | undefined,
+): EventStrategyReviewOutputModeOption => {
+    return {
+        mode:
+            value?.mode === 'internal_report_only' ||
+            value?.mode === 'social_post_draft_pack' ||
+            value?.mode === 'email_newsletter_draft_pack' ||
+            value?.mode === 'client_summary_draft_pack'
+                ? value.mode
+                : 'html_report_package',
+        status: value?.status === 'planned_later' ? 'planned_later' : 'first_class_v1',
+        reason: typeof value?.reason === 'string' ? value.reason : null,
+    };
+};
+
+const normalizeEventStrategyReviewReport = (
+    value: Partial<EventStrategyReviewReportResponse> | null | undefined,
+): EventStrategyReviewReportResponse | null => {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    return {
+        report_title: typeof value.report_title === 'string' ? value.report_title : '',
+        retrieval_contract: normalizeEventStrategyReviewRetrievalContract(
+            value.retrieval_contract,
+        ),
+        event_cluster: normalizeEventStrategyReviewEventCluster(value.event_cluster),
+        score_breakdown: normalizeEventStrategyReviewScoreBreakdown(value.score_breakdown),
+        importance_assessment: normalizeEventStrategyReviewImportanceAssessment(
+            value.importance_assessment,
+        ),
+        execution_policy: normalizeEventStrategyReviewExecutionPolicy(value.execution_policy),
+        perspective_blocks: normalizeEventStrategyReviewPerspectiveBlocks(value.perspective_blocks),
+        strategy_synthesis: normalizeEventStrategyReviewSynthesis(value.strategy_synthesis),
+        recommended_next_actions: normalizeEventStrategyReviewRecommendedActions(
+            value.recommended_next_actions,
+        ),
+        output_mode_options: ensureArray<Partial<EventStrategyReviewOutputModeOption>>(
+            value.output_mode_options,
+        ).map(normalizeEventStrategyReviewOutputModeOption),
+        operator_notes: ensureArray<string>(value.operator_notes),
+    };
+};
+
+const normalizeEventStrategyReviewExecutionResult = (
+    value: Partial<EventStrategyReviewExecutionResult> | null | undefined,
+): EventStrategyReviewExecutionResult | null => {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    return {
+        source_mode:
+            value?.source_mode === 'manual_summary' ||
+            value?.source_mode === 'manual_url_bundle'
+                ? value.source_mode
+                : 'curated_search_query',
+        execution_status:
+            value?.execution_status === 'report_generated' ? 'report_generated' : 'not_active_yet',
+        execution_plan: normalizeEventStrategyReviewExecutionPlan(value.execution_plan),
+        report: normalizeEventStrategyReviewReport(value.report),
+        inactive_reason:
+            typeof value?.inactive_reason === 'string' ? value.inactive_reason : null,
+        operator_notes: ensureArray<string>(value?.operator_notes),
+    };
+};
+
+const normalizeEventStrategyReviewLatest = (
+    value: Partial<EventStrategyReviewLatestResponse> | null | undefined,
+): EventStrategyReviewLatestResponse => {
+    return {
+        run_id: typeof value?.run_id === 'number' ? value.run_id : null,
+        status: typeof value?.status === 'string' ? value.status : null,
+        error: typeof value?.error === 'string' ? value.error : null,
+        result: normalizeEventStrategyReviewExecutionResult(value?.result),
+    };
+};
+
+const normalizeEventStrategyReviewPackageArtifact = (
+    value: Partial<EventStrategyReviewPackageArtifact> | null | undefined,
+): EventStrategyReviewPackageArtifact => {
+    return {
+        artifact_type:
+            value?.artifact_type === 'draft_pack' || value?.artifact_type === 'json_report'
+                ? value.artifact_type
+                : 'static_html_bundle',
+        file_name: typeof value?.file_name === 'string' ? value.file_name : null,
+        path: typeof value?.path === 'string' ? value.path : null,
+        content_type: typeof value?.content_type === 'string' ? value.content_type : null,
+        file_size_bytes:
+            typeof value?.file_size_bytes === 'number' ? value.file_size_bytes : null,
+        checksum_sha256:
+            typeof value?.checksum_sha256 === 'string' ? value.checksum_sha256 : null,
+        is_entrypoint: value?.is_entrypoint === true,
+        label: typeof value?.label === 'string' ? value.label : null,
+    };
+};
+
+const normalizeEventStrategyReviewPackageResult = (
+    value: Partial<EventStrategyReviewPackageResult> | null | undefined,
+): EventStrategyReviewPackageResult | null => {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    return {
+        source_run_id: typeof value?.source_run_id === 'number' ? value.source_run_id : null,
+        selected_output_mode:
+            value?.selected_output_mode === 'internal_report_only' ||
+            value?.selected_output_mode === 'social_post_draft_pack' ||
+            value?.selected_output_mode === 'email_newsletter_draft_pack' ||
+            value?.selected_output_mode === 'client_summary_draft_pack'
+                ? value.selected_output_mode
+                : 'html_report_package',
+        status:
+            value?.status === 'not_generated' || value?.status === 'blocked'
+                ? value.status
+                : 'draft_ready',
+        requires_explicit_operator_step: value?.requires_explicit_operator_step !== false,
+        package_directory_path:
+            typeof value?.package_directory_path === 'string'
+                ? value.package_directory_path
+                : null,
+        artifacts: ensureArray<Partial<EventStrategyReviewPackageArtifact>>(value?.artifacts).map(
+            normalizeEventStrategyReviewPackageArtifact,
+        ),
+        operator_notes: ensureArray<string>(value?.operator_notes),
+    };
+};
+
+const normalizeEventStrategyReviewPackageLatest = (
+    value: Partial<EventStrategyReviewPackageLatestResponse> | null | undefined,
+): EventStrategyReviewPackageLatestResponse => {
+    return {
+        source_run_id: typeof value?.source_run_id === 'number' ? value.source_run_id : 0,
+        package_run_id: typeof value?.package_run_id === 'number' ? value.package_run_id : null,
+        status: typeof value?.status === 'string' ? value.status : null,
+        error: typeof value?.error === 'string' ? value.error : null,
+        result: normalizeEventStrategyReviewPackageResult(value?.result),
+    };
+};
+
 const normalizeOpsOverviewAgentItem = (
     value: Partial<AgentOpsOverviewAgentItem> | null | undefined,
 ): AgentOpsOverviewAgentItem => {
@@ -1829,6 +2440,71 @@ export const agentsService = {
             },
         );
         return ensureArray<AgentAuditLog>(res.data);
+    },
+
+    triggerEventStrategyReviewRunOnce: async (
+        payload: EventStrategyReviewRunRequest,
+    ): Promise<AgentRun> => {
+        const res = await api.post<AgentRun>('/agents/event-strategy-review/run-once', payload);
+        return res.data;
+    },
+
+    getEventStrategyReviewRuns: async (limit = 50): Promise<AgentRun[]> => {
+        const res = await api.get<AgentRun[]>('/agents/event-strategy-review/runs', {
+            params: { limit },
+        });
+        return ensureArray<AgentRun>(res.data);
+    },
+
+    getLatestEventStrategyReviewResult: async (): Promise<EventStrategyReviewLatestResponse> => {
+        const res = await api.get<EventStrategyReviewLatestResponse>(
+            '/agents/event-strategy-review/latest',
+        );
+        return normalizeEventStrategyReviewLatest(res.data);
+    },
+
+    getEventStrategyReviewRunReport: async (
+        runId: number,
+    ): Promise<EventStrategyReviewExecutionResult> => {
+        const res = await api.get<EventStrategyReviewExecutionResult>(
+            `/agents/event-strategy-review/runs/${runId}/report`,
+        );
+        return normalizeEventStrategyReviewExecutionResult(
+            res.data,
+        ) as EventStrategyReviewExecutionResult;
+    },
+
+    getEventStrategyReviewRunAuditLogs: async (
+        runId: number,
+        limit = 100,
+    ): Promise<AgentAuditLog[]> => {
+        const res = await api.get<AgentAuditLog[]>(
+            `/agents/event-strategy-review/runs/${runId}/audit-logs`,
+            {
+                params: { limit },
+            },
+        );
+        return ensureArray<AgentAuditLog>(res.data);
+    },
+
+    createEventStrategyReviewPackage: async (
+        runId: number,
+        payload: EventStrategyReviewPackageRequest,
+    ): Promise<AgentRun> => {
+        const res = await api.post<AgentRun>(
+            `/agents/event-strategy-review/runs/${runId}/package-output`,
+            payload,
+        );
+        return res.data;
+    },
+
+    getEventStrategyReviewPackage: async (
+        runId: number,
+    ): Promise<EventStrategyReviewPackageLatestResponse> => {
+        const res = await api.get<EventStrategyReviewPackageLatestResponse>(
+            `/agents/event-strategy-review/runs/${runId}/package`,
+        );
+        return normalizeEventStrategyReviewPackageLatest(res.data);
     },
 
     getOpsOverview: async (): Promise<AgentOpsOverviewResponse> => {
