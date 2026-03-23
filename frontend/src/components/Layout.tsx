@@ -8,7 +8,7 @@ const navItems = [
     { to: '/contacts', icon: Users, label: 'Contacts' },
     { to: '/pipeline', icon: Trello, label: 'Pipeline' },
     { to: '/find-leads', icon: Sparkles, label: 'Leads' },
-    { to: '/agents', icon: Sparkles, label: 'Agents' },
+    { to: '/agents', icon: Sparkles, label: 'OpenClaw' },
 ];
 
 const Layout = ({ children }: { children: React.ReactNode }) => {
