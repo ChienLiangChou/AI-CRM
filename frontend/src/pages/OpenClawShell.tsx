@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
     AlertTriangle,
     ChevronRight,
@@ -588,15 +589,20 @@ const OpenClawShell = () => {
                         snapshot and read-only drill-down routes only.
                     </p>
                 </div>
-                <button
-                    type="button"
-                    className="btn btn-ghost"
-                    onClick={() => void loadShell()}
-                    disabled={isBusy}
-                >
-                    <RefreshCw size={16} className={refreshing ? 'openclaw-spin' : ''} />
-                    {refreshing ? 'Refreshing' : 'Manual refresh'}
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                    <Link to="/agents/workbench" className="btn btn-ghost">
+                        Open workbench
+                    </Link>
+                    <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => void loadShell()}
+                        disabled={isBusy}
+                    >
+                        <RefreshCw size={16} className={refreshing ? 'openclaw-spin' : ''} />
+                        {refreshing ? 'Refreshing' : 'Manual refresh'}
+                    </button>
+                </div>
             </header>
 
             {error && (
