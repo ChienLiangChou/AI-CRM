@@ -879,6 +879,20 @@ class TransactionPaperworkPdfSourceResult(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class TransactionPaperworkRunInputSnapshot(BaseModel):
+    source_pdfs: list[TransactionPaperworkPdfSourceInput] = Field(
+        default_factory=list
+    )
+    kevin_answer_packet: TransactionPaperworkKevinAnswerPacket = Field(
+        default_factory=TransactionPaperworkKevinAnswerPacket
+    )
+    template_id: str
+    template_version: str
+    requested_fill_mode: TransactionPaperworkTemplateFillMode = (
+        "overlay_coordinates"
+    )
+
+
 class TransactionPaperworkPreparationResult(BaseModel):
     source_documents: list[TransactionPaperworkSourceDocumentIntake] = Field(
         default_factory=list

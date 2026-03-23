@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -9,13 +10,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from pypdf import PdfReader, PdfWriter
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfgen import canvas
+from sqlalchemy.orm import Session
 
-from . import paperwork_templates, schemas as agent_schemas
+from . import models, paperwork_templates, schemas as agent_schemas, service
 
 
 PDFINFO_CANDIDATE_PATHS = (
@@ -37,6 +39,16 @@ DATE_INPUT_FORMATS = (
     "%d %B %Y",
     "%d %b %Y",
 )
+TRANSACTION_PAPERWORK_AGENT_TYPE = "transaction_paperwork"
+AUDIT_ACTION_BY_INTAKE_ISSUE_CODE: dict[
+    agent_schemas.TransactionPaperworkIntakeIssueCode, str
+] = {
+    "missing_file": "transaction_paperwork_document_missing",
+    "unreadable_pdf": "transaction_paperwork_document_unreadable",
+    "textless_pdf": "transaction_paperwork_document_textless",
+    "missing_text": "transaction_paperwork_document_missing_text",
+    "unsupported_document_type": "transaction_paperwork_document_unsupported",
+}
 
 
 @dataclass(frozen=True)
@@ -322,6 +334,26 @@ def inspect_trade_record_sheet_template() -> (
     return inspect_registered_template(
         paperwork_templates.get_trade_record_sheet_template()
     )
+
+
+def _model_dump(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _model_dump(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_model_dump(item) for item in value]
+    if hasattr(value, "model_dump"):
+        return _model_dump(value.model_dump())
+    if hasattr(value, "dict"):
+        return _model_dump(value.dict())
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(_model_dump(value), ensure_ascii=False)
 
 
 def classify_source_document(
@@ -811,6 +843,102 @@ def orchestrate_transaction_paperwork_from_pdfs(
     )
 
 
+def run_transaction_paperwork_once(
+    db: Session,
+    *,
+    pdf_sources: list[agent_schemas.TransactionPaperworkPdfSourceInput | str | Path],
+    kevin_answers: agent_schemas.TransactionPaperworkKevinAnswerPacket | None = None,
+    render_output_dir: str | Path | None = None,
+) -> models.AgentRun:
+    template = paperwork_templates.get_trade_record_sheet_template()
+    input_snapshot = _build_run_input_snapshot(
+        pdf_sources=pdf_sources,
+        kevin_answers=kevin_answers,
+        template=template,
+    )
+    task = service.create_task(
+        db,
+        agent_type=TRANSACTION_PAPERWORK_AGENT_TYPE,
+        subject_type=template.template_id,
+        subject_id=None,
+        payload=_json_dumps(input_snapshot),
+        priority="normal",
+    )
+    run = service.create_run(
+        db,
+        task=task,
+        summary="Transaction Paperwork run (Trade Record Sheet)",
+    )
+
+    now = datetime.utcnow()
+    service.update_task_status(db, task, status="executing")
+    run = service.update_run_status(db, run, status="planning", started_at=now)
+
+    try:
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            actor_type="system",
+            action="transaction_paperwork_intake_started",
+            details=_json_dumps(input_snapshot),
+        )
+
+        run = service.update_run_status(
+            db,
+            run,
+            status="executing",
+            plan=_json_dumps(
+                _build_execution_plan_snapshot(
+                    input_snapshot=input_snapshot,
+                    source_count=len(pdf_sources),
+                )
+            ),
+        )
+
+        orchestration_result = orchestrate_transaction_paperwork_from_pdfs(
+            pdf_sources,
+            kevin_answers=kevin_answers,
+            render_output_dir=render_output_dir,
+        )
+        _write_transaction_paperwork_audit_lifecycle(
+            db,
+            task=task,
+            run=run,
+            orchestration_result=orchestration_result,
+        )
+
+        finished_at = datetime.utcnow()
+        run = service.update_run_status(
+            db,
+            run,
+            status="completed",
+            result=_json_dumps(orchestration_result),
+            finished_at=finished_at,
+        )
+        service.update_task_status(db, task, status="completed")
+        return run
+    except Exception as exc:
+        finished_at = datetime.utcnow()
+        run = service.update_run_status(
+            db,
+            run,
+            status="failed",
+            error=str(exc),
+            finished_at=finished_at,
+        )
+        service.update_task_status(db, task, status="failed")
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            actor_type="system",
+            action="transaction_paperwork_run_failed",
+            details=_json_dumps({"error": str(exc)}),
+        )
+        return run
+
+
 def _parse_positive_int(value: str | None) -> int | None:
     if value is None:
         return None
@@ -842,6 +970,178 @@ def _normalize_pdf_source_input(
     if isinstance(pdf_source, agent_schemas.TransactionPaperworkPdfSourceInput):
         return pdf_source
     return agent_schemas.TransactionPaperworkPdfSourceInput(file_path=str(pdf_source))
+
+
+def _build_run_input_snapshot(
+    *,
+    pdf_sources: list[agent_schemas.TransactionPaperworkPdfSourceInput | str | Path],
+    kevin_answers: agent_schemas.TransactionPaperworkKevinAnswerPacket | None,
+    template: agent_schemas.TransactionPaperworkTemplateMetadata,
+) -> agent_schemas.TransactionPaperworkRunInputSnapshot:
+    return agent_schemas.TransactionPaperworkRunInputSnapshot(
+        source_pdfs=[_normalize_pdf_source_input(source) for source in pdf_sources],
+        kevin_answer_packet=kevin_answers
+        or agent_schemas.TransactionPaperworkKevinAnswerPacket(),
+        template_id=template.template_id,
+        template_version=template.template_version,
+        requested_fill_mode="overlay_coordinates",
+    )
+
+
+def _build_execution_plan_snapshot(
+    *,
+    input_snapshot: agent_schemas.TransactionPaperworkRunInputSnapshot,
+    source_count: int,
+) -> dict[str, Any]:
+    return {
+        "template_id": input_snapshot.template_id,
+        "template_version": input_snapshot.template_version,
+        "requested_fill_mode": input_snapshot.requested_fill_mode,
+        "source_pdf_count": source_count,
+        "machine_readable_pdf_only": True,
+        "ocr_supported": False,
+        "review_mode": "review_first_internal_only",
+    }
+
+
+def _write_transaction_paperwork_audit_lifecycle(
+    db: Session,
+    *,
+    task: models.AgentTask,
+    run: models.AgentRun,
+    orchestration_result: agent_schemas.TransactionPaperworkOrchestrationResult,
+) -> None:
+    intake_by_label = {
+        intake.document_label: intake
+        for intake in orchestration_result.preparation_result.source_documents
+    }
+    for source_result in orchestration_result.pdf_sources:
+        if source_result.load_status != "loaded":
+            continue
+        intake = intake_by_label.get(source_result.document_label)
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            actor_type="system",
+            action="transaction_paperwork_document_loaded",
+            details=_json_dumps(
+                _build_loaded_document_audit_details(
+                    source_result=source_result,
+                    intake=intake,
+                )
+            ),
+        )
+
+    for issue in orchestration_result.preparation_result.intake_issues:
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            actor_type="system",
+            action=AUDIT_ACTION_BY_INTAKE_ISSUE_CODE.get(
+                issue.issue_code,
+                "transaction_paperwork_document_issue",
+            ),
+            details=_json_dumps(issue),
+        )
+
+    preparation_result = orchestration_result.preparation_result
+    service.write_audit_log(
+        db,
+        run=run,
+        task=task,
+        actor_type="agent",
+        action="transaction_paperwork_preparation_completed",
+        details=_json_dumps(
+            {
+                "source_documents": preparation_result.source_documents,
+                "canonical_fact_count": len(
+                    preparation_result.canonical_deal_facts.facts
+                ),
+                "unresolved_field_keys": preparation_result.canonical_deal_facts.unresolved_field_keys,
+                "intake_issue_count": len(preparation_result.intake_issues),
+            }
+        ),
+    )
+    service.write_audit_log(
+        db,
+        run=run,
+        task=task,
+        actor_type="agent",
+        action="transaction_paperwork_question_packet_generated",
+        details=_json_dumps(
+            {
+                "question_count": len(preparation_result.question_packet.questions),
+                "blocking_field_keys": preparation_result.question_packet.blocking_field_keys,
+            }
+        ),
+    )
+
+    review_package = orchestration_result.review_package
+    service.write_audit_log(
+        db,
+        run=run,
+        task=task,
+        actor_type="agent",
+        action="transaction_paperwork_review_package_built",
+        details=_json_dumps(
+            {
+                "template_id": review_package.template_id,
+                "template_version": review_package.template_version,
+                "review_ready": review_package.review_ready,
+                "blocking_unresolved_field_keys": review_package.blocking_unresolved_field_keys,
+                "unresolved_field_keys": review_package.unresolved_field_keys,
+            }
+        ),
+    )
+
+    render_result = orchestration_result.render_result
+    if orchestration_result.output_status == "rendered":
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            actor_type="system",
+            action="transaction_paperwork_rendered",
+            details=_json_dumps(
+                {
+                    "artifact": render_result.artifact,
+                    "rendered_field_count": render_result.rendered_field_count,
+                    "rendered_field_keys": render_result.rendered_field_keys,
+                }
+            ),
+        )
+        return
+
+    service.write_audit_log(
+        db,
+        run=run,
+        task=task,
+        actor_type="system",
+        action="transaction_paperwork_blocked",
+        details=_json_dumps(
+            {
+                "output_status": orchestration_result.output_status,
+                "review_ready": review_package.review_ready,
+                "blocking_unresolved_field_keys": review_package.blocking_unresolved_field_keys,
+                "render_blocking_field_keys": render_result.unresolved_blocking_field_keys,
+            }
+        ),
+    )
+
+
+def _build_loaded_document_audit_details(
+    *,
+    source_result: agent_schemas.TransactionPaperworkPdfSourceResult,
+    intake: agent_schemas.TransactionPaperworkSourceDocumentIntake | None,
+) -> dict[str, Any]:
+    details = _model_dump(source_result)
+    if intake is not None:
+        details["source_doc_type"] = intake.source_doc_type
+        details["supported"] = intake.supported
+        details["classification_basis"] = intake.classification_basis
+    return details
 
 
 def _inspect_pdf_page_count(pdf_path: Path) -> int | None:

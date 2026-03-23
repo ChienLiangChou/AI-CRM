@@ -1,3 +1,4 @@
+import json
 import hashlib
 import shutil
 import tempfile
@@ -7,9 +8,13 @@ from unittest.mock import patch
 
 from pypdf import PdfReader
 from reportlab.pdfgen import canvas
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
+from app.agents import models as agent_models
 from app.agents import paperwork_templates, schemas as agent_schemas
 from app.agents import transaction_paperwork
+from app.database import Base
 
 
 class TransactionPaperworkTemplateRegistryTests(unittest.TestCase):
@@ -984,6 +989,342 @@ class TransactionPaperworkPdfOrchestrationTests(unittest.TestCase):
             self.assertIn("Alice Buyer", rendered_text)
             self.assertIn("2.5%", rendered_text)
             self.assertIn("$500", rendered_text)
+
+
+class TransactionPaperworkRunnerPersistenceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        if shutil.which("/opt/homebrew/bin/pdftotext") is None and shutil.which(
+            "pdftotext"
+        ) is None:
+            raise unittest.SkipTest("pdftotext is unavailable")
+
+    def setUp(self):
+        self.engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+        )
+        self.SessionLocal = sessionmaker(
+            autocommit=False,
+            autoflush=False,
+            bind=self.engine,
+        )
+        Base.metadata.create_all(bind=self.engine)
+        self.db = self.SessionLocal()
+
+    def tearDown(self):
+        self.db.close()
+        self.engine.dispose()
+
+    def create_pdf(
+        self,
+        output_path: Path,
+        *pages: list[str],
+    ) -> Path:
+        pdf = canvas.Canvas(str(output_path))
+        if not pages:
+            pdf.showPage()
+            pdf.save()
+            return output_path
+        for index, lines in enumerate(pages):
+            y = 760
+            for line in lines:
+                pdf.drawString(72, y, line)
+                y -= 16
+            if index < len(pages) - 1:
+                pdf.showPage()
+        pdf.save()
+        return output_path
+
+    def build_aps_pdf(self, output_path: Path) -> Path:
+        return self.create_pdf(
+            output_path,
+            [
+                "Agreement of Purchase and Sale",
+                "MLS Number: C1234567",
+                "Property Address: 123 King St W, Toronto, ON",
+                "Unit: 1102",
+                "Offer Date: March 1, 2026",
+                "Closing Date: May 30, 2026",
+                "Conditional / Firm: Conditional",
+                "Firm Date: March 5, 2026",
+                "Buyer: Alice Buyer and Bob Buyer",
+                "Seller: Sally Seller",
+                "Purchase Price: $1,250,000",
+                "Deposit: $50,000",
+                "Deposit Holder: Freeman Real Estate Ltd.",
+                "Buyer's Solicitor: Hart Law LLP, 416-555-0100",
+                "Seller's Solicitor: North Legal PC, 416-555-0199",
+                "Commission: 2.5% to co-operating brokerage",
+                "Commission Split: 50/50",
+                "Referral Fee: 15%",
+                "Marketing Fee: $500",
+            ],
+        )
+
+    def build_unsupported_pdf(self, output_path: Path) -> Path:
+        return self.create_pdf(
+            output_path,
+            [
+                "Notice of Fulfillment",
+                "This document is not an APS or Agreement to Lease.",
+            ],
+        )
+
+    def build_answers(self) -> agent_schemas.TransactionPaperworkKevinAnswerPacket:
+        return agent_schemas.TransactionPaperworkKevinAnswerPacket(
+            answers=[
+                agent_schemas.TransactionPaperworkKevinAnswer(
+                    field_key="commission_amount",
+                    value="2.5%",
+                ),
+                agent_schemas.TransactionPaperworkKevinAnswer(
+                    field_key="commission_split",
+                    value="50/50",
+                ),
+                agent_schemas.TransactionPaperworkKevinAnswer(
+                    field_key="referral_fee",
+                    value="15%",
+                ),
+                agent_schemas.TransactionPaperworkKevinAnswer(
+                    field_key="marketing_fee",
+                    value="$500",
+                ),
+            ]
+        )
+
+    def get_run(self, run_id: int) -> agent_models.AgentRun:
+        run = (
+            self.db.query(agent_models.AgentRun)
+            .filter(agent_models.AgentRun.id == run_id)
+            .first()
+        )
+        self.assertIsNotNone(run)
+        return run
+
+    def get_task(self, task_id: int) -> agent_models.AgentTask:
+        task = (
+            self.db.query(agent_models.AgentTask)
+            .filter(agent_models.AgentTask.id == task_id)
+            .first()
+        )
+        self.assertIsNotNone(task)
+        return task
+
+    def get_audit_actions(self, run_id: int) -> list[str]:
+        logs = (
+            self.db.query(agent_models.AgentAuditLog)
+            .filter(agent_models.AgentAuditLog.run_id == run_id)
+            .order_by(agent_models.AgentAuditLog.created_at.asc())
+            .all()
+        )
+        return [log.action for log in logs]
+
+    def test_runner_persists_task_payload_and_blocked_result_without_approvals(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = self.build_aps_pdf(Path(temp_dir) / "aps.pdf")
+
+            run = transaction_paperwork.run_transaction_paperwork_once(
+                self.db,
+                pdf_sources=[pdf_path],
+                render_output_dir=temp_dir,
+            )
+
+            persisted_run = self.get_run(run.id)
+            persisted_task = self.get_task(persisted_run.task_id)
+            task_payload = json.loads(persisted_task.payload)
+            result_payload = json.loads(persisted_run.result)
+            audit_actions = self.get_audit_actions(persisted_run.id)
+
+            self.assertEqual(persisted_task.agent_type, "transaction_paperwork")
+            self.assertEqual(persisted_task.subject_type, "trade_record_sheet")
+            self.assertEqual(persisted_task.status, "completed")
+            self.assertEqual(persisted_run.status, "completed")
+            self.assertIsNotNone(persisted_run.started_at)
+            self.assertIsNotNone(persisted_run.finished_at)
+            self.assertEqual(task_payload["template_id"], "trade_record_sheet")
+            self.assertEqual(
+                task_payload["requested_fill_mode"],
+                "overlay_coordinates",
+            )
+            self.assertEqual(
+                task_payload["source_pdfs"][0]["file_path"],
+                str(pdf_path),
+            )
+            self.assertEqual(
+                task_payload["kevin_answer_packet"]["answers"],
+                [],
+            )
+            self.assertEqual(result_payload["output_status"], "blocked")
+            self.assertFalse(result_payload["review_package"]["review_ready"])
+            self.assertEqual(
+                result_payload["review_package"]["blocking_unresolved_field_keys"],
+                [
+                    "commission_amount",
+                    "commission_split",
+                    "referral_fee",
+                    "marketing_fee",
+                ],
+            )
+            self.assertIsNone(result_payload["render_result"]["artifact"])
+            self.assertEqual(self.db.query(agent_models.AgentApproval).count(), 0)
+            self.assertEqual(
+                audit_actions,
+                [
+                    "transaction_paperwork_intake_started",
+                    "transaction_paperwork_document_loaded",
+                    "transaction_paperwork_preparation_completed",
+                    "transaction_paperwork_question_packet_generated",
+                    "transaction_paperwork_review_package_built",
+                    "transaction_paperwork_blocked",
+                ],
+            )
+
+    def test_runner_persists_rendered_result_and_artifact_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = self.build_aps_pdf(Path(temp_dir) / "aps.pdf")
+
+            run = transaction_paperwork.run_transaction_paperwork_once(
+                self.db,
+                pdf_sources=[pdf_path],
+                kevin_answers=self.build_answers(),
+                render_output_dir=temp_dir,
+            )
+
+            persisted_run = self.get_run(run.id)
+            result_payload = json.loads(persisted_run.result)
+            audit_actions = self.get_audit_actions(persisted_run.id)
+
+            self.assertEqual(persisted_run.status, "completed")
+            self.assertEqual(result_payload["output_status"], "rendered")
+            self.assertTrue(result_payload["review_package"]["review_ready"])
+            self.assertEqual(
+                result_payload["review_package"]["mapped_fields"]["commission_amount"][
+                    "value_source_category"
+                ],
+                "kevin_confirmed",
+            )
+            self.assertEqual(
+                result_payload["render_result"]["output_status"],
+                "rendered",
+            )
+            self.assertIsNotNone(result_payload["render_result"]["artifact"])
+            self.assertTrue(
+                Path(
+                    result_payload["render_result"]["artifact"]["output_pdf_path"]
+                ).is_file()
+            )
+            self.assertGreater(
+                result_payload["render_result"]["artifact"]["page_count"],
+                0,
+            )
+            self.assertIn("transaction_paperwork_rendered", audit_actions)
+            self.assertNotIn("transaction_paperwork_blocked", audit_actions)
+            self.assertEqual(self.db.query(agent_models.AgentApproval).count(), 0)
+
+    def test_runner_persists_missing_pdf_as_blocked_not_failed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_path = Path(temp_dir) / "missing.pdf"
+
+            run = transaction_paperwork.run_transaction_paperwork_once(
+                self.db,
+                pdf_sources=[missing_path],
+                render_output_dir=temp_dir,
+            )
+
+            persisted_run = self.get_run(run.id)
+            result_payload = json.loads(persisted_run.result)
+            audit_actions = self.get_audit_actions(persisted_run.id)
+
+            self.assertEqual(persisted_run.status, "completed")
+            self.assertEqual(result_payload["output_status"], "blocked")
+            self.assertEqual(
+                result_payload["preparation_result"]["intake_issues"][0]["issue_code"],
+                "missing_file",
+            )
+            self.assertIn("transaction_paperwork_document_missing", audit_actions)
+            self.assertIn("transaction_paperwork_blocked", audit_actions)
+
+    def test_runner_persists_textless_pdf_fail_soft_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = self.create_pdf(Path(temp_dir) / "textless.pdf")
+
+            run = transaction_paperwork.run_transaction_paperwork_once(
+                self.db,
+                pdf_sources=[pdf_path],
+                render_output_dir=temp_dir,
+            )
+
+            persisted_run = self.get_run(run.id)
+            result_payload = json.loads(persisted_run.result)
+            audit_actions = self.get_audit_actions(persisted_run.id)
+
+            self.assertEqual(persisted_run.status, "completed")
+            self.assertEqual(result_payload["output_status"], "blocked")
+            issue_codes = [
+                issue["issue_code"]
+                for issue in result_payload["preparation_result"]["intake_issues"]
+            ]
+            self.assertIn("textless_pdf", issue_codes)
+            self.assertIn("transaction_paperwork_document_textless", audit_actions)
+            self.assertIn("transaction_paperwork_blocked", audit_actions)
+
+    def test_runner_persists_unsupported_pdf_fail_soft_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = self.build_unsupported_pdf(Path(temp_dir) / "unsupported.pdf")
+
+            run = transaction_paperwork.run_transaction_paperwork_once(
+                self.db,
+                pdf_sources=[pdf_path],
+                render_output_dir=temp_dir,
+            )
+
+            persisted_run = self.get_run(run.id)
+            result_payload = json.loads(persisted_run.result)
+            audit_actions = self.get_audit_actions(persisted_run.id)
+
+            self.assertEqual(persisted_run.status, "completed")
+            self.assertEqual(result_payload["output_status"], "blocked")
+            self.assertEqual(
+                result_payload["preparation_result"]["source_documents"][0][
+                    "source_doc_type"
+                ],
+                "transaction_related_document",
+            )
+            issue_codes = [
+                issue["issue_code"]
+                for issue in result_payload["preparation_result"]["intake_issues"]
+            ]
+            self.assertIn("unsupported_document_type", issue_codes)
+            self.assertIn("transaction_paperwork_document_loaded", audit_actions)
+            self.assertIn("transaction_paperwork_document_unsupported", audit_actions)
+
+    def test_runner_marks_true_runtime_failure_as_failed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = self.build_aps_pdf(Path(temp_dir) / "aps.pdf")
+
+            with patch(
+                "app.agents.transaction_paperwork.orchestrate_transaction_paperwork_from_pdfs",
+                side_effect=RuntimeError("paperwork boom"),
+            ):
+                run = transaction_paperwork.run_transaction_paperwork_once(
+                    self.db,
+                    pdf_sources=[pdf_path],
+                    render_output_dir=temp_dir,
+                )
+
+            persisted_run = self.get_run(run.id)
+            persisted_task = self.get_task(persisted_run.task_id)
+            audit_actions = self.get_audit_actions(persisted_run.id)
+
+            self.assertEqual(persisted_run.status, "failed")
+            self.assertEqual(persisted_task.status, "failed")
+            self.assertIn("paperwork boom", persisted_run.error)
+            self.assertIsNone(persisted_run.result)
+            self.assertIn("transaction_paperwork_intake_started", audit_actions)
+            self.assertIn("transaction_paperwork_run_failed", audit_actions)
+            self.assertEqual(self.db.query(agent_models.AgentApproval).count(), 0)
 
 
 if __name__ == "__main__":
