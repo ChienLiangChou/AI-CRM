@@ -281,9 +281,9 @@ const renderReport = (executionResult: EventStrategyReviewExecutionResult | null
                     <div className="text-xs font-semibold uppercase tracking-wide text-gray-300">
                         Affected Entities
                     </div>
-                    <div className="text-xs text-gray-300">
-                        Not yet modeled in the current Event Strategy Review backend contract.
-                    </div>
+                    <div>Geographies: {report.affected_entities.geographies.join(' | ') || 'none'}</div>
+                    <div>Market segments: {report.affected_entities.market_segments.join(' | ') || 'none'}</div>
+                    <div>Business functions: {report.affected_entities.business_functions.join(' | ') || 'none'}</div>
                 </div>
             </div>
 
@@ -309,6 +309,19 @@ const renderReport = (executionResult: EventStrategyReviewExecutionResult | null
                                 : 'No geography tags.'}
                         </div>
                     </div>
+                </div>
+            )}
+
+            {report.affected_entities.notes.length > 0 && (
+                <div className="space-y-1">
+                    <div className="text-xs font-semibold uppercase tracking-wide text-gray-300">
+                        Affected Entity Notes
+                    </div>
+                    {report.affected_entities.notes.map((note, index) => (
+                        <div key={`${note}-${index}`} className="text-xs text-gray-300">
+                            {note}
+                        </div>
+                    ))}
                 </div>
             )}
 
@@ -607,6 +620,7 @@ const EventStrategyReviewPanel = () => {
                 live_retrieval_enabled: false,
             },
             operator_notes: operatorNotes.trim() || null,
+            topic_hints: parseTextList(topicHintsText),
             geo_focus: geoFocus,
         };
 
@@ -861,6 +875,21 @@ const EventStrategyReviewPanel = () => {
                         </div>
                     )}
 
+                    <label className="space-y-1">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-gray-300">
+                            Topic Hints
+                        </span>
+                        <input
+                            value={topicHintsText}
+                            onChange={(event) => setTopicHintsText(event.target.value)}
+                            className="w-full rounded border border-white/10 bg-black/20 px-3 py-2 text-sm text-white"
+                            placeholder="mortgage, policy, condo, rental"
+                        />
+                        <span className="block text-xs text-gray-400">
+                            Topic hints are optional for all source modes and help the v1 scorer/tagger stay focused.
+                        </span>
+                    </label>
+
                     {sourceMode === 'curated_search_query' && (
                         <div className="space-y-3">
                             <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
@@ -875,17 +904,6 @@ const EventStrategyReviewPanel = () => {
                                     onChange={(event) => setCuratedQuery(event.target.value)}
                                     className="w-full rounded border border-white/10 bg-black/20 px-3 py-2 text-sm text-white"
                                     placeholder="Bank of Canada Toronto housing mortgage rates"
-                                />
-                            </label>
-                            <label className="space-y-1">
-                                <span className="text-xs font-semibold uppercase tracking-wide text-gray-300">
-                                    Topic Hints
-                                </span>
-                                <input
-                                    value={topicHintsText}
-                                    onChange={(event) => setTopicHintsText(event.target.value)}
-                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2 text-sm text-white"
-                                    placeholder="mortgage, policy, condo, rental"
                                 />
                             </label>
                         </div>

@@ -796,6 +796,7 @@ class EventStrategyReviewRetrievalContract(BaseModel):
 class EventStrategyReviewRunRequest(BaseModel):
     retrieval_contract: EventStrategyReviewRetrievalContract
     operator_notes: Optional[str] = None
+    topic_hints: list[str] = Field(default_factory=list)
     geo_focus: list[str] = Field(default_factory=list)
 
 
@@ -837,6 +838,13 @@ class EventStrategyReviewImportanceAssessment(BaseModel):
     classification: EventStrategyReviewImportance
     reason: str
     confidence: float
+
+
+class EventStrategyReviewAffectedEntities(BaseModel):
+    geographies: list[str] = Field(default_factory=list)
+    market_segments: list[str] = Field(default_factory=list)
+    business_functions: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
 
 
 class EventStrategyReviewPerspectiveBlock(BaseModel):
@@ -897,6 +905,7 @@ class EventStrategyReviewReportResponse(BaseModel):
     event_cluster: EventStrategyReviewEventCluster
     score_breakdown: EventStrategyReviewScoreBreakdown
     importance_assessment: EventStrategyReviewImportanceAssessment
+    affected_entities: EventStrategyReviewAffectedEntities
     execution_policy: EventStrategyReviewExecutionPolicy
     perspective_blocks: EventStrategyReviewPerspectiveBlocks
     strategy_synthesis: EventStrategyReviewSynthesis

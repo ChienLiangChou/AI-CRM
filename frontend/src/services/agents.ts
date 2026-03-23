@@ -652,6 +652,7 @@ export interface EventStrategyReviewRetrievalContract {
 export interface EventStrategyReviewRunRequest {
     retrieval_contract: EventStrategyReviewRetrievalContract;
     operator_notes?: string | null;
+    topic_hints: string[];
     geo_focus: string[];
 }
 
@@ -693,6 +694,13 @@ export interface EventStrategyReviewImportanceAssessment {
     classification: EventStrategyReviewImportance;
     reason: string;
     confidence: number;
+}
+
+export interface EventStrategyReviewAffectedEntities {
+    geographies: string[];
+    market_segments: string[];
+    business_functions: string[];
+    notes: string[];
 }
 
 export interface EventStrategyReviewPerspectiveBlock {
@@ -753,6 +761,7 @@ export interface EventStrategyReviewReportResponse {
     event_cluster: EventStrategyReviewEventCluster;
     score_breakdown: EventStrategyReviewScoreBreakdown;
     importance_assessment: EventStrategyReviewImportanceAssessment;
+    affected_entities: EventStrategyReviewAffectedEntities;
     execution_policy: EventStrategyReviewExecutionPolicy;
     perspective_blocks: EventStrategyReviewPerspectiveBlocks;
     strategy_synthesis: EventStrategyReviewSynthesis;
@@ -1687,6 +1696,17 @@ const normalizeEventStrategyReviewRetrievalContract = (
     };
 };
 
+const normalizeEventStrategyReviewAffectedEntities = (
+    value: Partial<EventStrategyReviewAffectedEntities> | null | undefined,
+): EventStrategyReviewAffectedEntities => {
+    return {
+        geographies: ensureArray<string>(value?.geographies),
+        market_segments: ensureArray<string>(value?.market_segments),
+        business_functions: ensureArray<string>(value?.business_functions),
+        notes: ensureArray<string>(value?.notes),
+    };
+};
+
 const normalizeEventStrategyReviewClusteredSource = (
     value: Partial<EventStrategyReviewClusteredSource> | null | undefined,
 ): EventStrategyReviewClusteredSource => {
@@ -1887,6 +1907,9 @@ const normalizeEventStrategyReviewReport = (
         score_breakdown: normalizeEventStrategyReviewScoreBreakdown(value.score_breakdown),
         importance_assessment: normalizeEventStrategyReviewImportanceAssessment(
             value.importance_assessment,
+        ),
+        affected_entities: normalizeEventStrategyReviewAffectedEntities(
+            value.affected_entities,
         ),
         execution_policy: normalizeEventStrategyReviewExecutionPolicy(value.execution_policy),
         perspective_blocks: normalizeEventStrategyReviewPerspectiveBlocks(value.perspective_blocks),

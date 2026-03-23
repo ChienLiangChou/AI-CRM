@@ -373,6 +373,7 @@ def normalize_run_request(
             raw_dict.get("retrieval_contract")
         ),
         operator_notes=_clean_text(raw_dict.get("operator_notes")),
+        topic_hints=_dedupe_str_list(raw_dict.get("topic_hints")),
         geo_focus=_dedupe_str_list(raw_dict.get("geo_focus")),
     )
 
@@ -403,6 +404,7 @@ def _text_corpus(
             ]
         )
 
+    parts.extend(normalized_hint for normalized_hint in request.topic_hints)
     parts.extend(request.geo_focus)
     if request.operator_notes:
         parts.append(request.operator_notes)
@@ -419,6 +421,11 @@ def _derive_taxonomy_tags(
     def add(tag: str) -> None:
         if tag not in tags:
             tags.append(tag)
+
+    for hint in request.topic_hints:
+        hint_text = hint.strip().lower()
+        if hint_text:
+            add(hint_text.replace(" ", "_"))
 
     query_input = request.retrieval_contract.curated_search_query_input
     if query_input is not None:
@@ -816,6 +823,65 @@ def build_fixed_perspective_blocks(
     )
 
 
+def build_affected_entities(
+    request: agent_schemas.EventStrategyReviewRunRequest | dict[str, Any],
+    event_cluster: agent_schemas.EventStrategyReviewEventCluster | None = None,
+    importance_assessment: agent_schemas.EventStrategyReviewImportanceAssessment | None = None,
+) -> agent_schemas.EventStrategyReviewAffectedEntities:
+    normalized_request = normalize_run_request(request)
+    cluster = event_cluster or build_event_cluster(normalized_request)
+    importance = importance_assessment or conservative_importance_assessment(
+        normalized_request,
+        cluster,
+        None,
+    )
+    text = _text_corpus(normalized_request)
+
+    geographies = list(cluster.geography_tags)
+    market_segments: list[str] = []
+    business_functions: list[str] = []
+
+    def add_unique(target: list[str], value: str) -> None:
+        if value not in target:
+            target.append(value)
+
+    if _contains_any(text, ("buyer", "mortgage", "affordability", "purchase")):
+        add_unique(market_segments, "buyer")
+    if _contains_any(text, ("seller", "listing", "inventory", "pricing", "price")):
+        add_unique(market_segments, "seller")
+    if _contains_any(text, ("tenant", "renter", "rent", "lease", "rental")):
+        add_unique(market_segments, "renter")
+    if _contains_any(text, ("landlord", "rent", "lease", "rental")):
+        add_unique(market_segments, "landlord")
+    if _contains_any(text, ("investor", "investment", "investor policy")):
+        add_unique(market_segments, "investor")
+    if _contains_any(text, ("condo", "condominium")):
+        add_unique(market_segments, "condo")
+
+    if importance.classification != "noise":
+        add_unique(business_functions, "follow_up")
+        add_unique(business_functions, "conversation_retention")
+    if _contains_any(text, ("seller", "listing", "inventory", "pricing", "price", "condo")):
+        add_unique(business_functions, "listing_seller")
+    if cluster.taxonomy_tags or cluster.geography_tags:
+        add_unique(business_functions, "cma_market")
+    if _contains_any(text, ("policy", "regulation", "compliance", "tax")):
+        add_unique(business_functions, "ops_compliance")
+    if _contains_any(text, ("buyer", "tenant", "renter", "rent", "lease", "mortgage")):
+        add_unique(business_functions, "buyer_renter")
+
+    notes = [
+        "Affected entities are inferred conservatively from event content only; no CRM-linked contact or property targeting is attempted in v1."
+    ]
+
+    return agent_schemas.EventStrategyReviewAffectedEntities(
+        geographies=geographies,
+        market_segments=market_segments,
+        business_functions=business_functions,
+        notes=notes,
+    )
+
+
 def build_execution_plan(
     request: agent_schemas.EventStrategyReviewRunRequest | dict[str, Any],
 ) -> agent_schemas.EventStrategyReviewExecutionPlan:
@@ -1044,6 +1110,11 @@ def build_internal_report(
         event_cluster,
         score_breakdown,
     )
+    affected_entities = build_affected_entities(
+        normalized_request,
+        event_cluster,
+        importance_assessment,
+    )
     perspective_blocks = build_fixed_perspective_blocks(
         event_cluster,
         importance_assessment,
@@ -1066,6 +1137,7 @@ def build_internal_report(
         event_cluster=event_cluster,
         score_breakdown=score_breakdown,
         importance_assessment=importance_assessment,
+        affected_entities=affected_entities,
         execution_policy=agent_schemas.EventStrategyReviewExecutionPolicy(),
         perspective_blocks=perspective_blocks,
         strategy_synthesis=agent_schemas.EventStrategyReviewSynthesis(
@@ -1187,6 +1259,37 @@ def _render_html_report_document(
             f"<span class=\"pill\">Source Credibility {report.score_breakdown.source_credibility_score}</span>"
             f"<span class=\"pill\">Cluster Strength {report.score_breakdown.cluster_strength_score}</span>"
             f"<span class=\"pill\">Operator Usefulness {report.score_breakdown.operator_usefulness_score}</span></p>",
+            "</section>",
+            "<section>",
+            "<h2>Affected Entities</h2>",
+            "<h3>Geographies</h3>",
+            "<ul>"
+            + "".join(
+                f"<li>{escape(item)}</li>"
+                for item in report.affected_entities.geographies
+            )
+            + "</ul>",
+            "<h3>Market Segments</h3>",
+            "<ul>"
+            + "".join(
+                f"<li>{escape(item)}</li>"
+                for item in report.affected_entities.market_segments
+            )
+            + "</ul>",
+            "<h3>Business Functions</h3>",
+            "<ul>"
+            + "".join(
+                f"<li>{escape(item)}</li>"
+                for item in report.affected_entities.business_functions
+            )
+            + "</ul>",
+            "<h3>Notes</h3>",
+            "<ul>"
+            + "".join(
+                f"<li>{escape(item)}</li>"
+                for item in report.affected_entities.notes
+            )
+            + "</ul>",
             "</section>",
             "<section>",
             "<h2>Recommended Next Actions</h2>",

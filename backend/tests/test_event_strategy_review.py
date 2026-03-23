@@ -33,6 +33,7 @@ class EventStrategyReviewContractTests(unittest.TestCase):
                         "event_date": "2026-03-23",
                     },
                 },
+                "topic_hints": ["policy", "mortgage", "policy"],
                 "geo_focus": ["Toronto", "GTA"],
             }
         )
@@ -43,6 +44,7 @@ class EventStrategyReviewContractTests(unittest.TestCase):
             request.retrieval_contract.manual_summary_input.headline,
             "Bank of Canada holds rates",
         )
+        self.assertEqual(request.topic_hints, ["policy", "mortgage"])
         self.assertEqual(request.geo_focus, ["Toronto", "GTA"])
 
     def test_manual_url_bundle_contract_filters_invalid_and_duplicate_urls(self):
@@ -100,6 +102,7 @@ class EventStrategyReviewContractTests(unittest.TestCase):
                     },
                 },
                 "operator_notes": "Prioritize high-signal events only.",
+                "topic_hints": ["rates", "mortgage"],
                 "geo_focus": ["Toronto", "Ontario"],
             }
         )
@@ -110,6 +113,7 @@ class EventStrategyReviewContractTests(unittest.TestCase):
             "v1 preserves a controlled retrieval contract",
             report.operator_notes[1],
         )
+        self.assertIn("rates", report.event_cluster.taxonomy_tags)
         self.assertIn("no live retrieval", report.event_cluster.retrieval_notes[0].lower())
 
     def test_build_internal_report_uses_fixed_perspective_blocks_and_action_split(self):
@@ -122,6 +126,7 @@ class EventStrategyReviewContractTests(unittest.TestCase):
                         "summary": "Inventory is rising and buyer caution is increasing.",
                     },
                 },
+                "topic_hints": ["inventory", "buyers"],
                 "geo_focus": ["GTA"],
             }
         )
@@ -166,6 +171,10 @@ class EventStrategyReviewContractTests(unittest.TestCase):
         self.assertFalse(report.execution_policy.can_auto_publish)
         self.assertFalse(report.execution_policy.can_auto_execute)
         self.assertFalse(report.execution_policy.can_auto_deploy)
+        self.assertEqual(report.affected_entities.geographies, ["GTA"])
+        self.assertIn("buyer", report.affected_entities.market_segments)
+        self.assertIn("cma_market", report.affected_entities.business_functions)
+        self.assertTrue(report.affected_entities.notes)
 
     def test_high_signal_manual_summary_can_reach_strategy_review_required(self):
         report = event_strategy_review.build_internal_report(
@@ -183,6 +192,7 @@ class EventStrategyReviewContractTests(unittest.TestCase):
                         "event_date": "2026-03-23",
                     },
                 },
+                "topic_hints": ["policy", "affordability"],
                 "geo_focus": ["Toronto", "GTA", "Ontario", "Canada"],
             }
         )
@@ -198,6 +208,9 @@ class EventStrategyReviewContractTests(unittest.TestCase):
             "separate explicit packaging step",
             output_modes["html_report_package"].reason.lower(),
         )
+        self.assertIn("policy", report.event_cluster.taxonomy_tags)
+        self.assertIn("buyer", report.affected_entities.market_segments)
+        self.assertIn("listing_seller", report.affected_entities.business_functions)
 
     def test_package_result_placeholder_keeps_packaging_as_a_second_explicit_step(self):
         result = event_strategy_review.build_package_result_placeholder(
@@ -287,6 +300,7 @@ class EventStrategyReviewPersistenceTests(unittest.TestCase):
                         "source_label": "manual_note",
                     },
                 },
+                "topic_hints": ["policy"],
                 "geo_focus": ["Toronto", "Ontario"],
             },
         )
@@ -303,6 +317,8 @@ class EventStrategyReviewPersistenceTests(unittest.TestCase):
             result.report.retrieval_contract.source_mode,
             "manual_summary",
         )
+        self.assertIn("Toronto", result.report.affected_entities.geographies)
+        self.assertIn("ops_compliance", result.report.affected_entities.business_functions)
 
         audit_actions = [log.action for log in run.audit_logs]
         self.assertEqual(
@@ -527,6 +543,8 @@ class EventStrategyReviewRouteSurfaceTests(unittest.TestCase):
         self.assertEqual(latest["result"]["execution_status"], "report_generated")
         self.assertEqual(report["execution_status"], "report_generated")
         self.assertEqual(report["report"]["retrieval_contract"]["source_mode"], "manual_summary")
+        self.assertIn("affected_entities", report["report"])
+        self.assertIn("business_functions", report["report"]["affected_entities"])
         self.assertTrue(audit_logs)
         self.assertEqual(audit_logs[0].action, "event_strategy_review_intake_received")
         self.assertEqual(self.db.query(agent_models.AgentApproval).count(), 0)
@@ -708,6 +726,14 @@ class EventStrategyReviewRouteSurfaceTests(unittest.TestCase):
         self.assertIn(
             "Toronto housing policy package",
             Path(index_artifact["path"]).read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            "Affected Entities",
+            Path(index_artifact["path"]).read_text(encoding="utf-8"),
+        )
+        self.assertIn(
+            '"affected_entities"',
+            Path(report_artifact["path"]).read_text(encoding="utf-8"),
         )
 
         packaging_logs = [log.action for log in package_run.audit_logs]
