@@ -1,7 +1,13 @@
+import json
 import unittest
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
 from app.agents import event_strategy_review
+from app.agents import models as agent_models
 from app.agents import schemas as agent_schemas
+from app.database import Base
 
 
 class EventStrategyReviewContractTests(unittest.TestCase):
@@ -45,6 +51,10 @@ class EventStrategyReviewContractTests(unittest.TestCase):
                                 "url": "https://example.com/a",
                                 "title": "Duplicate should be removed",
                             },
+                            {
+                                "url": "https://example.com/a/?utm_source=newsletter",
+                                "title": "Tracked duplicate should be removed",
+                            },
                             {"url": "   "},
                             "bad-item",
                             {
@@ -59,6 +69,10 @@ class EventStrategyReviewContractTests(unittest.TestCase):
 
         items = request.retrieval_contract.manual_url_bundle_input.items
         self.assertEqual(len(items), 2)
+        self.assertEqual(
+            request.retrieval_contract.manual_url_bundle_input.submitted_item_count,
+            6,
+        )
         self.assertEqual(items[0].url, "https://example.com/a")
         self.assertEqual(items[1].url, "https://example.com/b")
 
@@ -83,7 +97,7 @@ class EventStrategyReviewContractTests(unittest.TestCase):
         self.assertEqual(report.retrieval_contract.source_mode, "curated_search_query")
         self.assertFalse(report.retrieval_contract.live_retrieval_enabled)
         self.assertIn(
-            "Step 1 preserves a controlled retrieval contract",
+            "v1 preserves a controlled retrieval contract",
             report.operator_notes[1],
         )
         self.assertIn("no live retrieval", report.event_cluster.retrieval_notes[0].lower())
@@ -223,6 +237,171 @@ class EventStrategyReviewErrorHandlingTests(unittest.TestCase):
                     }
                 }
             )
+
+
+class EventStrategyReviewPersistenceTests(unittest.TestCase):
+    def setUp(self):
+        self.engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+        )
+        self.SessionLocal = sessionmaker(
+            autocommit=False,
+            autoflush=False,
+            bind=self.engine,
+        )
+        Base.metadata.create_all(bind=self.engine)
+        self.db = self.SessionLocal()
+
+    def tearDown(self):
+        self.db.close()
+        self.engine.dispose()
+
+    def parse_result(
+        self,
+        run: agent_models.AgentRun,
+    ) -> agent_schemas.EventStrategyReviewExecutionResult:
+        self.assertIsNotNone(run.result)
+        payload = json.loads(run.result)
+        return agent_schemas.EventStrategyReviewExecutionResult(**payload)
+
+    def test_manual_summary_run_persists_task_run_report_and_audit(self):
+        run = event_strategy_review.run_event_strategy_review_once(
+            self.db,
+            {
+                "retrieval_contract": {
+                    "source_mode": "manual_summary",
+                    "manual_summary_input": {
+                        "headline": "Toronto policy update",
+                        "summary": "Housing and rental policy changes may affect buyer and seller conversations.",
+                        "source_label": "manual_note",
+                    },
+                },
+                "geo_focus": ["Toronto", "Ontario"],
+            },
+        )
+
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(run.task.agent_type, "event_strategy_review")
+        self.assertEqual(run.task.status, "completed")
+        self.assertEqual(run.approvals, [])
+
+        result = self.parse_result(run)
+        self.assertEqual(result.execution_status, "report_generated")
+        self.assertIsNotNone(result.report)
+        self.assertEqual(
+            result.report.retrieval_contract.source_mode,
+            "manual_summary",
+        )
+
+        audit_actions = [log.action for log in run.audit_logs]
+        self.assertEqual(
+            audit_actions,
+            [
+                "event_strategy_review_intake_received",
+                "event_strategy_review_execution_planned",
+                "event_strategy_review_sources_clustered",
+                "event_strategy_review_importance_classified",
+                "event_strategy_review_perspectives_built",
+                "event_strategy_review_report_generated",
+                "event_strategy_review_run_completed",
+            ],
+        )
+
+    def test_manual_url_bundle_run_dedupes_obvious_duplicates_before_persistence(self):
+        run = event_strategy_review.run_event_strategy_review_once(
+            self.db,
+            {
+                "retrieval_contract": {
+                    "source_mode": "manual_url_bundle",
+                    "manual_url_bundle_input": {
+                        "items": [
+                            {
+                                "url": "https://example.com/story",
+                                "title": "Rate story",
+                                "publisher": "Example",
+                            },
+                            {
+                                "url": "https://example.com/story/",
+                                "title": "Duplicate rate story",
+                            },
+                            {
+                                "url": "https://example.com/story?utm_source=x",
+                                "title": "Tracked duplicate rate story",
+                            },
+                            {
+                                "url": "https://example.com/second",
+                                "title": "Second story",
+                            },
+                        ]
+                    },
+                }
+            },
+        )
+
+        result = self.parse_result(run)
+        self.assertEqual(result.execution_status, "report_generated")
+        self.assertIsNotNone(result.report)
+        self.assertEqual(result.execution_plan.deduped_source_count, 2)
+        self.assertEqual(result.execution_plan.duplicate_source_count, 2)
+        self.assertEqual(result.report.event_cluster.source_count, 2)
+        self.assertEqual(result.report.event_cluster.duplicate_count, 2)
+        self.assertTrue(
+            any(log.action == "event_strategy_review_duplicates_collapsed" for log in run.audit_logs)
+        )
+
+    def test_curated_search_query_is_persisted_as_not_active_yet_without_crashing(self):
+        run = event_strategy_review.run_event_strategy_review_once(
+            self.db,
+            {
+                "retrieval_contract": {
+                    "source_mode": "curated_search_query",
+                    "curated_search_query_input": {
+                        "query": "Toronto housing policy change",
+                        "allowed_domains": ["toronto.ca"],
+                    },
+                }
+            },
+        )
+
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(run.task.status, "completed")
+        self.assertEqual(run.approvals, [])
+
+        result = self.parse_result(run)
+        self.assertEqual(result.execution_status, "not_active_yet")
+        self.assertIsNone(result.report)
+        self.assertEqual(
+            result.execution_plan.execution_path,
+            "curated_search_query_not_active_yet",
+        )
+        self.assertEqual(
+            result.inactive_reason,
+            event_strategy_review.CURATED_QUERY_NOT_ACTIVE_NOTE,
+        )
+
+        audit_actions = [log.action for log in run.audit_logs]
+        self.assertIn("event_strategy_review_source_mode_not_active", audit_actions)
+        self.assertIn("event_strategy_review_run_completed", audit_actions)
+
+    def test_malformed_input_fails_safe_without_approvals(self):
+        run = event_strategy_review.run_event_strategy_review_once(
+            self.db,
+            {
+                "retrieval_contract": {
+                    "source_mode": "manual_summary",
+                    "manual_summary_input": {"headline": "Missing summary"},
+                }
+            },
+        )
+
+        self.assertEqual(run.status, "failed")
+        self.assertEqual(run.task.status, "failed")
+        self.assertEqual(run.approvals, [])
+        self.assertIn("event_strategy_review_manual_summary_required", run.error)
+        self.assertTrue(
+            any(log.action == "event_strategy_review_run_failed" for log in run.audit_logs)
+        )
 
 
 if __name__ == "__main__":

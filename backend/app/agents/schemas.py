@@ -727,6 +727,15 @@ EventStrategyReviewImportance = Literal[
 ]
 EventStrategyReviewPerspectiveStatus = Literal["active", "placeholder", "skipped"]
 EventStrategyReviewExecutionMode = Literal["internal_review_only_non_executable"]
+EventStrategyReviewExecutionPath = Literal[
+    "manual_summary_internal_report",
+    "manual_url_bundle_internal_report",
+    "curated_search_query_not_active_yet",
+]
+EventStrategyReviewExecutionStatus = Literal[
+    "report_generated",
+    "not_active_yet",
+]
 EventStrategyReviewOutputMode = Literal[
     "internal_report_only",
     "html_report_package",
@@ -763,6 +772,7 @@ class EventStrategyReviewUrlSourceInput(BaseModel):
 
 class EventStrategyReviewManualUrlBundleInput(BaseModel):
     items: list[EventStrategyReviewUrlSourceInput] = Field(default_factory=list)
+    submitted_item_count: int = 0
 
 
 class EventStrategyReviewCuratedSearchQueryInput(BaseModel):
@@ -855,6 +865,16 @@ class EventStrategyReviewExecutionPolicy(BaseModel):
     can_auto_deploy: bool = False
 
 
+class EventStrategyReviewExecutionPlan(BaseModel):
+    source_mode: EventStrategyReviewSourceMode
+    execution_path: EventStrategyReviewExecutionPath
+    accepted_for_execution: bool = False
+    live_retrieval_enabled: bool = False
+    deduped_source_count: int = 0
+    duplicate_source_count: int = 0
+    operator_notes: list[str] = Field(default_factory=list)
+
+
 class EventStrategyReviewRecommendedActions(BaseModel):
     internal_actions: list[str] = Field(default_factory=list)
     human_review_actions: list[str] = Field(default_factory=list)
@@ -884,6 +904,15 @@ class EventStrategyReviewReportResponse(BaseModel):
     output_mode_options: list[EventStrategyReviewOutputModeOption] = Field(
         default_factory=list
     )
+    operator_notes: list[str] = Field(default_factory=list)
+
+
+class EventStrategyReviewExecutionResult(BaseModel):
+    source_mode: EventStrategyReviewSourceMode
+    execution_status: EventStrategyReviewExecutionStatus
+    execution_plan: EventStrategyReviewExecutionPlan
+    report: Optional[EventStrategyReviewReportResponse] = None
+    inactive_reason: Optional[str] = None
     operator_notes: list[str] = Field(default_factory=list)
 
 

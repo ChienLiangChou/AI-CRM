@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from . import schemas as agent_schemas
+from sqlalchemy.orm import Session
+
+from . import models, schemas as agent_schemas, service
 
 
 AGENT_TYPE: agent_schemas.AgentType = "event_strategy_review"
@@ -19,17 +24,25 @@ INTERNAL_ONLY_OPERATOR_NOTE = (
     " no hidden automation, and no autonomous execution."
 )
 RETRIEVAL_CONTRACT_NOTE = (
-    "Step 1 preserves a controlled retrieval contract for manual_summary,"
-    " manual_url_bundle, and curated_search_query without executing live web"
-    " retrieval."
+    "v1 preserves a controlled retrieval contract for manual_summary,"
+    " manual_url_bundle, and curated_search_query without enabling live web"
+    " retrieval in this backend slice."
 )
 PACKAGING_EXPLICIT_STEP_NOTE = (
     "HTML packaging remains a separate explicit operator step and does not"
     " auto-run after report generation."
 )
 PERSPECTIVE_SKELETON_NOTE = (
-    "Perspective blocks are fixed in v1 Step 1 and remain skeletonized until"
-    " later runtime work is approved."
+    "Perspective blocks remain fixed and skeletonized until later department"
+    " runtime work is explicitly approved."
+)
+CURATED_QUERY_NOT_ACTIVE_NOTE = (
+    "curated_search_query is accepted by the contract in v1, but live retrieval"
+    " remains disabled in this step."
+)
+URL_DEDUPE_NOTE = (
+    "Manual URL bundle entries are deduplicated conservatively by normalized URL"
+    " before clustering."
 )
 
 
@@ -59,6 +72,27 @@ def _coerce_positive_int(value: Any) -> int | None:
             return None
         return parsed if parsed > 0 else None
     return None
+
+
+def _model_dump(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if hasattr(value, "dict"):
+        return value.dict()
+    return value
+
+
+def _json_default(value: Any) -> Any:
+    dumped = _model_dump(value)
+    if dumped is value:
+        raise TypeError(
+            f"Object of type {type(value).__name__} is not JSON serializable"
+        )
+    return dumped
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, default=_json_default)
 
 
 def _dedupe_str_list(values: Any) -> list[str]:
@@ -92,6 +126,44 @@ def _request_to_dict(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise TypeError("event_strategy_review_request_must_be_dict")
     return raw
+
+
+def _safe_task_payload_json(request: Any) -> str:
+    try:
+        normalized = normalize_run_request(request)
+        return _json_dumps(normalized)
+    except Exception:
+        if isinstance(request, dict):
+            return json.dumps(request, ensure_ascii=False)
+        return json.dumps({"invalid_request": True}, ensure_ascii=False)
+
+
+def _normalize_url_dedupe_key(url: str) -> str:
+    try:
+        split = urlsplit(url)
+    except Exception:
+        return url.strip()
+
+    scheme = split.scheme.lower() or "https"
+    netloc = split.netloc.lower()
+    if scheme == "https" and netloc.endswith(":443"):
+        netloc = netloc[:-4]
+    if scheme == "http" and netloc.endswith(":80"):
+        netloc = netloc[:-3]
+
+    path = split.path or "/"
+    if path != "/":
+        path = path.rstrip("/")
+        if not path:
+            path = "/"
+
+    filtered_query_pairs = [
+        (key, value)
+        for key, value in parse_qsl(split.query, keep_blank_values=True)
+        if key.lower() not in {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid"}
+    ]
+    normalized_query = urlencode(filtered_query_pairs, doseq=True)
+    return urlunsplit((scheme, netloc, path, normalized_query, ""))
 
 
 def normalize_manual_summary_input(
@@ -128,6 +200,9 @@ def normalize_manual_url_bundle_input(
     items_raw = raw.get("items")
     if not isinstance(items_raw, list):
         raise ValueError("event_strategy_review_manual_url_bundle_required")
+    submitted_item_count = _coerce_positive_int(raw.get("submitted_item_count")) or len(
+        items_raw
+    )
 
     items: list[agent_schemas.EventStrategyReviewUrlSourceInput] = []
     seen_urls: set[str] = set()
@@ -136,7 +211,7 @@ def normalize_manual_url_bundle_input(
             normalized = item
         elif isinstance(item, dict):
             url = _clean_text(item.get("url"))
-            if url is None or url in seen_urls:
+            if url is None:
                 continue
             normalized = agent_schemas.EventStrategyReviewUrlSourceInput(
                 url=url,
@@ -147,15 +222,19 @@ def normalize_manual_url_bundle_input(
         else:
             continue
 
-        if normalized.url in seen_urls:
+        dedupe_key = _normalize_url_dedupe_key(normalized.url)
+        if dedupe_key in seen_urls:
             continue
-        seen_urls.add(normalized.url)
+        seen_urls.add(dedupe_key)
         items.append(normalized)
 
     if not items:
         raise ValueError("event_strategy_review_manual_url_bundle_required")
 
-    return agent_schemas.EventStrategyReviewManualUrlBundleInput(items=items)
+    return agent_schemas.EventStrategyReviewManualUrlBundleInput(
+        items=items,
+        submitted_item_count=max(submitted_item_count, len(items)),
+    )
 
 
 def normalize_curated_search_query_input(
@@ -385,7 +464,7 @@ def _build_clustered_sources(
                 source_label="curated_search_query",
                 notes=[
                     f"query preserved: {query_input.query}",
-                    "no live retrieval executed in Step 1",
+                    "no live retrieval executed in this step",
                 ],
             )
         )
@@ -415,7 +494,7 @@ def build_event_cluster(
         )
         canonical_summary = (
             f"Manual URL bundle preserved with {len(sources)} source item(s) for"
-            " later controlled review. Step 1 does not fetch external content."
+            " later controlled review. This step does not fetch external content."
         )
         retrieval_notes = [
             "Manual URL bundle accepted without uncontrolled crawling.",
@@ -436,6 +515,11 @@ def build_event_cluster(
 
     source_count = len(sources)
     duplicate_count = 0
+    if contract.manual_url_bundle_input is not None:
+        duplicate_count = max(
+            contract.manual_url_bundle_input.submitted_item_count - source_count,
+            0,
+        )
     cluster_strength = source_count
     if contract.source_mode == "curated_search_query":
         cluster_strength = 0
@@ -562,7 +646,7 @@ def conservative_importance_assessment(
             "strategy_review_required"
         )
         reason = (
-            "Event clears the Step 1 threshold for structured strategy review"
+            "Event clears the v1 threshold for structured strategy review"
             " based on relevance, operator usefulness, and available source"
             " signal."
         )
@@ -676,6 +760,69 @@ def build_fixed_perspective_blocks(
     )
 
 
+def build_execution_plan(
+    request: agent_schemas.EventStrategyReviewRunRequest | dict[str, Any],
+) -> agent_schemas.EventStrategyReviewExecutionPlan:
+    normalized_request = normalize_run_request(request)
+    contract = normalized_request.retrieval_contract
+
+    deduped_source_count = 0
+    duplicate_source_count = 0
+    operator_notes: list[str] = [RETRIEVAL_CONTRACT_NOTE]
+
+    if contract.manual_summary_input is not None:
+        deduped_source_count = 1
+        operator_notes.append(
+            "manual_summary is active for internal report generation in this step."
+        )
+        return agent_schemas.EventStrategyReviewExecutionPlan(
+            source_mode="manual_summary",
+            execution_path="manual_summary_internal_report",
+            accepted_for_execution=True,
+            live_retrieval_enabled=False,
+            deduped_source_count=deduped_source_count,
+            duplicate_source_count=duplicate_source_count,
+            operator_notes=operator_notes,
+        )
+
+    if contract.manual_url_bundle_input is not None:
+        deduped_source_count = len(contract.manual_url_bundle_input.items)
+        duplicate_source_count = max(
+            contract.manual_url_bundle_input.submitted_item_count
+            - deduped_source_count,
+            0,
+        )
+        operator_notes.append(
+            "manual_url_bundle is active for internal clustering and report generation in this step."
+        )
+        if duplicate_source_count > 0:
+            operator_notes.append(URL_DEDUPE_NOTE)
+        return agent_schemas.EventStrategyReviewExecutionPlan(
+            source_mode="manual_url_bundle",
+            execution_path="manual_url_bundle_internal_report",
+            accepted_for_execution=True,
+            live_retrieval_enabled=False,
+            deduped_source_count=deduped_source_count,
+            duplicate_source_count=duplicate_source_count,
+            operator_notes=operator_notes,
+        )
+
+    operator_notes.append(CURATED_QUERY_NOT_ACTIVE_NOTE)
+    query_input = contract.curated_search_query_input
+    if query_input is not None:
+        deduped_source_count = len(query_input.allowed_domains)
+
+    return agent_schemas.EventStrategyReviewExecutionPlan(
+        source_mode="curated_search_query",
+        execution_path="curated_search_query_not_active_yet",
+        accepted_for_execution=False,
+        live_retrieval_enabled=False,
+        deduped_source_count=deduped_source_count,
+        duplicate_source_count=0,
+        operator_notes=operator_notes,
+    )
+
+
 def build_output_mode_options() -> list[agent_schemas.EventStrategyReviewOutputModeOption]:
     return [
         agent_schemas.EventStrategyReviewOutputModeOption(
@@ -751,6 +898,39 @@ def _build_recommended_actions(
     )
 
 
+def execute_event_strategy_review_request(
+    request: agent_schemas.EventStrategyReviewRunRequest | dict[str, Any],
+) -> agent_schemas.EventStrategyReviewExecutionResult:
+    normalized_request = normalize_run_request(request)
+    execution_plan = build_execution_plan(normalized_request)
+
+    if not execution_plan.accepted_for_execution:
+        return agent_schemas.EventStrategyReviewExecutionResult(
+            source_mode=normalized_request.retrieval_contract.source_mode,
+            execution_status="not_active_yet",
+            execution_plan=execution_plan,
+            report=None,
+            inactive_reason=CURATED_QUERY_NOT_ACTIVE_NOTE,
+            operator_notes=[
+                INTERNAL_ONLY_OPERATOR_NOTE,
+                CURATED_QUERY_NOT_ACTIVE_NOTE,
+            ],
+        )
+
+    report = build_internal_report(normalized_request)
+    operator_notes = [INTERNAL_ONLY_OPERATOR_NOTE]
+    operator_notes.extend(note for note in execution_plan.operator_notes if note)
+
+    return agent_schemas.EventStrategyReviewExecutionResult(
+        source_mode=normalized_request.retrieval_contract.source_mode,
+        execution_status="report_generated",
+        execution_plan=execution_plan,
+        report=report,
+        inactive_reason=None,
+        operator_notes=operator_notes,
+    )
+
+
 def build_internal_report(
     request: agent_schemas.EventStrategyReviewRunRequest | dict[str, Any],
 ) -> agent_schemas.EventStrategyReviewReportResponse:
@@ -773,7 +953,7 @@ def build_internal_report(
 
     report_title = f"Event strategy review: {event_cluster.canonical_event_title}"
     synthesis_summary = (
-        f"This Step 1 report preserves a controlled {event_cluster.source_mode}"
+        f"This internal report preserves a controlled {event_cluster.source_mode}"
         f" intake contract for '{event_cluster.canonical_event_title}' and"
         f" classifies it as {importance_assessment.classification}."
     )
@@ -804,6 +984,197 @@ def build_internal_report(
     )
 
 
+def run_event_strategy_review_once(
+    db: Session,
+    request: agent_schemas.EventStrategyReviewRunRequest | dict[str, Any] | Any,
+) -> models.AgentRun:
+    payload_json = _safe_task_payload_json(request)
+    try:
+        normalized_request = normalize_run_request(request)
+    except Exception:
+        normalized_request = None
+
+    task = service.create_task(
+        db,
+        agent_type=AGENT_TYPE,
+        subject_type="event",
+        subject_id=None,
+        payload=payload_json,
+        priority="normal",
+    )
+    run = service.create_run(
+        db,
+        task=task,
+        summary="Event Strategy Review run (MVP)",
+    )
+
+    now = datetime.utcnow()
+    service.update_task_status(db, task, status="executing")
+    run = service.update_run_status(db, run, status="planning", started_at=now)
+
+    try:
+        if normalized_request is None:
+            normalized_request = normalize_run_request(request)
+
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            actor_type="system",
+            action="event_strategy_review_intake_received",
+            details=payload_json,
+        )
+
+        execution_plan = build_execution_plan(normalized_request)
+        run = service.update_run_status(
+            db,
+            run,
+            status="executing",
+            plan=_json_dumps(execution_plan),
+        )
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            actor_type="agent",
+            action="event_strategy_review_execution_planned",
+            details=_json_dumps(execution_plan),
+        )
+
+        if execution_plan.duplicate_source_count > 0:
+            service.write_audit_log(
+                db,
+                run=run,
+                task=task,
+                actor_type="system",
+                action="event_strategy_review_duplicates_collapsed",
+                details=_json_dumps(
+                    {
+                        "duplicate_source_count": execution_plan.duplicate_source_count,
+                        "deduped_source_count": execution_plan.deduped_source_count,
+                    }
+                ),
+            )
+
+        execution_result = execute_event_strategy_review_request(normalized_request)
+
+        if execution_result.execution_status == "not_active_yet":
+            result_json = _json_dumps(execution_result)
+            service.write_audit_log(
+                db,
+                run=run,
+                task=task,
+                actor_type="system",
+                action="event_strategy_review_source_mode_not_active",
+                details=result_json,
+            )
+            finished_at = datetime.utcnow()
+            run = service.update_run_status(
+                db,
+                run,
+                status="completed",
+                result=result_json,
+                finished_at=finished_at,
+            )
+            service.update_task_status(db, task, status="completed")
+            service.write_audit_log(
+                db,
+                run=run,
+                task=task,
+                actor_type="system",
+                action="event_strategy_review_run_completed",
+                details=result_json,
+            )
+            return run
+
+        report = execution_result.report
+        if report is None:
+            raise RuntimeError("event_strategy_review_report_missing")
+
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            actor_type="agent",
+            action="event_strategy_review_sources_clustered",
+            details=_json_dumps(report.event_cluster),
+        )
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            actor_type="agent",
+            action="event_strategy_review_importance_classified",
+            details=_json_dumps(
+                {
+                    "score_breakdown": report.score_breakdown,
+                    "importance_assessment": report.importance_assessment,
+                }
+            ),
+        )
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            actor_type="agent",
+            action="event_strategy_review_perspectives_built",
+            details=_json_dumps(report.perspective_blocks),
+        )
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            actor_type="agent",
+            action="event_strategy_review_report_generated",
+            details=_json_dumps(
+                {
+                    "report_title": report.report_title,
+                    "recommended_next_actions": report.recommended_next_actions,
+                    "strategy_synthesis": report.strategy_synthesis,
+                }
+            ),
+        )
+
+        result_json = _json_dumps(execution_result)
+        finished_at = datetime.utcnow()
+        run = service.update_run_status(
+            db,
+            run,
+            status="completed",
+            result=result_json,
+            finished_at=finished_at,
+        )
+        service.update_task_status(db, task, status="completed")
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            actor_type="system",
+            action="event_strategy_review_run_completed",
+            details=result_json,
+        )
+        return run
+    except Exception as exc:
+        finished_at = datetime.utcnow()
+        run = service.update_run_status(
+            db,
+            run,
+            status="failed",
+            error=str(exc),
+            finished_at=finished_at,
+        )
+        service.update_task_status(db, task, status="failed")
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            actor_type="system",
+            action="event_strategy_review_run_failed",
+            details=_json_dumps({"error": str(exc)}),
+        )
+        return run
+
+
 def build_package_result_placeholder(
     request: agent_schemas.EventStrategyReviewPackageRequest | dict[str, Any],
 ) -> agent_schemas.EventStrategyReviewPackageResult:
@@ -826,6 +1197,6 @@ def build_package_result_placeholder(
         artifacts=[],
         operator_notes=[
             PACKAGING_EXPLICIT_STEP_NOTE,
-            "No packaging runtime is executed in Step 1.",
+            "No packaging runtime is executed in this step.",
         ],
     )
