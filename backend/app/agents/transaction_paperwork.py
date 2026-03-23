@@ -421,6 +421,80 @@ def prepare_transaction_paperwork_review(
     )
 
 
+def build_trade_record_review_package(
+    preparation_result: agent_schemas.TransactionPaperworkPreparationResult,
+    kevin_answers: agent_schemas.TransactionPaperworkKevinAnswerPacket | None = None,
+) -> agent_schemas.TransactionPaperworkReviewPackage:
+    template = paperwork_templates.get_trade_record_sheet_template()
+    field_descriptor_map = paperwork_templates.get_template_field_map(template.template_id)
+    fact_map = {
+        fact.field_key: fact for fact in preparation_result.canonical_deal_facts.facts
+    }
+    question_map = {
+        question.field_key: question
+        for question in preparation_result.question_packet.questions
+    }
+    blocking_question_keys = set(preparation_result.question_packet.blocking_field_keys)
+    allowed_answer_keys = set(question_map)
+    for field in field_descriptor_map.values():
+        if field.requires_kevin_confirmation:
+            allowed_answer_keys.add(field.key)
+            allowed_answer_keys.update(field.canonical_fact_keys)
+
+    kevin_answer_map, ignored_answer_notes = _build_kevin_answer_map(
+        kevin_answers,
+        allowed_answer_keys,
+    )
+    template_key_lookup = _build_template_key_lookup(template)
+
+    mapped_fields: dict[str, agent_schemas.TransactionPaperworkMappedField] = {}
+    unresolved_field_keys: list[str] = []
+    blocking_unresolved_field_keys: list[str] = []
+    operator_notes = list(preparation_result.operator_notes)
+    operator_notes.extend(preparation_result.canonical_deal_facts.operator_notes)
+    operator_notes.extend(preparation_result.question_packet.operator_notes)
+    operator_notes.extend(ignored_answer_notes)
+
+    for section in template.sections:
+        for field in section.fields:
+            mapped_field = _map_trade_record_field(
+                field,
+                fact_map=fact_map,
+                question_map=question_map,
+                kevin_answer_map=kevin_answer_map,
+            )
+            mapped_fields[field.key] = mapped_field
+            if mapped_field.value_source_category == "unresolved":
+                unresolved_field_keys.append(field.key)
+                if _is_blocking_template_field(field, blocking_question_keys):
+                    blocking_unresolved_field_keys.append(field.key)
+
+    for blocking_key in blocking_question_keys:
+        if blocking_key in kevin_answer_map:
+            continue
+        mapped_template_keys = template_key_lookup.get(blocking_key, [])
+        if mapped_template_keys:
+            continue
+        unresolved_field_keys.append(blocking_key)
+        blocking_unresolved_field_keys.append(blocking_key)
+        operator_notes.append(
+            f"Blocking review field {blocking_key} is not represented directly in the"
+            " Trade Record template registry."
+        )
+
+    return agent_schemas.TransactionPaperworkReviewPackage(
+        template_id=template.template_id,
+        template_version=template.template_version,
+        mapped_fields=mapped_fields,
+        unresolved_field_keys=_dedupe_preserve_order(unresolved_field_keys),
+        blocking_unresolved_field_keys=_dedupe_preserve_order(
+            blocking_unresolved_field_keys
+        ),
+        review_ready=not blocking_unresolved_field_keys,
+        operator_notes=_dedupe_preserve_order(operator_notes),
+    )
+
+
 def _parse_positive_int(value: str | None) -> int | None:
     if value is None:
         return None
@@ -444,6 +518,267 @@ def _document_pages(
             )
         ]
     return []
+
+
+def _build_kevin_answer_map(
+    kevin_answers: agent_schemas.TransactionPaperworkKevinAnswerPacket | None,
+    allowed_answer_keys: set[str],
+) -> tuple[dict[str, agent_schemas.TransactionPaperworkKevinAnswer], list[str]]:
+    if kevin_answers is None:
+        return {}, []
+
+    answer_map: dict[str, agent_schemas.TransactionPaperworkKevinAnswer] = {}
+    operator_notes: list[str] = []
+    for answer in kevin_answers.answers:
+        if answer.field_key not in allowed_answer_keys:
+            operator_notes.append(
+                f"Ignored Kevin answer for unsupported field {answer.field_key}."
+            )
+            continue
+        normalized_value = _normalize_whitespace(answer.value)
+        if not normalized_value:
+            operator_notes.append(
+                f"Ignored blank Kevin answer for field {answer.field_key}."
+            )
+            continue
+        answer_map[answer.field_key] = agent_schemas.TransactionPaperworkKevinAnswer(
+            field_key=answer.field_key,
+            value=normalized_value,
+            notes=answer.notes,
+        )
+    return answer_map, operator_notes
+
+
+def _build_template_key_lookup(
+    template: agent_schemas.TransactionPaperworkTemplateMetadata,
+) -> dict[str, list[str]]:
+    lookup: dict[str, list[str]] = {}
+    for section in template.sections:
+        for field in section.fields:
+            for candidate_key in _field_candidate_keys(field):
+                lookup.setdefault(candidate_key, []).append(field.key)
+    return lookup
+
+
+def _field_candidate_keys(
+    field: agent_schemas.TransactionPaperworkTemplateFieldDescriptor,
+) -> list[str]:
+    candidate_keys = [field.key]
+    candidate_keys.extend(field.canonical_fact_keys)
+    return _dedupe_preserve_order(candidate_keys)
+
+
+def _map_trade_record_field(
+    field: agent_schemas.TransactionPaperworkTemplateFieldDescriptor,
+    *,
+    fact_map: dict[str, agent_schemas.TransactionPaperworkCanonicalDealFact],
+    question_map: dict[str, agent_schemas.TransactionPaperworkQuestionItem],
+    kevin_answer_map: dict[str, agent_schemas.TransactionPaperworkKevinAnswer],
+) -> agent_schemas.TransactionPaperworkMappedField:
+    candidate_keys = _field_candidate_keys(field)
+    source_fact = _first_matching_fact(candidate_keys, fact_map)
+    source_question = _first_matching_question(candidate_keys, question_map)
+    kevin_answer = _first_matching_answer(candidate_keys, kevin_answer_map)
+
+    evidence = _supporting_evidence(source_fact, source_question)
+    confidence = _supporting_confidence(source_fact, source_question, kevin_answer)
+    source_doc_type = _supporting_source_doc_type(source_fact, evidence)
+    notes = list(field.notes)
+    if source_fact is not None:
+        notes.extend(source_fact.notes)
+
+    if kevin_answer is not None:
+        notes.extend(kevin_answer.notes)
+        notes.append("Final value merged from a Kevin-confirmed answer.")
+        return agent_schemas.TransactionPaperworkMappedField(
+            template_field_key=field.key,
+            label=field.label,
+            section_key=field.section_key,
+            final_value=kevin_answer.value,
+            value_source_category="kevin_confirmed",
+            confidence=confidence,
+            confirmation_state="confirmed",
+            requires_kevin_confirmation=field.requires_kevin_confirmation
+            or (source_fact.requires_kevin_confirmation if source_fact else False),
+            evidence=evidence,
+            traceability=_build_field_traceability(
+                template_field_key=field.key,
+                final_value=kevin_answer.value,
+                source_doc_type=source_doc_type,
+                evidence=evidence,
+                confidence=confidence,
+                transform_used="kevin_confirmed_merge",
+                confirmed_by_kevin=True,
+            ),
+            notes=_dedupe_preserve_order(notes),
+        )
+
+    if (
+        not field.requires_kevin_confirmation
+        and source_fact is not None
+        and source_fact.value
+        and source_fact.confirmation_state == "not_required"
+        and source_fact.confidence >= LOW_CONFIDENCE_THRESHOLD
+    ):
+        notes.append("Mapped directly from a high-confidence canonical fact.")
+        return agent_schemas.TransactionPaperworkMappedField(
+            template_field_key=field.key,
+            label=field.label,
+            section_key=field.section_key,
+            final_value=source_fact.value,
+            value_source_category="auto_extracted",
+            confidence=source_fact.confidence,
+            confirmation_state=source_fact.confirmation_state,
+            requires_kevin_confirmation=source_fact.requires_kevin_confirmation,
+            evidence=evidence,
+            traceability=_build_field_traceability(
+                template_field_key=field.key,
+                final_value=source_fact.value,
+                source_doc_type=source_doc_type,
+                evidence=evidence,
+                confidence=source_fact.confidence,
+                transform_used="canonical_fact_to_template",
+                confirmed_by_kevin=False,
+            ),
+            notes=_dedupe_preserve_order(notes),
+        )
+
+    if field.requires_kevin_confirmation:
+        notes.append("Template field requires Kevin confirmation before review-ready.")
+    elif source_question is not None:
+        notes.append(
+            f"Unresolved because the source question packet flagged {source_question.reason}."
+        )
+    elif source_fact is not None and source_fact.confirmation_state != "not_required":
+        notes.append("Unresolved because the canonical fact still requires confirmation.")
+    else:
+        notes.append("No high-confidence mapped value is available for this template field.")
+
+    return agent_schemas.TransactionPaperworkMappedField(
+        template_field_key=field.key,
+        label=field.label,
+        section_key=field.section_key,
+        final_value=None,
+        value_source_category="unresolved",
+        confidence=confidence,
+        confirmation_state=(
+            "required"
+            if field.requires_kevin_confirmation
+            or source_question is not None
+            or (source_fact is not None and source_fact.confirmation_state != "not_required")
+            else "not_required"
+        ),
+        requires_kevin_confirmation=field.requires_kevin_confirmation
+        or (source_fact.requires_kevin_confirmation if source_fact else False),
+        evidence=evidence,
+        traceability=_build_field_traceability(
+            template_field_key=field.key,
+            final_value=None,
+            source_doc_type=source_doc_type,
+            evidence=evidence,
+            confidence=confidence,
+            transform_used="unresolved_template_mapping",
+            confirmed_by_kevin=False,
+        ),
+        notes=_dedupe_preserve_order(notes),
+    )
+
+
+def _first_matching_fact(
+    candidate_keys: list[str],
+    fact_map: dict[str, agent_schemas.TransactionPaperworkCanonicalDealFact],
+) -> agent_schemas.TransactionPaperworkCanonicalDealFact | None:
+    for key in candidate_keys:
+        if key in fact_map:
+            return fact_map[key]
+    return None
+
+
+def _first_matching_question(
+    candidate_keys: list[str],
+    question_map: dict[str, agent_schemas.TransactionPaperworkQuestionItem],
+) -> agent_schemas.TransactionPaperworkQuestionItem | None:
+    for key in candidate_keys:
+        if key in question_map:
+            return question_map[key]
+    return None
+
+
+def _first_matching_answer(
+    candidate_keys: list[str],
+    kevin_answer_map: dict[str, agent_schemas.TransactionPaperworkKevinAnswer],
+) -> agent_schemas.TransactionPaperworkKevinAnswer | None:
+    for key in candidate_keys:
+        if key in kevin_answer_map:
+            return kevin_answer_map[key]
+    return None
+
+
+def _supporting_evidence(
+    source_fact: agent_schemas.TransactionPaperworkCanonicalDealFact | None,
+    source_question: agent_schemas.TransactionPaperworkQuestionItem | None,
+) -> list[agent_schemas.TransactionPaperworkEvidenceReference]:
+    evidence = source_fact.evidence if source_fact is not None else []
+    if not evidence and source_question is not None:
+        evidence = source_question.evidence
+    return evidence
+
+
+def _supporting_confidence(
+    source_fact: agent_schemas.TransactionPaperworkCanonicalDealFact | None,
+    source_question: agent_schemas.TransactionPaperworkQuestionItem | None,
+    kevin_answer: agent_schemas.TransactionPaperworkKevinAnswer | None,
+) -> float:
+    if source_fact is not None:
+        return source_fact.confidence
+    if source_question is not None and source_question.confidence is not None:
+        return source_question.confidence
+    return 1.0 if kevin_answer is not None else 0.0
+
+
+def _supporting_source_doc_type(
+    source_fact: agent_schemas.TransactionPaperworkCanonicalDealFact | None,
+    evidence: list[agent_schemas.TransactionPaperworkEvidenceReference],
+) -> agent_schemas.TransactionPaperworkSourceDocType | None:
+    if source_fact is not None and source_fact.source_doc_type is not None:
+        return source_fact.source_doc_type
+    if evidence:
+        return evidence[0].source_doc_type
+    return None
+
+
+def _build_field_traceability(
+    *,
+    template_field_key: str,
+    final_value: str | None,
+    source_doc_type: agent_schemas.TransactionPaperworkSourceDocType | None,
+    evidence: list[agent_schemas.TransactionPaperworkEvidenceReference],
+    confidence: float,
+    transform_used: str,
+    confirmed_by_kevin: bool,
+) -> agent_schemas.TransactionPaperworkFieldTraceability:
+    primary_evidence = evidence[0] if evidence else None
+    return agent_schemas.TransactionPaperworkFieldTraceability(
+        template_field_key=template_field_key,
+        final_value=final_value,
+        source_doc_type=source_doc_type,
+        source_page=primary_evidence.source_page if primary_evidence else None,
+        evidence_anchor=primary_evidence.evidence_anchor if primary_evidence else None,
+        evidence_snippet=primary_evidence.evidence_snippet if primary_evidence else None,
+        confidence=confidence,
+        transform_used=transform_used,
+        confirmed_by_kevin=confirmed_by_kevin,
+    )
+
+
+def _is_blocking_template_field(
+    field: agent_schemas.TransactionPaperworkTemplateFieldDescriptor,
+    blocking_question_keys: set[str],
+) -> bool:
+    if field.requires_kevin_confirmation:
+        return True
+    candidate_keys = set(_field_candidate_keys(field))
+    return bool(candidate_keys & blocking_question_keys)
 
 
 def _extract_document_candidates(

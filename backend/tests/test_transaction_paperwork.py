@@ -385,5 +385,227 @@ class TransactionPaperworkIntakeAndExtractionTests(unittest.TestCase):
         self.assertTrue(result.operator_notes)
 
 
+class TransactionPaperworkReviewPackageTests(unittest.TestCase):
+    def build_document(
+        self,
+        document_label: str,
+        *pages: str,
+    ) -> agent_schemas.TransactionPaperworkSourceDocument:
+        return agent_schemas.TransactionPaperworkSourceDocument(
+            document_label=document_label,
+            pages=[
+                agent_schemas.TransactionPaperworkSourcePage(
+                    page_number=index + 1,
+                    text=text,
+                )
+                for index, text in enumerate(pages)
+            ],
+        )
+
+    def build_aps_document(self) -> agent_schemas.TransactionPaperworkSourceDocument:
+        return self.build_document(
+            "Downtown APS",
+            "\n".join(
+                [
+                    "Agreement of Purchase and Sale",
+                    "MLS Number: C1234567",
+                    "Property Address: 123 King St W, Toronto, ON",
+                    "Unit: 1102",
+                    "Offer Date: March 1, 2026",
+                    "Closing Date: May 30, 2026",
+                    "Conditional / Firm: Conditional",
+                    "Firm Date: March 5, 2026",
+                    "Buyer: Alice Buyer and Bob Buyer",
+                    "Seller: Sally Seller",
+                    "Purchase Price: $1,250,000",
+                    "Deposit: $50,000",
+                    "Deposit Holder: Freeman Real Estate Ltd.",
+                    "Buyer's Solicitor: Hart Law LLP, 416-555-0100",
+                    "Seller's Solicitor: North Legal PC, 416-555-0199",
+                    "Commission: 2.5% to co-operating brokerage",
+                    "Commission Split: 50/50",
+                    "Referral Fee: 15%",
+                    "Marketing Fee: $500",
+                ]
+            ),
+        )
+
+    def build_lease_document(self) -> agent_schemas.TransactionPaperworkSourceDocument:
+        return self.build_document(
+            "Harbour Lease",
+            "\n".join(
+                [
+                    "Residential Agreement to Lease",
+                    "Premises: 88 Harbour St, Toronto, ON",
+                    "Offer Date: April 2, 2026",
+                    "Occupancy Date: June 1, 2026",
+                    "Tenant: Terry Tenant",
+                    "Landlord: Larry Landlord and Linda Landlord",
+                    "Rent: $3,200 / month",
+                    "Deposit Holder: Harbour Realty Inc.",
+                    "Tenant's Solicitor: Tenant Counsel LLP",
+                    "Landlord's Solicitor: Owner Counsel LLP",
+                ]
+            ),
+        )
+
+    def build_conflicting_aps_document(
+        self,
+    ) -> agent_schemas.TransactionPaperworkSourceDocument:
+        return self.build_document(
+            "Conflicting APS",
+            "\n".join(
+                [
+                    "Agreement of Purchase and Sale",
+                    "Property Address: 10 Front St E, Toronto, ON",
+                    "Offer Date: March 1, 2026",
+                    "Closing Date: May 30, 2026",
+                    "Closing Date: June 5, 2026",
+                    "Buyer: Alice Buyer",
+                    "Seller: Sally Seller",
+                    "Purchase Price: $950,000",
+                ]
+            ),
+        )
+
+    def build_answers(
+        self,
+        **values: str,
+    ) -> agent_schemas.TransactionPaperworkKevinAnswerPacket:
+        return agent_schemas.TransactionPaperworkKevinAnswerPacket(
+            answers=[
+                agent_schemas.TransactionPaperworkKevinAnswer(
+                    field_key=field_key,
+                    value=value,
+                )
+                for field_key, value in values.items()
+            ]
+        )
+
+    def build_review_package(
+        self,
+        document: agent_schemas.TransactionPaperworkSourceDocument,
+        answers: agent_schemas.TransactionPaperworkKevinAnswerPacket | None = None,
+    ) -> agent_schemas.TransactionPaperworkReviewPackage:
+        prep = transaction_paperwork.prepare_transaction_paperwork_review([document])
+        return transaction_paperwork.build_trade_record_review_package(prep, answers)
+
+    def test_aps_trade_record_mapping_autofills_supported_fields_but_not_commission(self):
+        review = self.build_review_package(self.build_aps_document())
+
+        self.assertEqual(review.template_id, "trade_record_sheet")
+        self.assertEqual(
+            review.mapped_fields["property_address"].value_source_category,
+            "auto_extracted",
+        )
+        self.assertEqual(
+            review.mapped_fields["property_address"].final_value,
+            "123 King St W, Toronto, ON, Unit 1102",
+        )
+        self.assertEqual(
+            review.mapped_fields["buyer_solicitor_details"].final_value,
+            "Hart Law LLP, 416-555-0100",
+        )
+        self.assertEqual(
+            review.mapped_fields["seller_solicitor_details"].final_value,
+            "North Legal PC, 416-555-0199",
+        )
+        self.assertEqual(
+            review.mapped_fields["commission_amount"].value_source_category,
+            "unresolved",
+        )
+        self.assertFalse(review.review_ready)
+        self.assertEqual(
+            review.blocking_unresolved_field_keys,
+            [
+                "commission_amount",
+                "commission_split",
+                "referral_fee",
+                "marketing_fee",
+            ],
+        )
+
+    def test_kevin_confirmed_commission_merge_preserves_traceability_and_unlocks_review_ready(self):
+        review = self.build_review_package(
+            self.build_aps_document(),
+            self.build_answers(
+                commission_amount="2.5%",
+                commission_split="50/50",
+                referral_fee="15%",
+                marketing_fee="$500",
+            ),
+        )
+
+        commission = review.mapped_fields["commission_amount"]
+        self.assertEqual(commission.final_value, "2.5%")
+        self.assertEqual(commission.value_source_category, "kevin_confirmed")
+        self.assertEqual(commission.confirmation_state, "confirmed")
+        self.assertTrue(commission.traceability.confirmed_by_kevin)
+        self.assertEqual(commission.traceability.transform_used, "kevin_confirmed_merge")
+        self.assertTrue(commission.evidence)
+        self.assertIn("Commission", commission.evidence[0].evidence_snippet)
+        self.assertTrue(review.review_ready)
+        self.assertEqual(review.blocking_unresolved_field_keys, [])
+
+    def test_agreement_to_lease_mapping_keeps_low_confidence_property_unresolved(self):
+        review = self.build_review_package(self.build_lease_document())
+
+        self.assertEqual(review.mapped_fields["offer_date"].final_value, "2026-04-02")
+        self.assertEqual(review.mapped_fields["sale_type"].final_value, "lease")
+        self.assertEqual(
+            review.mapped_fields["buyer_solicitor_details"].final_value,
+            "Tenant Counsel LLP",
+        )
+        self.assertEqual(
+            review.mapped_fields["seller_solicitor_details"].final_value,
+            "Owner Counsel LLP",
+        )
+        self.assertIsNone(review.mapped_fields["property_address"].final_value)
+        self.assertEqual(
+            review.mapped_fields["property_address"].value_source_category,
+            "unresolved",
+        )
+        self.assertIn("property_address", review.blocking_unresolved_field_keys)
+        self.assertFalse(review.review_ready)
+
+    def test_kevin_can_resolve_low_confidence_overlap_fields_without_filling_optional_blanks(self):
+        review = self.build_review_package(
+            self.build_lease_document(),
+            self.build_answers(
+                property_address="88 Harbour St, Toronto, ON",
+                commission_amount="n/a",
+                commission_split="n/a",
+                referral_fee="none",
+                marketing_fee="none",
+            ),
+        )
+
+        self.assertEqual(
+            review.mapped_fields["property_address"].value_source_category,
+            "kevin_confirmed",
+        )
+        self.assertEqual(
+            review.mapped_fields["property_address"].final_value,
+            "88 Harbour St, Toronto, ON",
+        )
+        self.assertIn("closing_date", review.unresolved_field_keys)
+        self.assertNotIn("closing_date", review.blocking_unresolved_field_keys)
+        self.assertTrue(review.review_ready)
+
+    def test_conflicting_fields_remain_unresolved_until_explicitly_answered(self):
+        review = self.build_review_package(self.build_conflicting_aps_document())
+
+        self.assertIsNone(review.mapped_fields["closing_date"].final_value)
+        self.assertEqual(
+            review.mapped_fields["closing_date"].value_source_category,
+            "unresolved",
+        )
+        self.assertIn("closing_date", review.blocking_unresolved_field_keys)
+        self.assertIn(
+            "conflicting_field",
+            " ".join(review.mapped_fields["closing_date"].notes),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

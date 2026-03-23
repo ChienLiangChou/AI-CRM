@@ -153,14 +153,14 @@ def get_trade_record_sheet_template() -> agent_schemas.TransactionPaperworkTempl
                     "Buyer Solicitor Information",
                     "solicitor_information",
                     field_type="multiline",
-                    canonical_fact_keys=["buyer_solicitor_details"],
+                    canonical_fact_keys=["client_solicitor_details"],
                 ),
                 _field(
                     "seller_solicitor_details",
                     "Seller Solicitor Information",
                     "solicitor_information",
                     field_type="multiline",
-                    canonical_fact_keys=["seller_solicitor_details"],
+                    canonical_fact_keys=["counterparty_solicitor_details"],
                 ),
             ],
         ),
@@ -312,3 +312,14 @@ def get_paperwork_template_by_id(
     if template_id != TRADE_RECORD_TEMPLATE_ID:
         raise KeyError(f"unsupported_paperwork_template:{template_id}")
     return get_trade_record_sheet_template()
+
+
+def get_template_field_map(
+    template_id: str,
+) -> dict[str, agent_schemas.TransactionPaperworkTemplateFieldDescriptor]:
+    template = get_paperwork_template_by_id(template_id)
+    return {
+        field.key: field
+        for section in template.sections
+        for field in section.fields
+    }

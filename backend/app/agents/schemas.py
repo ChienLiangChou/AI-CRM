@@ -737,6 +737,11 @@ TransactionPaperworkIntakeIssueCode = Literal[
     "missing_text",
     "unsupported_document_type",
 ]
+TransactionPaperworkMappedFieldValueSource = Literal[
+    "auto_extracted",
+    "kevin_confirmed",
+    "unresolved",
+]
 TransactionPaperworkValueType = Literal[
     "text",
     "date",
@@ -843,6 +848,16 @@ class TransactionPaperworkQuestionPacket(BaseModel):
     operator_notes: list[str] = Field(default_factory=list)
 
 
+class TransactionPaperworkKevinAnswer(BaseModel):
+    field_key: str
+    value: str
+    notes: list[str] = Field(default_factory=list)
+
+
+class TransactionPaperworkKevinAnswerPacket(BaseModel):
+    answers: list[TransactionPaperworkKevinAnswer] = Field(default_factory=list)
+
+
 class TransactionPaperworkPreparationResult(BaseModel):
     source_documents: list[TransactionPaperworkSourceDocumentIntake] = Field(
         default_factory=list
@@ -856,6 +871,34 @@ class TransactionPaperworkPreparationResult(BaseModel):
     intake_issues: list[TransactionPaperworkIntakeIssue] = Field(
         default_factory=list
     )
+    operator_notes: list[str] = Field(default_factory=list)
+
+
+class TransactionPaperworkMappedField(BaseModel):
+    template_field_key: str
+    label: str
+    section_key: str
+    final_value: Optional[str] = None
+    value_source_category: TransactionPaperworkMappedFieldValueSource = "unresolved"
+    confidence: float = 0.0
+    confirmation_state: TransactionPaperworkConfirmationState = "not_required"
+    requires_kevin_confirmation: bool = False
+    evidence: list[TransactionPaperworkEvidenceReference] = Field(
+        default_factory=list
+    )
+    traceability: TransactionPaperworkFieldTraceability
+    notes: list[str] = Field(default_factory=list)
+
+
+class TransactionPaperworkReviewPackage(BaseModel):
+    template_id: str
+    template_version: str
+    mapped_fields: dict[str, TransactionPaperworkMappedField] = Field(
+        default_factory=dict
+    )
+    unresolved_field_keys: list[str] = Field(default_factory=list)
+    blocking_unresolved_field_keys: list[str] = Field(default_factory=list)
+    review_ready: bool = False
     operator_notes: list[str] = Field(default_factory=list)
 
 
