@@ -916,6 +916,13 @@ class EventStrategyReviewExecutionResult(BaseModel):
     operator_notes: list[str] = Field(default_factory=list)
 
 
+class EventStrategyReviewLatestResponse(BaseModel):
+    run_id: Optional[int] = None
+    status: Optional[RunStatus] = None
+    error: Optional[str] = None
+    result: Optional[EventStrategyReviewExecutionResult] = None
+
+
 class EventStrategyReviewPackageRequest(BaseModel):
     source_run_id: Optional[int] = None
     selected_output_mode: EventStrategyReviewOutputMode

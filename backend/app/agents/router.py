@@ -11,6 +11,7 @@ from . import (
     buyer_match,
     conversation_closer,
     daily_market_scan,
+    event_strategy_review,
     listing_cma,
     mls_auth,
     models,
@@ -144,6 +145,27 @@ def _serialize_transaction_paperwork_result(raw_result: str | None):
             )
             return model.model_dump()
         model = agent_schemas.TransactionPaperworkOrchestrationResult.parse_obj(parsed)
+        return model.dict()
+    except (ValidationError, TypeError, ValueError):
+        return None
+
+
+def _serialize_event_strategy_review_result(raw_result: str | None):
+    if not raw_result:
+        return None
+
+    try:
+        parsed = json.loads(raw_result)
+    except json.JSONDecodeError:
+        return None
+
+    try:
+        if hasattr(agent_schemas.EventStrategyReviewExecutionResult, "model_validate"):
+            model = agent_schemas.EventStrategyReviewExecutionResult.model_validate(
+                parsed
+            )
+            return model.model_dump()
+        model = agent_schemas.EventStrategyReviewExecutionResult.parse_obj(parsed)
         return model.dict()
     except (ValidationError, TypeError, ValueError):
         return None
@@ -878,6 +900,142 @@ def list_strategy_coordination_run_audit_logs(
         .filter(
             models.AgentRun.id == run_id,
             models.AgentTask.agent_type == "strategy_coordination",
+        )
+        .first()
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    return (
+        db.query(models.AgentAuditLog)
+        .filter(models.AgentAuditLog.run_id == run.id)
+        .order_by(models.AgentAuditLog.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+
+
+@router.post(
+    "/event-strategy-review/run-once",
+    response_model=agent_schemas.AgentRun,
+    summary="Trigger a single Event Strategy Review run (MVP).",
+)
+def trigger_event_strategy_review_run_once(
+    request: agent_schemas.EventStrategyReviewRunRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Manually trigger the Event Strategy Review layer to:
+    - accept a controlled manual event intake contract
+    - build an internal-only structured report for supported source modes
+    - persist execution results and audit logs
+
+    This endpoint does NOT execute live retrieval, packaging, or any external action.
+    """
+    try:
+        normalized_request = event_strategy_review.normalize_run_request(request)
+    except ValueError as error:
+        raise _bad_request_from_value_error(error) from error
+
+    return event_strategy_review.run_event_strategy_review_once(
+        db,
+        normalized_request,
+    )
+
+
+@router.get(
+    "/event-strategy-review/runs",
+    response_model=List[agent_schemas.AgentRun],
+    summary="List recent Event Strategy Review runs.",
+)
+def list_event_strategy_review_runs(
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(models.AgentTask.agent_type == "event_strategy_review")
+        .order_by(models.AgentRun.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+@router.get(
+    "/event-strategy-review/latest",
+    response_model=agent_schemas.EventStrategyReviewLatestResponse,
+    summary="Get the latest Event Strategy Review result.",
+)
+def get_latest_event_strategy_review_result(db: Session = Depends(get_db)):
+    run = (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(models.AgentTask.agent_type == "event_strategy_review")
+        .order_by(models.AgentRun.created_at.desc())
+        .first()
+    )
+
+    if run is None:
+        return {
+            "run_id": None,
+            "status": None,
+            "error": None,
+            "result": None,
+        }
+
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "error": run.error,
+        "result": _serialize_event_strategy_review_result(run.result),
+    }
+
+
+@router.get(
+    "/event-strategy-review/runs/{run_id}/report",
+    response_model=agent_schemas.EventStrategyReviewExecutionResult,
+    summary="Get a structured Event Strategy Review report for a run.",
+)
+def get_event_strategy_review_run_report(
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    run = (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(
+            models.AgentRun.id == run_id,
+            models.AgentTask.agent_type == "event_strategy_review",
+        )
+        .first()
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    result = _serialize_event_strategy_review_result(run.result)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    return result
+
+
+@router.get(
+    "/event-strategy-review/runs/{run_id}/audit-logs",
+    response_model=List[agent_schemas.AgentAuditLog],
+    summary="List audit logs for an Event Strategy Review run.",
+)
+def list_event_strategy_review_run_audit_logs(
+    run_id: int,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    run = (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(
+            models.AgentRun.id == run_id,
+            models.AgentTask.agent_type == "event_strategy_review",
         )
         .first()
     )

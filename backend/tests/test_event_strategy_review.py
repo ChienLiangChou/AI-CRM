@@ -1,11 +1,20 @@
 import json
+import sys
+import types
 import unittest
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+pywebpush_stub = types.ModuleType("pywebpush")
+pywebpush_stub.webpush = lambda *args, **kwargs: None
+pywebpush_stub.WebPushException = Exception
+sys.modules.setdefault("pywebpush", pywebpush_stub)
+
 from app.agents import event_strategy_review
 from app.agents import models as agent_models
+from app.agents import router as agent_router
 from app.agents import schemas as agent_schemas
 from app.database import Base
 
@@ -402,6 +411,185 @@ class EventStrategyReviewPersistenceTests(unittest.TestCase):
         self.assertTrue(
             any(log.action == "event_strategy_review_run_failed" for log in run.audit_logs)
         )
+
+
+class EventStrategyReviewRouteSurfaceTests(unittest.TestCase):
+    def setUp(self):
+        self.engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+        )
+        self.SessionLocal = sessionmaker(
+            autocommit=False,
+            autoflush=False,
+            bind=self.engine,
+        )
+        Base.metadata.create_all(bind=self.engine)
+        self.db = self.SessionLocal()
+
+    def tearDown(self):
+        self.db.close()
+        self.engine.dispose()
+
+    def create_non_event_strategy_run(self) -> agent_models.AgentRun:
+        task = agent_models.AgentTask(
+            agent_type="strategy_coordination",
+            subject_type="event",
+            subject_id=None,
+            payload="{}",
+            priority="normal",
+            status="completed",
+        )
+        self.db.add(task)
+        self.db.commit()
+        self.db.refresh(task)
+
+        run = agent_models.AgentRun(
+            task_id=task.id,
+            status="completed",
+            summary="non-event-strategy run",
+        )
+        self.db.add(run)
+        self.db.commit()
+        self.db.refresh(run)
+        return run
+
+    def test_latest_returns_safe_empty_contract(self):
+        payload = agent_router.get_latest_event_strategy_review_result(db=self.db)
+
+        self.assertEqual(
+            payload,
+            {
+                "run_id": None,
+                "status": None,
+                "error": None,
+                "result": None,
+            },
+        )
+
+    def test_event_strategy_review_route_surface_is_scoped_and_safe(self):
+        request = agent_schemas.EventStrategyReviewRunRequest(
+            retrieval_contract=agent_schemas.EventStrategyReviewRetrievalContract(
+                source_mode="manual_summary",
+                manual_summary_input=agent_schemas.EventStrategyReviewManualSummaryInput(
+                    headline="Toronto rate shift",
+                    summary="Mortgage and condo conditions may change seller and buyer strategy.",
+                ),
+            ),
+            geo_focus=["Toronto", "GTA"],
+        )
+
+        event_run = agent_router.trigger_event_strategy_review_run_once(
+            request,
+            self.db,
+        )
+        non_event_run = self.create_non_event_strategy_run()
+
+        runs = agent_router.list_event_strategy_review_runs(db=self.db)
+        latest = agent_router.get_latest_event_strategy_review_result(db=self.db)
+        report = agent_router.get_event_strategy_review_run_report(
+            event_run.id,
+            db=self.db,
+        )
+        audit_logs = agent_router.list_event_strategy_review_run_audit_logs(
+            event_run.id,
+            db=self.db,
+        )
+
+        self.assertEqual([run.id for run in runs], [event_run.id])
+        self.assertEqual(latest["run_id"], event_run.id)
+        self.assertEqual(latest["status"], "completed")
+        self.assertEqual(latest["result"]["execution_status"], "report_generated")
+        self.assertEqual(report["execution_status"], "report_generated")
+        self.assertEqual(report["report"]["retrieval_contract"]["source_mode"], "manual_summary")
+        self.assertTrue(audit_logs)
+        self.assertEqual(audit_logs[0].action, "event_strategy_review_intake_received")
+        self.assertEqual(self.db.query(agent_models.AgentApproval).count(), 0)
+
+        with self.assertRaises(HTTPException) as report_error:
+            agent_router.get_event_strategy_review_run_report(
+                non_event_run.id,
+                db=self.db,
+            )
+        self.assertEqual(report_error.exception.status_code, 404)
+
+        with self.assertRaises(HTTPException) as audit_error:
+            agent_router.list_event_strategy_review_run_audit_logs(
+                non_event_run.id,
+                db=self.db,
+            )
+        self.assertEqual(audit_error.exception.status_code, 404)
+
+    def test_route_surface_exposes_not_active_yet_state_without_crashing(self):
+        request = agent_schemas.EventStrategyReviewRunRequest(
+            retrieval_contract=agent_schemas.EventStrategyReviewRetrievalContract(
+                source_mode="curated_search_query",
+                curated_search_query_input=agent_schemas.EventStrategyReviewCuratedSearchQueryInput(
+                    query="Toronto rental market policy",
+                    allowed_domains=["toronto.ca"],
+                ),
+            )
+        )
+
+        run = agent_router.trigger_event_strategy_review_run_once(
+            request,
+            self.db,
+        )
+        latest = agent_router.get_latest_event_strategy_review_result(db=self.db)
+        report = agent_router.get_event_strategy_review_run_report(
+            run.id,
+            db=self.db,
+        )
+
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(latest["status"], "completed")
+        self.assertEqual(latest["result"]["execution_status"], "not_active_yet")
+        self.assertEqual(report["execution_status"], "not_active_yet")
+        self.assertIsNone(report["report"])
+        self.assertEqual(
+            report["inactive_reason"],
+            event_strategy_review.CURATED_QUERY_NOT_ACTIVE_NOTE,
+        )
+
+    def test_route_surface_reports_failed_run_with_error_and_no_result(self):
+        request = agent_schemas.EventStrategyReviewRunRequest(
+            retrieval_contract=agent_schemas.EventStrategyReviewRetrievalContract(
+                source_mode="manual_summary",
+                manual_summary_input=agent_schemas.EventStrategyReviewManualSummaryInput(
+                    headline="Toronto policy",
+                    summary="A market event.",
+                ),
+            )
+        )
+
+        original_execute = event_strategy_review.execute_event_strategy_review_request
+
+        def boom(_request):
+            raise RuntimeError("event strategy boom")
+
+        try:
+            event_strategy_review.execute_event_strategy_review_request = boom
+            run = agent_router.trigger_event_strategy_review_run_once(
+                request,
+                self.db,
+            )
+        finally:
+            event_strategy_review.execute_event_strategy_review_request = original_execute
+
+        latest = agent_router.get_latest_event_strategy_review_result(db=self.db)
+
+        self.assertEqual(run.status, "failed")
+        self.assertEqual(latest["run_id"], run.id)
+        self.assertEqual(latest["status"], "failed")
+        self.assertIn("event strategy boom", latest["error"])
+        self.assertIsNone(latest["result"])
+
+        with self.assertRaises(HTTPException) as report_error:
+            agent_router.get_event_strategy_review_run_report(
+                run.id,
+                db=self.db,
+            )
+        self.assertEqual(report_error.exception.status_code, 404)
 
 
 if __name__ == "__main__":
