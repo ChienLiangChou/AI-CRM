@@ -171,6 +171,27 @@ def _serialize_event_strategy_review_result(raw_result: str | None):
         return None
 
 
+def _serialize_event_strategy_review_package_result(raw_result: str | None):
+    if not raw_result:
+        return None
+
+    try:
+        parsed = json.loads(raw_result)
+    except json.JSONDecodeError:
+        return None
+
+    try:
+        if hasattr(agent_schemas.EventStrategyReviewPackageResult, "model_validate"):
+            model = agent_schemas.EventStrategyReviewPackageResult.model_validate(
+                parsed
+            )
+            return model.model_dump()
+        model = agent_schemas.EventStrategyReviewPackageResult.parse_obj(parsed)
+        return model.dict()
+    except (ValidationError, TypeError, ValueError):
+        return None
+
+
 @router.post(
     "/follow-up/run-once",
     response_model=agent_schemas.AgentRun,
@@ -955,7 +976,10 @@ def list_event_strategy_review_runs(
     return (
         db.query(models.AgentRun)
         .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
-        .filter(models.AgentTask.agent_type == "event_strategy_review")
+        .filter(
+            models.AgentTask.agent_type == "event_strategy_review",
+            models.AgentTask.subject_type == "event",
+        )
         .order_by(models.AgentRun.created_at.desc())
         .limit(limit)
         .all()
@@ -971,7 +995,10 @@ def get_latest_event_strategy_review_result(db: Session = Depends(get_db)):
     run = (
         db.query(models.AgentRun)
         .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
-        .filter(models.AgentTask.agent_type == "event_strategy_review")
+        .filter(
+            models.AgentTask.agent_type == "event_strategy_review",
+            models.AgentTask.subject_type == "event",
+        )
         .order_by(models.AgentRun.created_at.desc())
         .first()
     )
@@ -1007,6 +1034,7 @@ def get_event_strategy_review_run_report(
         .filter(
             models.AgentRun.id == run_id,
             models.AgentTask.agent_type == "event_strategy_review",
+            models.AgentTask.subject_type == "event",
         )
         .first()
     )
@@ -1036,6 +1064,7 @@ def list_event_strategy_review_run_audit_logs(
         .filter(
             models.AgentRun.id == run_id,
             models.AgentTask.agent_type == "event_strategy_review",
+            models.AgentTask.subject_type == "event",
         )
         .first()
     )
@@ -1049,6 +1078,102 @@ def list_event_strategy_review_run_audit_logs(
         .limit(limit)
         .all()
     )
+
+
+@router.post(
+    "/event-strategy-review/runs/{run_id}/package-output",
+    response_model=agent_schemas.AgentRun,
+    summary="Trigger Event Strategy Review output packaging for a run.",
+)
+def trigger_event_strategy_review_package_output(
+    run_id: int,
+    request: agent_schemas.EventStrategyReviewPackageRequest,
+    db: Session = Depends(get_db),
+):
+    source_run = (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(
+            models.AgentRun.id == run_id,
+            models.AgentTask.agent_type == "event_strategy_review",
+            models.AgentTask.subject_type == "event",
+        )
+        .first()
+    )
+    if source_run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    if request.source_run_id is not None and request.source_run_id != run_id:
+        raise HTTPException(
+            status_code=400,
+            detail="source_run_id must match the route run_id",
+        )
+
+    package_request = agent_schemas.EventStrategyReviewPackageRequest(
+        source_run_id=run_id,
+        selected_output_mode=request.selected_output_mode,
+        title_override=request.title_override,
+        audience_label=request.audience_label,
+        operator_notes=request.operator_notes,
+    )
+
+    return event_strategy_review.run_event_strategy_review_package_once(
+        db,
+        source_run=source_run,
+        package_request=package_request,
+    )
+
+
+@router.get(
+    "/event-strategy-review/runs/{run_id}/package",
+    response_model=agent_schemas.EventStrategyReviewPackageLatestResponse,
+    summary="Get the latest Event Strategy Review package result for a source run.",
+)
+def get_event_strategy_review_run_package(
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    source_run = (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(
+            models.AgentRun.id == run_id,
+            models.AgentTask.agent_type == "event_strategy_review",
+            models.AgentTask.subject_type == "event",
+        )
+        .first()
+    )
+    if source_run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    package_run = (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(
+            models.AgentTask.agent_type == "event_strategy_review",
+            models.AgentTask.subject_type == "event_strategy_review_package",
+            models.AgentTask.subject_id == run_id,
+        )
+        .order_by(models.AgentRun.created_at.desc())
+        .first()
+    )
+
+    if package_run is None:
+        return {
+            "source_run_id": run_id,
+            "package_run_id": None,
+            "status": None,
+            "error": None,
+            "result": None,
+        }
+
+    return {
+        "source_run_id": run_id,
+        "package_run_id": package_run.id,
+        "status": package_run.status,
+        "error": package_run.error,
+        "result": _serialize_event_strategy_review_package_result(package_run.result),
+    }
 
 
 @router.post(

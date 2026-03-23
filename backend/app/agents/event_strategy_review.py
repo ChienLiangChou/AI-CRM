@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from datetime import datetime
+from html import escape
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -44,6 +47,24 @@ URL_DEDUPE_NOTE = (
     "Manual URL bundle entries are deduplicated conservatively by normalized URL"
     " before clustering."
 )
+HTML_PACKAGE_NOTE = (
+    "HTML report packaging is internal-only and manual-deploy only in v1. No"
+    " publish or deploy action occurs here."
+)
+PACKAGE_SOURCE_MISSING_NOTE = (
+    "Packaging is blocked because the source analysis run does not have a"
+    " structured stored report result."
+)
+PACKAGE_SOURCE_NOT_ACTIVE_NOTE = (
+    "Packaging is blocked because the source analysis run is not active for"
+    " report packaging yet."
+)
+PACKAGE_MODE_NOT_IMPLEMENTED_NOTE = (
+    "Only html_report_package is implemented in this step. Other output modes"
+    " remain planned and package-blocked."
+)
+PACKAGE_SUBJECT_TYPE = "event_strategy_review_package"
+ANALYSIS_SUBJECT_TYPE = "event"
 
 
 def _clean_text(value: Any) -> str | None:
@@ -95,6 +116,19 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=_json_default)
 
 
+def _sha256_for_file(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(8192)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _dedupe_str_list(values: Any) -> list[str]:
     if not isinstance(values, list):
         return []
@@ -136,6 +170,28 @@ def _safe_task_payload_json(request: Any) -> str:
         if isinstance(request, dict):
             return json.dumps(request, ensure_ascii=False)
         return json.dumps({"invalid_request": True}, ensure_ascii=False)
+
+
+def _safe_package_payload_json(source_run_id: int, request: Any) -> str:
+    try:
+        if isinstance(request, agent_schemas.EventStrategyReviewPackageRequest):
+            package_request = request
+        else:
+            package_request = agent_schemas.EventStrategyReviewPackageRequest(
+                **_request_to_dict(request)
+            )
+        payload = package_request.model_dump() if hasattr(package_request, "model_dump") else package_request.dict()
+        payload["source_run_id"] = source_run_id
+        return json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        if isinstance(request, dict):
+            payload = dict(request)
+            payload["source_run_id"] = source_run_id
+            return json.dumps(payload, ensure_ascii=False)
+        return json.dumps(
+            {"invalid_package_request": True, "source_run_id": source_run_id},
+            ensure_ascii=False,
+        )
 
 
 def _normalize_url_dedupe_key(url: str) -> str:
@@ -931,6 +987,52 @@ def execute_event_strategy_review_request(
     )
 
 
+def _parse_execution_result(
+    raw_result: str | None,
+) -> agent_schemas.EventStrategyReviewExecutionResult | None:
+    if not raw_result:
+        return None
+
+    try:
+        parsed = json.loads(raw_result)
+    except json.JSONDecodeError:
+        return None
+
+    if hasattr(agent_schemas.EventStrategyReviewExecutionResult, "model_validate"):
+        try:
+            return agent_schemas.EventStrategyReviewExecutionResult.model_validate(parsed)
+        except Exception:
+            return None
+
+    try:
+        return agent_schemas.EventStrategyReviewExecutionResult.parse_obj(parsed)
+    except Exception:
+        return None
+
+
+def _parse_package_result(
+    raw_result: str | None,
+) -> agent_schemas.EventStrategyReviewPackageResult | None:
+    if not raw_result:
+        return None
+
+    try:
+        parsed = json.loads(raw_result)
+    except json.JSONDecodeError:
+        return None
+
+    if hasattr(agent_schemas.EventStrategyReviewPackageResult, "model_validate"):
+        try:
+            return agent_schemas.EventStrategyReviewPackageResult.model_validate(parsed)
+        except Exception:
+            return None
+
+    try:
+        return agent_schemas.EventStrategyReviewPackageResult.parse_obj(parsed)
+    except Exception:
+        return None
+
+
 def build_internal_report(
     request: agent_schemas.EventStrategyReviewRunRequest | dict[str, Any],
 ) -> agent_schemas.EventStrategyReviewReportResponse:
@@ -984,6 +1086,251 @@ def build_internal_report(
     )
 
 
+def _event_strategy_source_title(
+    report: agent_schemas.EventStrategyReviewReportResponse,
+    package_request: agent_schemas.EventStrategyReviewPackageRequest,
+) -> str:
+    title_override = _clean_text(package_request.title_override)
+    if title_override:
+        return title_override
+    return report.report_title
+
+
+def _render_html_report_document(
+    *,
+    report: agent_schemas.EventStrategyReviewReportResponse,
+    execution_result: agent_schemas.EventStrategyReviewExecutionResult,
+    package_request: agent_schemas.EventStrategyReviewPackageRequest,
+) -> str:
+    title = escape(_event_strategy_source_title(report, package_request))
+    perspective_html = []
+    for key in FIXED_PERSPECTIVE_KEYS:
+        block = getattr(report.perspective_blocks, key)
+        perspective_html.append(
+            "\n".join(
+                [
+                    f"<section class=\"perspective-block\"><h3>{escape(key.replace('_', ' ').title())}</h3>",
+                    f"<p><strong>Status:</strong> {escape(block.status)}</p>",
+                    f"<p>{escape(block.summary)}</p>",
+                    "<h4>Why It Matters</h4><ul>"
+                    + "".join(f"<li>{escape(item)}</li>" for item in block.why_it_matters)
+                    + "</ul>",
+                    "<h4>Business Implications</h4><ul>"
+                    + "".join(
+                        f"<li>{escape(item)}</li>" for item in block.business_implications
+                    )
+                    + "</ul>",
+                    "<h4>Recommended Internal Actions</h4><ul>"
+                    + "".join(
+                        f"<li>{escape(item)}</li>"
+                        for item in block.recommended_internal_actions
+                    )
+                    + "</ul>",
+                    "<h4>Cautions</h4><ul>"
+                    + "".join(f"<li>{escape(item)}</li>" for item in block.cautions)
+                    + "</ul>",
+                    "</section>",
+                ]
+            )
+        )
+
+    internal_actions_html = "".join(
+        f"<li>{escape(item)}</li>"
+        for item in report.recommended_next_actions.internal_actions
+    )
+    human_actions_html = "".join(
+        f"<li>{escape(item)}</li>"
+        for item in report.recommended_next_actions.human_review_actions
+    )
+    source_items_html = "".join(
+        "<li>"
+        + escape(source.title or source.source_label or source.url or "source")
+        + (
+            f" ({escape(source.publisher)})"
+            if source.publisher
+            else ""
+        )
+        + "</li>"
+        for source in report.event_cluster.sources
+    )
+
+    return "\n".join(
+        [
+            "<!DOCTYPE html>",
+            "<html lang=\"en\">",
+            "<head>",
+            "<meta charset=\"utf-8\" />",
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />",
+            f"<title>{title}</title>",
+            "<style>",
+            "body{font-family:Georgia,serif;margin:40px auto;max-width:960px;padding:0 20px;color:#14213d;background:#f7f4ed;line-height:1.55;}",
+            "header,section{background:#fff;padding:24px;border:1px solid #d8d2c4;margin-bottom:18px;}",
+            "h1,h2,h3,h4{color:#111827;margin-top:0;}",
+            ".meta{color:#5b6470;font-size:0.95rem;}",
+            ".pill{display:inline-block;padding:4px 10px;border:1px solid #c6b89e;border-radius:999px;margin-right:8px;margin-bottom:8px;background:#f3ead7;}",
+            "ul{padding-left:22px;}",
+            "code{background:#f2f2f2;padding:2px 5px;}",
+            "</style>",
+            "</head>",
+            "<body>",
+            "<header>",
+            f"<h1>{title}</h1>",
+            f"<p class=\"meta\">Internal-only HTML package. Source mode: {escape(execution_result.source_mode)}. Classification: {escape(report.importance_assessment.classification)}.</p>",
+            f"<p>{escape(report.event_cluster.canonical_summary)}</p>",
+            "</header>",
+            "<section>",
+            "<h2>Score Breakdown</h2>",
+            f"<p><span class=\"pill\">Total {report.score_breakdown.total_score}</span>"
+            f"<span class=\"pill\">Relevance {report.score_breakdown.relevance_score}</span>"
+            f"<span class=\"pill\">Geography {report.score_breakdown.geography_score}</span>"
+            f"<span class=\"pill\">Recency {report.score_breakdown.recency_score}</span>"
+            f"<span class=\"pill\">Source Credibility {report.score_breakdown.source_credibility_score}</span>"
+            f"<span class=\"pill\">Cluster Strength {report.score_breakdown.cluster_strength_score}</span>"
+            f"<span class=\"pill\">Operator Usefulness {report.score_breakdown.operator_usefulness_score}</span></p>",
+            "</section>",
+            "<section>",
+            "<h2>Recommended Next Actions</h2>",
+            "<h3>Internal Actions</h3>",
+            f"<ul>{internal_actions_html}</ul>",
+            "<h3>Human Review Actions</h3>",
+            f"<ul>{human_actions_html}</ul>",
+            "</section>",
+            "<section>",
+            "<h2>Sources</h2>",
+            f"<ul>{source_items_html}</ul>",
+            "</section>",
+            "<section>",
+            "<h2>Perspective Blocks</h2>",
+            *perspective_html,
+            "</section>",
+            "<section>",
+            "<h2>Notes</h2>",
+            "<ul>"
+            + "".join(f"<li>{escape(note)}</li>" for note in report.operator_notes)
+            + "</ul>",
+            "</section>",
+            "</body>",
+            "</html>",
+        ]
+    )
+
+
+def _write_text_artifact(
+    *,
+    directory: Path,
+    file_name: str,
+    content: str,
+    artifact_type: agent_schemas.EventStrategyReviewArtifactType,
+    label: str,
+    content_type: str,
+    is_entrypoint: bool = False,
+) -> agent_schemas.EventStrategyReviewPackageArtifact:
+    path = directory / file_name
+    path.write_text(content, encoding="utf-8")
+    return agent_schemas.EventStrategyReviewPackageArtifact(
+        artifact_type=artifact_type,
+        file_name=file_name,
+        path=str(path),
+        content_type=content_type,
+        file_size_bytes=path.stat().st_size,
+        checksum_sha256=_sha256_for_file(path),
+        is_entrypoint=is_entrypoint,
+        label=label,
+    )
+
+
+def _blocked_package_result(
+    *,
+    source_run_id: int,
+    package_request: agent_schemas.EventStrategyReviewPackageRequest,
+    notes: list[str],
+) -> agent_schemas.EventStrategyReviewPackageResult:
+    return agent_schemas.EventStrategyReviewPackageResult(
+        source_run_id=source_run_id,
+        selected_output_mode=package_request.selected_output_mode,
+        status="blocked",
+        requires_explicit_operator_step=True,
+        package_directory_path=None,
+        artifacts=[],
+        operator_notes=notes,
+    )
+
+
+def build_event_strategy_review_html_package(
+    *,
+    source_run_id: int,
+    execution_result: agent_schemas.EventStrategyReviewExecutionResult,
+    package_request: agent_schemas.EventStrategyReviewPackageRequest,
+) -> agent_schemas.EventStrategyReviewPackageResult:
+    report = execution_result.report
+    if report is None:
+        return _blocked_package_result(
+            source_run_id=source_run_id,
+            package_request=package_request,
+            notes=[PACKAGE_SOURCE_MISSING_NOTE],
+        )
+
+    package_dir = Path(
+        tempfile.mkdtemp(prefix=f"event_strategy_review_package_{source_run_id}_")
+    )
+
+    report_payload = (
+        execution_result.model_dump()
+        if hasattr(execution_result, "model_dump")
+        else execution_result.dict()
+    )
+    sources_payload = [source.model_dump() if hasattr(source, "model_dump") else source.dict() for source in report.event_cluster.sources]
+    html = _render_html_report_document(
+        report=report,
+        execution_result=execution_result,
+        package_request=package_request,
+    )
+
+    artifacts = [
+        _write_text_artifact(
+            directory=package_dir,
+            file_name="index.html",
+            content=html,
+            artifact_type="static_html_bundle",
+            label="HTML entrypoint",
+            content_type="text/html; charset=utf-8",
+            is_entrypoint=True,
+        ),
+        _write_text_artifact(
+            directory=package_dir,
+            file_name="report.json",
+            content=json.dumps(report_payload, ensure_ascii=False, indent=2),
+            artifact_type="json_report",
+            label="Structured execution result",
+            content_type="application/json",
+        ),
+    ]
+
+    if sources_payload:
+        artifacts.append(
+            _write_text_artifact(
+                directory=package_dir,
+                file_name="sources.json",
+                content=json.dumps(sources_payload, ensure_ascii=False, indent=2),
+                artifact_type="json_report",
+                label="Clustered sources",
+                content_type="application/json",
+            )
+        )
+
+    return agent_schemas.EventStrategyReviewPackageResult(
+        source_run_id=source_run_id,
+        selected_output_mode="html_report_package",
+        status="draft_ready",
+        requires_explicit_operator_step=True,
+        package_directory_path=str(package_dir),
+        artifacts=artifacts,
+        operator_notes=[
+            HTML_PACKAGE_NOTE,
+            PACKAGING_EXPLICIT_STEP_NOTE,
+        ],
+    )
+
 def run_event_strategy_review_once(
     db: Session,
     request: agent_schemas.EventStrategyReviewRunRequest | dict[str, Any] | Any,
@@ -997,7 +1344,7 @@ def run_event_strategy_review_once(
     task = service.create_task(
         db,
         agent_type=AGENT_TYPE,
-        subject_type="event",
+        subject_type=ANALYSIS_SUBJECT_TYPE,
         subject_id=None,
         payload=payload_json,
         priority="normal",
@@ -1175,6 +1522,138 @@ def run_event_strategy_review_once(
         return run
 
 
+def run_event_strategy_review_package_once(
+    db: Session,
+    *,
+    source_run: models.AgentRun,
+    package_request: agent_schemas.EventStrategyReviewPackageRequest,
+) -> models.AgentRun:
+    payload_json = _safe_package_payload_json(source_run.id, package_request)
+    task = service.create_task(
+        db,
+        agent_type=AGENT_TYPE,
+        subject_type=PACKAGE_SUBJECT_TYPE,
+        subject_id=source_run.id,
+        payload=payload_json,
+        priority="normal",
+    )
+    run = service.create_run(
+        db,
+        task=task,
+        summary="Event Strategy Review package run (MVP)",
+    )
+
+    now = datetime.utcnow()
+    service.update_task_status(db, task, status="executing")
+    run = service.update_run_status(db, run, status="planning", started_at=now)
+
+    try:
+        source_execution_result = _parse_execution_result(source_run.result)
+        plan = {
+            "source_run_id": source_run.id,
+            "selected_output_mode": package_request.selected_output_mode,
+            "requires_explicit_operator_step": True,
+            "source_execution_status": (
+                source_execution_result.execution_status
+                if source_execution_result is not None
+                else None
+            ),
+        }
+        run = service.update_run_status(
+            db,
+            run,
+            status="executing",
+            plan=_json_dumps(plan),
+        )
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            actor_type="system",
+            action="event_strategy_review_packaging_requested",
+            details=payload_json,
+        )
+
+        if (
+            source_execution_result is not None
+            and source_execution_result.execution_status == "not_active_yet"
+        ):
+            package_result = _blocked_package_result(
+                source_run_id=source_run.id,
+                package_request=package_request,
+                notes=[PACKAGE_SOURCE_NOT_ACTIVE_NOTE, PACKAGING_EXPLICIT_STEP_NOTE],
+            )
+        elif source_execution_result is None or source_execution_result.report is None:
+            package_result = _blocked_package_result(
+                source_run_id=source_run.id,
+                package_request=package_request,
+                notes=[PACKAGE_SOURCE_MISSING_NOTE, PACKAGING_EXPLICIT_STEP_NOTE],
+            )
+        elif package_request.selected_output_mode != "html_report_package":
+            package_result = _blocked_package_result(
+                source_run_id=source_run.id,
+                package_request=package_request,
+                notes=[PACKAGE_MODE_NOT_IMPLEMENTED_NOTE, PACKAGING_EXPLICIT_STEP_NOTE],
+            )
+        else:
+            package_result = build_event_strategy_review_html_package(
+                source_run_id=source_run.id,
+                execution_result=source_execution_result,
+                package_request=package_request,
+            )
+
+        result_json = _json_dumps(package_result)
+        finished_at = datetime.utcnow()
+        run = service.update_run_status(
+            db,
+            run,
+            status="completed",
+            result=result_json,
+            finished_at=finished_at,
+        )
+        service.update_task_status(db, task, status="completed")
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            actor_type="system",
+            action="event_strategy_review_packaging_completed",
+            details=_json_dumps(
+                {
+                    "source_run_id": source_run.id,
+                    "status": package_result.status,
+                    "selected_output_mode": package_result.selected_output_mode,
+                    "artifacts": package_result.artifacts,
+                }
+            ),
+        )
+        return run
+    except Exception as exc:
+        finished_at = datetime.utcnow()
+        run = service.update_run_status(
+            db,
+            run,
+            status="failed",
+            error=str(exc),
+            finished_at=finished_at,
+        )
+        service.update_task_status(db, task, status="failed")
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            actor_type="system",
+            action="event_strategy_review_packaging_failed",
+            details=_json_dumps(
+                {
+                    "source_run_id": source_run.id,
+                    "error": str(exc),
+                }
+            ),
+        )
+        return run
+
+
 def build_package_result_placeholder(
     request: agent_schemas.EventStrategyReviewPackageRequest | dict[str, Any],
 ) -> agent_schemas.EventStrategyReviewPackageResult:
@@ -1192,8 +1671,10 @@ def build_package_result_placeholder(
         status = "blocked"
 
     return agent_schemas.EventStrategyReviewPackageResult(
+        source_run_id=package_request.source_run_id,
         selected_output_mode=package_request.selected_output_mode,
         status=status,
+        package_directory_path=None,
         artifacts=[],
         operator_notes=[
             PACKAGING_EXPLICIT_STEP_NOTE,

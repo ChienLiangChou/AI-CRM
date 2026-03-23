@@ -933,16 +933,31 @@ class EventStrategyReviewPackageRequest(BaseModel):
 
 class EventStrategyReviewPackageArtifact(BaseModel):
     artifact_type: EventStrategyReviewArtifactType = "static_html_bundle"
+    file_name: Optional[str] = None
     path: Optional[str] = None
+    content_type: Optional[str] = None
+    file_size_bytes: Optional[int] = None
+    checksum_sha256: Optional[str] = None
+    is_entrypoint: bool = False
     label: Optional[str] = None
 
 
 class EventStrategyReviewPackageResult(BaseModel):
+    source_run_id: Optional[int] = None
     selected_output_mode: EventStrategyReviewOutputMode
     status: EventStrategyReviewPackageStatus
     requires_explicit_operator_step: bool = True
+    package_directory_path: Optional[str] = None
     artifacts: list[EventStrategyReviewPackageArtifact] = Field(default_factory=list)
     operator_notes: list[str] = Field(default_factory=list)
+
+
+class EventStrategyReviewPackageLatestResponse(BaseModel):
+    source_run_id: int
+    package_run_id: Optional[int] = None
+    status: Optional[RunStatus] = None
+    error: Optional[str] = None
+    result: Optional[EventStrategyReviewPackageResult] = None
 
 
 TransactionPaperworkSourceDocType = Literal[

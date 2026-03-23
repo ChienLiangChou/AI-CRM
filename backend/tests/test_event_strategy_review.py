@@ -2,6 +2,7 @@ import json
 import sys
 import types
 import unittest
+from pathlib import Path
 
 from fastapi import HTTPException
 from sqlalchemy import create_engine
@@ -454,6 +455,30 @@ class EventStrategyReviewRouteSurfaceTests(unittest.TestCase):
         self.db.refresh(run)
         return run
 
+    def create_event_strategy_failed_run(self) -> agent_models.AgentRun:
+        task = agent_models.AgentTask(
+            agent_type="event_strategy_review",
+            subject_type="event",
+            subject_id=None,
+            payload="{}",
+            priority="normal",
+            status="failed",
+        )
+        self.db.add(task)
+        self.db.commit()
+        self.db.refresh(task)
+
+        run = agent_models.AgentRun(
+            task_id=task.id,
+            status="failed",
+            summary="failed event-strategy run",
+            error="no structured report",
+        )
+        self.db.add(run)
+        self.db.commit()
+        self.db.refresh(run)
+        return run
+
     def test_latest_returns_safe_empty_contract(self):
         payload = agent_router.get_latest_event_strategy_review_result(db=self.db)
 
@@ -590,6 +615,191 @@ class EventStrategyReviewRouteSurfaceTests(unittest.TestCase):
                 db=self.db,
             )
         self.assertEqual(report_error.exception.status_code, 404)
+
+    def test_package_latest_returns_safe_empty_contract_before_packaging(self):
+        request = agent_schemas.EventStrategyReviewRunRequest(
+            retrieval_contract=agent_schemas.EventStrategyReviewRetrievalContract(
+                source_mode="manual_summary",
+                manual_summary_input=agent_schemas.EventStrategyReviewManualSummaryInput(
+                    headline="Toronto affordability update",
+                    summary="A structured internal report is available.",
+                ),
+            )
+        )
+        source_run = agent_router.trigger_event_strategy_review_run_once(
+            request,
+            self.db,
+        )
+
+        payload = agent_router.get_event_strategy_review_run_package(
+            source_run.id,
+            db=self.db,
+        )
+
+        self.assertEqual(
+            payload,
+            {
+                "source_run_id": source_run.id,
+                "package_run_id": None,
+                "status": None,
+                "error": None,
+                "result": None,
+            },
+        )
+
+    def test_html_package_route_creates_distinct_packaging_run_and_artifacts(self):
+        request = agent_schemas.EventStrategyReviewRunRequest(
+            retrieval_contract=agent_schemas.EventStrategyReviewRetrievalContract(
+                source_mode="manual_summary",
+                manual_summary_input=agent_schemas.EventStrategyReviewManualSummaryInput(
+                    headline="Toronto housing policy update",
+                    summary="Policy changes affect rates, rentals, buyers, and sellers.",
+                ),
+            ),
+            geo_focus=["Toronto", "Ontario"],
+        )
+        source_run = agent_router.trigger_event_strategy_review_run_once(
+            request,
+            self.db,
+        )
+
+        package_run = agent_router.trigger_event_strategy_review_package_output(
+            source_run.id,
+            agent_schemas.EventStrategyReviewPackageRequest(
+                selected_output_mode="html_report_package",
+                title_override="Toronto housing policy package",
+            ),
+            self.db,
+        )
+        latest_package = agent_router.get_event_strategy_review_run_package(
+            source_run.id,
+            db=self.db,
+        )
+        analysis_latest = agent_router.get_latest_event_strategy_review_result(db=self.db)
+
+        self.assertEqual(package_run.status, "completed")
+        self.assertEqual(package_run.task.subject_type, "event_strategy_review_package")
+        self.assertEqual(package_run.task.subject_id, source_run.id)
+        self.assertEqual(analysis_latest["run_id"], source_run.id)
+        self.assertEqual(analysis_latest["result"]["execution_status"], "report_generated")
+
+        self.assertEqual(latest_package["source_run_id"], source_run.id)
+        self.assertEqual(latest_package["package_run_id"], package_run.id)
+        self.assertEqual(latest_package["status"], "completed")
+        self.assertEqual(latest_package["result"]["status"], "draft_ready")
+        self.assertTrue(latest_package["result"]["requires_explicit_operator_step"])
+
+        artifacts = latest_package["result"]["artifacts"]
+        artifact_names = {artifact["file_name"] for artifact in artifacts}
+        self.assertIn("index.html", artifact_names)
+        self.assertIn("report.json", artifact_names)
+
+        index_artifact = next(
+            artifact for artifact in artifacts if artifact["file_name"] == "index.html"
+        )
+        report_artifact = next(
+            artifact for artifact in artifacts if artifact["file_name"] == "report.json"
+        )
+        self.assertTrue(index_artifact["is_entrypoint"])
+        self.assertEqual(index_artifact["artifact_type"], "static_html_bundle")
+        self.assertTrue(Path(index_artifact["path"]).is_file())
+        self.assertTrue(Path(report_artifact["path"]).is_file())
+        self.assertTrue(Path(latest_package["result"]["package_directory_path"]).is_dir())
+        self.assertIn(
+            "Toronto housing policy package",
+            Path(index_artifact["path"]).read_text(encoding="utf-8"),
+        )
+
+        packaging_logs = [log.action for log in package_run.audit_logs]
+        self.assertEqual(
+            packaging_logs,
+            [
+                "event_strategy_review_packaging_requested",
+                "event_strategy_review_packaging_completed",
+            ],
+        )
+
+    def test_package_route_blocks_when_source_run_has_no_structured_report(self):
+        source_run = self.create_event_strategy_failed_run()
+
+        package_run = agent_router.trigger_event_strategy_review_package_output(
+            source_run.id,
+            agent_schemas.EventStrategyReviewPackageRequest(
+                selected_output_mode="html_report_package",
+            ),
+            self.db,
+        )
+        latest_package = agent_router.get_event_strategy_review_run_package(
+            source_run.id,
+            db=self.db,
+        )
+
+        self.assertEqual(package_run.status, "completed")
+        self.assertEqual(latest_package["result"]["status"], "blocked")
+        self.assertEqual(latest_package["result"]["artifacts"], [])
+        self.assertIn(
+            "does not have a structured stored report result",
+            " ".join(latest_package["result"]["operator_notes"]).lower(),
+        )
+
+    def test_package_route_blocks_when_source_run_is_not_active_yet(self):
+        source_run = agent_router.trigger_event_strategy_review_run_once(
+            agent_schemas.EventStrategyReviewRunRequest(
+                retrieval_contract=agent_schemas.EventStrategyReviewRetrievalContract(
+                    source_mode="curated_search_query",
+                    curated_search_query_input=agent_schemas.EventStrategyReviewCuratedSearchQueryInput(
+                        query="Toronto condo policy",
+                        allowed_domains=["toronto.ca"],
+                    ),
+                )
+            ),
+            self.db,
+        )
+
+        agent_router.trigger_event_strategy_review_package_output(
+            source_run.id,
+            agent_schemas.EventStrategyReviewPackageRequest(
+                selected_output_mode="html_report_package",
+            ),
+            self.db,
+        )
+        latest_package = agent_router.get_event_strategy_review_run_package(
+            source_run.id,
+            db=self.db,
+        )
+
+        self.assertEqual(latest_package["result"]["status"], "blocked")
+        self.assertEqual(latest_package["result"]["artifacts"], [])
+        self.assertIn(
+            "not active for report packaging yet",
+            " ".join(latest_package["result"]["operator_notes"]).lower(),
+        )
+
+    def test_package_route_rejects_mismatched_source_run_id(self):
+        source_run = agent_router.trigger_event_strategy_review_run_once(
+            agent_schemas.EventStrategyReviewRunRequest(
+                retrieval_contract=agent_schemas.EventStrategyReviewRetrievalContract(
+                    source_mode="manual_summary",
+                    manual_summary_input=agent_schemas.EventStrategyReviewManualSummaryInput(
+                        headline="Toronto rates",
+                        summary="A report exists.",
+                    ),
+                )
+            ),
+            self.db,
+        )
+
+        with self.assertRaises(HTTPException) as error:
+            agent_router.trigger_event_strategy_review_package_output(
+                source_run.id,
+                agent_schemas.EventStrategyReviewPackageRequest(
+                    source_run_id=source_run.id + 1,
+                    selected_output_mode="html_report_package",
+                ),
+                self.db,
+            )
+
+        self.assertEqual(error.exception.status_code, 400)
 
 
 if __name__ == "__main__":
