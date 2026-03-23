@@ -4,7 +4,7 @@ import Dashboard from './pages/Dashboard';
 import Contacts from './pages/Contacts';
 import Pipeline from './pages/Pipeline';
 import Prospector from './pages/Prospector';
-import AgentDashboard from './pages/AgentDashboard';
+import OpenClawShell from './pages/OpenClawShell';
 
 function App() {
   return (
@@ -16,7 +16,7 @@ function App() {
           <Route path="/contacts" element={<Contacts />} />
           <Route path="/pipeline" element={<Pipeline />} />
           <Route path="/find-leads" element={<Prospector />} />
-          <Route path="/agents" element={<AgentDashboard />} />
+          <Route path="/agents" element={<OpenClawShell />} />
         </Routes>
       </Layout>
     </Router>
