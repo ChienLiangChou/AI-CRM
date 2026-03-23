@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 from app.agents import event_strategy_review
 from app.agents import event_strategy_review_retrieval
@@ -52,6 +53,23 @@ class EventStrategyReviewRetrievalTests(unittest.TestCase):
         self.assertEqual(outcome.retrieval_metadata.raw_candidate_cap, 8)
         self.assertEqual(outcome.retrieval_metadata.fetched_source_cap, 3)
         self.assertFalse(outcome.sources)
+        self.assertIn(
+            "no constrained retrieval adapter is available",
+            " ".join(outcome.retrieval_metadata.notes).lower(),
+        )
+
+    def test_resolve_curated_search_adapter_uses_existing_inference_api_key(self):
+        with mock.patch.dict(
+            "os.environ",
+            {"INFERENCE_API_KEY": "inf_test_key"},
+            clear=False,
+        ):
+            adapter = event_strategy_review_retrieval.resolve_curated_search_adapter()
+
+        self.assertIsInstance(
+            adapter,
+            event_strategy_review_retrieval.InferenceShTavilyCuratedSearchAdapter,
+        )
 
     def test_rate_limited_adapter_fails_soft_without_fake_success(self):
         request = self.normalized_request(
@@ -70,6 +88,90 @@ class EventStrategyReviewRetrievalTests(unittest.TestCase):
         self.assertEqual(outcome.retrieval_metadata.retrieval_state, "rate_limited")
         self.assertEqual(outcome.retrieval_metadata.allowed_domains_applied, ["bankofcanada.ca"])
         self.assertFalse(outcome.sources)
+
+    def test_inference_sh_adapter_parses_successful_response_shape(self):
+        payload = {
+            "output": {
+                "results": [
+                    {
+                        "title": "Bank of Canada rate decision",
+                        "url": "https://www.bankofcanada.ca/2026/03/rate-decision",
+                        "content": "Toronto housing affordability and mortgage conditions may shift.",
+                        "published_date": "2026-03-23T10:00:00Z",
+                    },
+                    {
+                        "title": "Toronto housing policy update",
+                        "url": "https://toronto.ca/news/housing-policy-update",
+                        "content": "City policy update may affect renters and sellers.",
+                        "source": "City of Toronto",
+                        "date": "2026-03-23T09:00:00Z",
+                    },
+                ]
+            }
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                import json
+
+                return json.dumps(payload).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            self.assertEqual(request.full_url, event_strategy_review_retrieval.INFERENCE_SH_API_URL)
+            self.assertEqual(request.headers["Authorization"], "Bearer inf_test_key")
+            self.assertEqual(timeout, 30)
+            return FakeResponse()
+
+        adapter = event_strategy_review_retrieval.InferenceShTavilyCuratedSearchAdapter(
+            api_key="inf_test_key",
+            urlopen=fake_urlopen,
+        )
+        response = adapter.search(
+            query="Toronto housing rates and policy",
+            max_results=8,
+            allowed_domains=["bankofcanada.ca", "toronto.ca"],
+        )
+
+        self.assertEqual(response.status, "success")
+        self.assertEqual(len(response.candidates), 2)
+        self.assertEqual(
+            response.candidates[0].url,
+            "https://www.bankofcanada.ca/2026/03/rate-decision",
+        )
+        self.assertEqual(
+            response.candidates[1].publisher,
+            "City of Toronto",
+        )
+
+    def test_inference_sh_adapter_maps_http_429_to_rate_limited(self):
+        from urllib import error as urllib_error
+
+        def fake_urlopen(request, timeout):
+            raise urllib_error.HTTPError(
+                request.full_url,
+                429,
+                "Too Many Requests",
+                hdrs=None,
+                fp=None,
+            )
+
+        adapter = event_strategy_review_retrieval.InferenceShTavilyCuratedSearchAdapter(
+            api_key="inf_test_key",
+            urlopen=fake_urlopen,
+        )
+        response = adapter.search(
+            query="Toronto rates",
+            max_results=3,
+            allowed_domains=["bankofcanada.ca"],
+        )
+
+        self.assertEqual(response.status, "rate_limited")
 
     def test_allowed_domains_and_trust_filter_can_end_in_no_credible_sources(self):
         request = self.normalized_request(

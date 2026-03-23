@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Sequence
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from . import schemas as agent_schemas
@@ -11,6 +15,8 @@ from . import schemas as agent_schemas
 
 RAW_CANDIDATE_CAP = 8
 FETCHED_SOURCE_CAP = 3
+INFERENCE_SH_API_URL = "https://api.inference.sh/apps/run"
+INFERENCE_SH_CURATED_SEARCH_APP = "tavily/search-assistant"
 SAFE_DEFAULT_TRUSTED_DOMAINS: dict[str, agent_schemas.EventStrategyReviewSourceTrustTier] = {
     "bankofcanada.ca": "tier_1_primary",
     "federalreserve.gov": "tier_1_primary",
@@ -68,6 +74,9 @@ class BaseCuratedSearchAdapter(ABC):
 class UnavailableCuratedSearchAdapter(BaseCuratedSearchAdapter):
     adapter_key = "unavailable"
 
+    def __init__(self, *, reason: str | None = None):
+        self._reason = reason
+
     def search(
         self,
         *,
@@ -78,9 +87,139 @@ class UnavailableCuratedSearchAdapter(BaseCuratedSearchAdapter):
         return CuratedSearchAdapterResponse(
             status="unavailable",
             candidates=(),
-            notes=(
-                "Controlled curated-search retrieval is not configured in this environment yet.",
+            notes=tuple(
+                note
+                for note in [
+                    "Controlled curated-search retrieval is not configured in this environment yet.",
+                    self._reason,
+                ]
+                if note
             ),
+        )
+
+
+class InferenceShTavilyCuratedSearchAdapter(BaseCuratedSearchAdapter):
+    adapter_key = "inference_sh_tavily_search_assistant"
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        urlopen=urllib_request.urlopen,
+        api_url: str = INFERENCE_SH_API_URL,
+        app_id: str = INFERENCE_SH_CURATED_SEARCH_APP,
+        timeout_seconds: int = 30,
+    ):
+        self._api_key = api_key
+        self._urlopen = urlopen
+        self._api_url = api_url
+        self._app_id = app_id
+        self._timeout_seconds = timeout_seconds
+
+    def _build_payload(
+        self,
+        *,
+        query: str,
+        max_results: int,
+    ) -> dict[str, object]:
+        return {
+            "app": self._app_id,
+            "input": {
+                "query": query,
+                "max_results": max_results,
+                "include_answer": False,
+            },
+        }
+
+    def search(
+        self,
+        *,
+        query: str,
+        max_results: int,
+        allowed_domains: Sequence[str],
+    ) -> CuratedSearchAdapterResponse:
+        payload = self._build_payload(query=query, max_results=max_results)
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib_request.Request(
+            self._api_url,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        try:
+            with self._urlopen(request, timeout=self._timeout_seconds) as response:
+                raw = response.read().decode("utf-8")
+        except urllib_error.HTTPError as exc:
+            message = ""
+            try:
+                if exc.fp is not None:
+                    message = exc.read().decode("utf-8", errors="ignore")
+            except Exception:
+                message = ""
+            lowered = message.lower()
+            if exc.code == 429 or "rate limit" in lowered:
+                return CuratedSearchAdapterResponse(
+                    status="rate_limited",
+                    notes=(
+                        "inference.sh Tavily search adapter returned a rate-limited response.",
+                    ),
+                )
+            return CuratedSearchAdapterResponse(
+                status="unavailable",
+                notes=(
+                    "inference.sh Tavily search adapter rejected the request.",
+                    _clean_text(message) or f"http_status={exc.code}",
+                ),
+            )
+        except urllib_error.URLError as exc:
+            return CuratedSearchAdapterResponse(
+                status="unavailable",
+                notes=(
+                    "inference.sh Tavily search adapter could not reach the provider.",
+                    str(exc.reason),
+                ),
+            )
+        except TimeoutError:
+            return CuratedSearchAdapterResponse(
+                status="rate_limited",
+                notes=("inference.sh Tavily search adapter timed out during retrieval.",),
+            )
+        except Exception as exc:
+            return CuratedSearchAdapterResponse(
+                status="unavailable",
+                notes=(
+                    "inference.sh Tavily search adapter raised an unexpected error.",
+                    str(exc),
+                ),
+            )
+
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return CuratedSearchAdapterResponse(
+                status="unavailable",
+                notes=(
+                    "inference.sh Tavily search adapter returned non-JSON output.",
+                ),
+            )
+
+        output_payload = parsed.get("output") if isinstance(parsed, dict) else parsed
+        candidates = tuple(_extract_candidates_from_output(output_payload))
+        notes = [
+            "inference.sh Tavily search adapter completed a constrained search request.",
+        ]
+        if allowed_domains:
+            notes.append(
+                f"Allowed-domain constraint preserved {len(allowed_domains)} domain(s) for downstream filtering."
+            )
+        return CuratedSearchAdapterResponse(
+            status="success",
+            candidates=candidates,
+            notes=tuple(notes),
         )
 
 
@@ -210,6 +349,81 @@ def _tokenize(value: str | None) -> set[str]:
     return {token for token in tokens if token}
 
 
+def _extract_candidates_from_output(output: object) -> list[CuratedSearchCandidate]:
+    candidates: list[CuratedSearchCandidate] = []
+    seen_urls: set[str] = set()
+
+    def visit(value: object) -> None:
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+            return
+        if not isinstance(value, dict):
+            return
+
+        candidate = _candidate_from_dict(value)
+        if candidate is not None and candidate.url not in seen_urls:
+            seen_urls.add(candidate.url)
+            candidates.append(candidate)
+
+        for nested in value.values():
+            if isinstance(nested, (list, dict)):
+                visit(nested)
+
+    visit(output)
+    return candidates
+
+
+def _candidate_from_dict(value: dict[str, object]) -> CuratedSearchCandidate | None:
+    url = _clean_text(
+        value.get("url")
+        if isinstance(value.get("url"), str)
+        else value.get("link")
+    )
+    if url is None:
+        return None
+
+    title_value = value.get("title")
+    if not isinstance(title_value, str):
+        title_value = value.get("name") if isinstance(value.get("name"), str) else None
+    snippet_value = value.get("content")
+    if not isinstance(snippet_value, str):
+        snippet_value = value.get("snippet") if isinstance(value.get("snippet"), str) else None
+    if not isinstance(snippet_value, str):
+        snippet_value = value.get("text") if isinstance(value.get("text"), str) else None
+    publisher_value = value.get("publisher")
+    if not isinstance(publisher_value, str):
+        publisher_value = value.get("source") if isinstance(value.get("source"), str) else None
+    published_value = value.get("published_at")
+    if not isinstance(published_value, str):
+        published_value = (
+            value.get("published_date")
+            if isinstance(value.get("published_date"), str)
+            else None
+        )
+    if not isinstance(published_value, str):
+        published_value = value.get("date") if isinstance(value.get("date"), str) else None
+
+    return CuratedSearchCandidate(
+        url=url,
+        title=_clean_text(title_value),
+        snippet=_clean_text(snippet_value),
+        publisher=_clean_text(publisher_value),
+        published_at=_clean_text(published_value),
+        observed_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+def resolve_curated_search_adapter() -> BaseCuratedSearchAdapter:
+    api_key = _clean_text(os.getenv("INFERENCE_API_KEY"))
+    if api_key is None:
+        return UnavailableCuratedSearchAdapter(
+            reason="INFERENCE_API_KEY is not set, so the approved inference.sh search path stays unavailable.",
+        )
+
+    return InferenceShTavilyCuratedSearchAdapter(api_key=api_key)
+
+
 def _candidate_score(
     *,
     candidate: CuratedSearchCandidate,
@@ -337,7 +551,7 @@ def run_curated_search_query(
     if query_input is None:
         raise ValueError("event_strategy_review_curated_search_query_required")
 
-    retrieval_adapter = adapter or UnavailableCuratedSearchAdapter()
+    retrieval_adapter = adapter or resolve_curated_search_adapter()
     requested_allowed_domains = [
         normalized
         for normalized in (
