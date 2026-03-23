@@ -1,7 +1,10 @@
 import hashlib
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from pypdf import PdfReader
 
 from app.agents import paperwork_templates, schemas as agent_schemas
 from app.agents import transaction_paperwork
@@ -605,6 +608,145 @@ class TransactionPaperworkReviewPackageTests(unittest.TestCase):
             "conflicting_field",
             " ".join(review.mapped_fields["closing_date"].notes),
         )
+
+
+class TransactionPaperworkOverlayRenderTests(unittest.TestCase):
+    def build_document(
+        self,
+        document_label: str,
+        *pages: str,
+    ) -> agent_schemas.TransactionPaperworkSourceDocument:
+        return agent_schemas.TransactionPaperworkSourceDocument(
+            document_label=document_label,
+            pages=[
+                agent_schemas.TransactionPaperworkSourcePage(
+                    page_number=index + 1,
+                    text=text,
+                )
+                for index, text in enumerate(pages)
+            ],
+        )
+
+    def build_aps_document(self) -> agent_schemas.TransactionPaperworkSourceDocument:
+        return self.build_document(
+            "Downtown APS",
+            "\n".join(
+                [
+                    "Agreement of Purchase and Sale",
+                    "MLS Number: C1234567",
+                    "Property Address: 123 King St W, Toronto, ON",
+                    "Unit: 1102",
+                    "Offer Date: March 1, 2026",
+                    "Closing Date: May 30, 2026",
+                    "Conditional / Firm: Conditional",
+                    "Firm Date: March 5, 2026",
+                    "Buyer: Alice Buyer and Bob Buyer",
+                    "Seller: Sally Seller",
+                    "Purchase Price: $1,250,000",
+                    "Deposit: $50,000",
+                    "Deposit Holder: Freeman Real Estate Ltd.",
+                    "Buyer's Solicitor: Hart Law LLP, 416-555-0100",
+                    "Seller's Solicitor: North Legal PC, 416-555-0199",
+                    "Commission: 2.5% to co-operating brokerage",
+                    "Commission Split: 50/50",
+                    "Referral Fee: 15%",
+                    "Marketing Fee: $500",
+                ]
+            ),
+        )
+
+    def build_answers(self) -> agent_schemas.TransactionPaperworkKevinAnswerPacket:
+        return agent_schemas.TransactionPaperworkKevinAnswerPacket(
+            answers=[
+                agent_schemas.TransactionPaperworkKevinAnswer(
+                    field_key="commission_amount",
+                    value="2.5%",
+                ),
+                agent_schemas.TransactionPaperworkKevinAnswer(
+                    field_key="commission_split",
+                    value="50/50",
+                ),
+                agent_schemas.TransactionPaperworkKevinAnswer(
+                    field_key="referral_fee",
+                    value="15%",
+                ),
+                agent_schemas.TransactionPaperworkKevinAnswer(
+                    field_key="marketing_fee",
+                    value="$500",
+                ),
+            ]
+        )
+
+    def build_review_package(
+        self,
+        answers: agent_schemas.TransactionPaperworkKevinAnswerPacket | None = None,
+    ) -> agent_schemas.TransactionPaperworkReviewPackage:
+        prep = transaction_paperwork.prepare_transaction_paperwork_review(
+            [self.build_aps_document()]
+        )
+        return transaction_paperwork.build_trade_record_review_package(prep, answers)
+
+    def test_review_ready_package_renders_overlay_draft_and_preserves_page_count(self):
+        review = self.build_review_package(self.build_answers())
+        template_reader = PdfReader(
+            paperwork_templates._trade_record_template_path()  # type: ignore[attr-defined]
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = transaction_paperwork.render_trade_record_review_draft(
+                review,
+                output_dir=temp_dir,
+            )
+
+            self.assertEqual(result.output_status, "rendered")
+            self.assertIsNotNone(result.artifact)
+            self.assertEqual(result.fill_mode, "overlay_coordinates")
+            self.assertEqual(result.artifact.page_count, len(template_reader.pages))
+            self.assertTrue(Path(result.artifact.output_pdf_path).is_file())
+            self.assertGreater(result.rendered_field_count, 0)
+            self.assertEqual(
+                result.rendered_field_count,
+                len(result.rendered_field_keys),
+            )
+            rendered_reader = PdfReader(result.artifact.output_pdf_path)
+            self.assertEqual(
+                float(rendered_reader.pages[0].mediabox.width),
+                float(template_reader.pages[0].mediabox.width),
+            )
+            self.assertEqual(
+                float(rendered_reader.pages[0].mediabox.height),
+                float(template_reader.pages[0].mediabox.height),
+            )
+            rendered_text = "\n".join(
+                page.extract_text() or "" for page in rendered_reader.pages
+            )
+            self.assertIn("Alice Buyer", rendered_text)
+            self.assertIn("C1234567", rendered_text)
+            self.assertIn("2.5%", rendered_text)
+            self.assertIn("$500", rendered_text)
+            self.assertEqual(
+                result.traceability_by_field_key["commission_amount"].transform_used,
+                "kevin_confirmed_merge",
+            )
+
+    def test_blocked_package_does_not_render_formal_draft(self):
+        review = self.build_review_package()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = transaction_paperwork.render_trade_record_review_draft(
+                review,
+                output_dir=temp_dir,
+            )
+
+            self.assertEqual(result.output_status, "blocked")
+            self.assertIsNone(result.artifact)
+            self.assertEqual(result.rendered_field_count, 0)
+            self.assertIn("commission_amount", result.unresolved_blocking_field_keys)
+            self.assertIn("commission_split", result.unresolved_blocking_field_keys)
+            self.assertEqual(result.rendered_field_keys, [])
+            self.assertTrue(
+                any("blocked" in note.lower() for note in result.operator_notes)
+            )
 
 
 if __name__ == "__main__":

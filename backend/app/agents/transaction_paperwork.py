@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Callable
+
+from pypdf import PdfReader, PdfWriter
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfgen import canvas
 
 from . import paperwork_templates, schemas as agent_schemas
 
@@ -495,6 +502,116 @@ def build_trade_record_review_package(
     )
 
 
+def render_trade_record_review_draft(
+    review_package: agent_schemas.TransactionPaperworkReviewPackage,
+    *,
+    output_dir: str | Path | None = None,
+) -> agent_schemas.TransactionPaperworkRenderResult:
+    template = paperwork_templates.get_trade_record_sheet_template()
+    if review_package.template_id != template.template_id:
+        raise KeyError(
+            f"unsupported_review_template:{review_package.template_id}"
+        )
+
+    traceability_by_field_key = {
+        key: mapped_field.traceability
+        for key, mapped_field in review_package.mapped_fields.items()
+    }
+    if not review_package.review_ready:
+        return agent_schemas.TransactionPaperworkRenderResult(
+            template_id=review_package.template_id,
+            template_version=review_package.template_version,
+            fill_mode="overlay_coordinates",
+            output_status="blocked",
+            rendered_field_count=0,
+            skipped_unresolved_field_count=len(review_package.unresolved_field_keys),
+            unresolved_blocking_field_keys=list(
+                review_package.blocking_unresolved_field_keys
+            ),
+            rendered_field_keys=[],
+            traceability_by_field_key=traceability_by_field_key,
+            operator_notes=_dedupe_preserve_order(
+                list(review_package.operator_notes)
+                + [
+                    "Draft rendering blocked because the review package is not review-ready."
+                ]
+            ),
+        )
+
+    overlay_coordinates = paperwork_templates.get_trade_record_overlay_coordinates()
+    missing_coordinate_fields = [
+        field_key
+        for field_key, mapped_field in review_package.mapped_fields.items()
+        if mapped_field.final_value
+        and field_key not in overlay_coordinates
+    ]
+    if missing_coordinate_fields:
+        return agent_schemas.TransactionPaperworkRenderResult(
+            template_id=review_package.template_id,
+            template_version=review_package.template_version,
+            fill_mode="overlay_coordinates",
+            output_status="blocked",
+            rendered_field_count=0,
+            skipped_unresolved_field_count=len(review_package.unresolved_field_keys),
+            unresolved_blocking_field_keys=missing_coordinate_fields,
+            rendered_field_keys=[],
+            traceability_by_field_key=traceability_by_field_key,
+            operator_notes=_dedupe_preserve_order(
+                list(review_package.operator_notes)
+                + [
+                    "Draft rendering blocked because one or more mapped fields have no overlay coordinate."
+                ]
+            ),
+        )
+
+    template_path = _absolute_template_path(template.source_template_path)
+    reader = PdfReader(str(template_path))
+    overlay_buffer = _build_trade_record_overlay_pdf(
+        reader=reader,
+        review_package=review_package,
+        overlay_coordinates=overlay_coordinates,
+    )
+    overlay_reader = PdfReader(overlay_buffer)
+    writer = PdfWriter()
+    for page_index, page in enumerate(reader.pages):
+        merged_page = page
+        if page_index < len(overlay_reader.pages):
+            merged_page.merge_page(overlay_reader.pages[page_index])
+        writer.add_page(merged_page)
+
+    output_path = _prepare_render_output_path(output_dir)
+    with output_path.open("wb") as handle:
+        writer.write(handle)
+
+    artifact = agent_schemas.TransactionPaperworkRenderedArtifactMetadata(
+        output_pdf_path=str(output_path),
+        file_size_bytes=output_path.stat().st_size,
+        checksum_sha256=_sha256_for_file(output_path),
+        page_count=len(reader.pages),
+    )
+    rendered_field_keys = [
+        field_key
+        for field_key, mapped_field in review_package.mapped_fields.items()
+        if mapped_field.final_value
+    ]
+    return agent_schemas.TransactionPaperworkRenderResult(
+        template_id=review_package.template_id,
+        template_version=review_package.template_version,
+        fill_mode="overlay_coordinates",
+        output_status="rendered",
+        artifact=artifact,
+        rendered_field_count=len(rendered_field_keys),
+        skipped_unresolved_field_count=len(review_package.unresolved_field_keys),
+        unresolved_blocking_field_keys=[],
+        rendered_field_keys=rendered_field_keys,
+        traceability_by_field_key=traceability_by_field_key,
+        operator_notes=_dedupe_preserve_order(
+            list(review_package.operator_notes)
+            + ["Draft PDF rendered using overlay coordinates on the original template."]
+        ),
+    )
+
+
 def _parse_positive_int(value: str | None) -> int | None:
     if value is None:
         return None
@@ -518,6 +635,119 @@ def _document_pages(
             )
         ]
     return []
+
+
+def _build_trade_record_overlay_pdf(
+    *,
+    reader: PdfReader,
+    review_package: agent_schemas.TransactionPaperworkReviewPackage,
+    overlay_coordinates: dict[str, agent_schemas.TransactionPaperworkOverlayCoordinate],
+) -> BytesIO:
+    overlay_buffer = BytesIO()
+    page_sizes = [
+        (float(page.mediabox.width), float(page.mediabox.height))
+        for page in reader.pages
+    ]
+    if not page_sizes:
+        raise ValueError("template_has_no_pages")
+
+    overlay_canvas = canvas.Canvas(overlay_buffer, pagesize=page_sizes[0])
+    for page_index, page_size in enumerate(page_sizes, start=1):
+        overlay_canvas.setPageSize(page_size)
+        for field_key, mapped_field in review_package.mapped_fields.items():
+            if not mapped_field.final_value:
+                continue
+            coordinate = overlay_coordinates.get(field_key)
+            if coordinate is None or coordinate.page_number != page_index:
+                continue
+            _draw_overlay_value(overlay_canvas, mapped_field.final_value, coordinate)
+        if page_index < len(page_sizes):
+            overlay_canvas.showPage()
+    overlay_canvas.save()
+    overlay_buffer.seek(0)
+    return overlay_buffer
+
+
+def _draw_overlay_value(
+    overlay_canvas: canvas.Canvas,
+    value: str,
+    coordinate: agent_schemas.TransactionPaperworkOverlayCoordinate,
+) -> None:
+    lines = _wrap_overlay_value(value, coordinate)
+    if not lines:
+        return
+    text_object = overlay_canvas.beginText()
+    text_object.setTextOrigin(coordinate.x, coordinate.y)
+    text_object.setFont(coordinate.font_name, coordinate.font_size)
+    text_object.setLeading(coordinate.line_height)
+    for line in lines:
+        text_object.textLine(line)
+    overlay_canvas.drawText(text_object)
+
+
+def _wrap_overlay_value(
+    value: str,
+    coordinate: agent_schemas.TransactionPaperworkOverlayCoordinate,
+) -> list[str]:
+    normalized = _normalize_whitespace(value)
+    if not normalized:
+        return []
+    words = normalized.split(" ")
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        trial = word if not current else f"{current} {word}"
+        if (
+            pdfmetrics.stringWidth(
+                trial, coordinate.font_name, coordinate.font_size
+            )
+            <= coordinate.max_width
+        ):
+            current = trial
+            continue
+        if current:
+            lines.append(current)
+        current = word
+        if len(lines) >= coordinate.max_lines:
+            break
+    if current and len(lines) < coordinate.max_lines:
+        lines.append(current)
+    if len(lines) > coordinate.max_lines:
+        lines = lines[: coordinate.max_lines]
+    if len(lines) == coordinate.max_lines and words:
+        last_line = lines[-1]
+        if len(last_line) > 3 and pdfmetrics.stringWidth(
+            last_line + "...", coordinate.font_name, coordinate.font_size
+        ) > coordinate.max_width:
+            while last_line and pdfmetrics.stringWidth(
+                last_line + "...", coordinate.font_name, coordinate.font_size
+            ) > coordinate.max_width:
+                last_line = last_line[:-1]
+            lines[-1] = last_line.rstrip() + "..."
+    return lines
+
+
+def _prepare_render_output_path(output_dir: str | Path | None) -> Path:
+    if output_dir is None:
+        handle = tempfile.NamedTemporaryFile(
+            prefix="trade-record-draft-",
+            suffix=".pdf",
+            delete=False,
+        )
+        handle.close()
+        return Path(handle.name)
+
+    target_dir = Path(output_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir / "trade_record_sheet_overlay_draft.pdf"
+
+
+def _sha256_for_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _build_kevin_answer_map(

@@ -11,6 +11,8 @@ TRADE_RECORD_TEMPLATE_VERSION = "trade_record_sheet_blank_v1"
 TRADE_RECORD_TEMPLATE_RELATIVE_PATH = (
     "backend/assets/paperwork_templates/trade_record_blank.pdf"
 )
+TRADE_RECORD_TEMPLATE_PAGE_WIDTH = 612.0
+TRADE_RECORD_TEMPLATE_PAGE_HEIGHT = 792.0
 
 
 def _backend_root() -> Path:
@@ -322,4 +324,86 @@ def get_template_field_map(
         field.key: field
         for section in template.sections
         for field in section.fields
+    }
+
+
+def get_trade_record_overlay_coordinates() -> dict[
+    str, agent_schemas.TransactionPaperworkOverlayCoordinate
+]:
+    return {
+        "mls_number": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=72, y=738, max_width=120, font_size=9
+        ),
+        "property_address": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=150, y=738, max_width=300, font_size=9, max_lines=2, line_height=10
+        ),
+        "offer_date": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=72, y=714, max_width=120, font_size=9
+        ),
+        "closing_date": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=210, y=714, max_width=120, font_size=9
+        ),
+        "conditional_status": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=348, y=714, max_width=90, font_size=9
+        ),
+        "firm_date": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=456, y=714, max_width=90, font_size=9
+        ),
+        "sale_type": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=72, y=690, max_width=120, font_size=9
+        ),
+        "property_type": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=210, y=690, max_width=120, font_size=9
+        ),
+        "client_primary_name": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=72, y=646, max_width=220, font_size=9
+        ),
+        "client_secondary_name": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=312, y=646, max_width=220, font_size=9
+        ),
+        "client_contact_details": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=72, y=624, max_width=460, font_size=8.5, max_lines=3, line_height=9.5
+        ),
+        "buyer_solicitor_details": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=72, y=572, max_width=220, font_size=8.5, max_lines=3, line_height=9.5
+        ),
+        "seller_solicitor_details": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=312, y=572, max_width=220, font_size=8.5, max_lines=3, line_height=9.5
+        ),
+        "deposit_amount": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=72, y=506, max_width=120, font_size=9
+        ),
+        "deposit_holder": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=210, y=506, max_width=322, font_size=9
+        ),
+        "trust_notes": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=72, y=484, max_width=460, font_size=8.5, max_lines=2, line_height=9.5
+        ),
+        "commission_amount": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=72, y=430, max_width=100, font_size=9
+        ),
+        "commission_split": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=190, y=430, max_width=100, font_size=9
+        ),
+        "referral_fee": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=308, y=430, max_width=100, font_size=9
+        ),
+        "marketing_fee": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=426, y=430, max_width=106, font_size=9
+        ),
+        "cooperating_brokerage_name": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=72, y=376, max_width=220, font_size=9
+        ),
+        "cooperating_brokerage_contact": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=312, y=376, max_width=220, font_size=8.5, max_lines=3, line_height=9.5
+        ),
+        "freeman_agent_name": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=72, y=320, max_width=220, font_size=9
+        ),
+        "freeman_agent_contact": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=312, y=320, max_width=220, font_size=8.5, max_lines=3, line_height=9.5
+        ),
+        "additional_instructions": agent_schemas.TransactionPaperworkOverlayCoordinate(
+            x=72, y=254, max_width=460, font_size=8.5, max_lines=5, line_height=9.5
+        ),
     }

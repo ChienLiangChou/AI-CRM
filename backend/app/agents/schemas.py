@@ -742,6 +742,7 @@ TransactionPaperworkMappedFieldValueSource = Literal[
     "kevin_confirmed",
     "unresolved",
 ]
+TransactionPaperworkRenderStatus = Literal["rendered", "blocked"]
 TransactionPaperworkValueType = Literal[
     "text",
     "date",
@@ -899,6 +900,40 @@ class TransactionPaperworkReviewPackage(BaseModel):
     unresolved_field_keys: list[str] = Field(default_factory=list)
     blocking_unresolved_field_keys: list[str] = Field(default_factory=list)
     review_ready: bool = False
+    operator_notes: list[str] = Field(default_factory=list)
+
+
+class TransactionPaperworkOverlayCoordinate(BaseModel):
+    page_number: int = 1
+    x: float
+    y: float
+    max_width: float
+    font_name: str = "Helvetica"
+    font_size: float = 9.0
+    line_height: float = 10.5
+    max_lines: int = 1
+
+
+class TransactionPaperworkRenderedArtifactMetadata(BaseModel):
+    output_pdf_path: str
+    file_size_bytes: int
+    checksum_sha256: str
+    page_count: int
+
+
+class TransactionPaperworkRenderResult(BaseModel):
+    template_id: str
+    template_version: str
+    fill_mode: TransactionPaperworkTemplateFillMode
+    output_status: TransactionPaperworkRenderStatus
+    artifact: Optional[TransactionPaperworkRenderedArtifactMetadata] = None
+    rendered_field_count: int = 0
+    skipped_unresolved_field_count: int = 0
+    unresolved_blocking_field_keys: list[str] = Field(default_factory=list)
+    rendered_field_keys: list[str] = Field(default_factory=list)
+    traceability_by_field_key: dict[str, TransactionPaperworkFieldTraceability] = Field(
+        default_factory=dict
+    )
     operator_notes: list[str] = Field(default_factory=list)
 
 
