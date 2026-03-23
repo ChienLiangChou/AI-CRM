@@ -1,18 +1,27 @@
 import json
 import hashlib
 import shutil
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from pypdf import PdfReader
 from reportlab.pdfgen import canvas
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+pywebpush_stub = types.ModuleType("pywebpush")
+pywebpush_stub.webpush = lambda *args, **kwargs: None
+pywebpush_stub.WebPushException = Exception
+sys.modules.setdefault("pywebpush", pywebpush_stub)
+
 from app.agents import models as agent_models
 from app.agents import paperwork_templates, schemas as agent_schemas
+from app.agents import router as agent_router
 from app.agents import transaction_paperwork
 from app.database import Base
 
@@ -1325,6 +1334,309 @@ class TransactionPaperworkRunnerPersistenceTests(unittest.TestCase):
             self.assertIn("transaction_paperwork_intake_started", audit_actions)
             self.assertIn("transaction_paperwork_run_failed", audit_actions)
             self.assertEqual(self.db.query(agent_models.AgentApproval).count(), 0)
+
+
+class TransactionPaperworkRouteSurfaceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        if shutil.which("/opt/homebrew/bin/pdftotext") is None and shutil.which(
+            "pdftotext"
+        ) is None:
+            raise unittest.SkipTest("pdftotext is unavailable")
+
+    def setUp(self):
+        self.engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+        )
+        self.SessionLocal = sessionmaker(
+            autocommit=False,
+            autoflush=False,
+            bind=self.engine,
+        )
+        Base.metadata.create_all(bind=self.engine)
+        self.db = self.SessionLocal()
+
+    def tearDown(self):
+        self.db.close()
+        self.engine.dispose()
+
+    def create_pdf(
+        self,
+        output_path: Path,
+        *pages: list[str],
+    ) -> Path:
+        pdf = canvas.Canvas(str(output_path))
+        if not pages:
+            pdf.showPage()
+            pdf.save()
+            return output_path
+        for index, lines in enumerate(pages):
+            y = 760
+            for line in lines:
+                pdf.drawString(72, y, line)
+                y -= 16
+            if index < len(pages) - 1:
+                pdf.showPage()
+        pdf.save()
+        return output_path
+
+    def build_aps_pdf(self, output_path: Path) -> Path:
+        return self.create_pdf(
+            output_path,
+            [
+                "Agreement of Purchase and Sale",
+                "MLS Number: C1234567",
+                "Property Address: 123 King St W, Toronto, ON",
+                "Unit: 1102",
+                "Offer Date: March 1, 2026",
+                "Closing Date: May 30, 2026",
+                "Conditional / Firm: Conditional",
+                "Firm Date: March 5, 2026",
+                "Buyer: Alice Buyer and Bob Buyer",
+                "Seller: Sally Seller",
+                "Purchase Price: $1,250,000",
+                "Deposit: $50,000",
+                "Deposit Holder: Freeman Real Estate Ltd.",
+                "Buyer's Solicitor: Hart Law LLP, 416-555-0100",
+                "Seller's Solicitor: North Legal PC, 416-555-0199",
+                "Commission: 2.5% to co-operating brokerage",
+                "Commission Split: 50/50",
+                "Referral Fee: 15%",
+                "Marketing Fee: $500",
+            ],
+        )
+
+    def build_answers(self) -> agent_schemas.TransactionPaperworkKevinAnswerPacket:
+        return agent_schemas.TransactionPaperworkKevinAnswerPacket(
+            answers=[
+                agent_schemas.TransactionPaperworkKevinAnswer(
+                    field_key="commission_amount",
+                    value="2.5%",
+                ),
+                agent_schemas.TransactionPaperworkKevinAnswer(
+                    field_key="commission_split",
+                    value="50/50",
+                ),
+                agent_schemas.TransactionPaperworkKevinAnswer(
+                    field_key="referral_fee",
+                    value="15%",
+                ),
+                agent_schemas.TransactionPaperworkKevinAnswer(
+                    field_key="marketing_fee",
+                    value="$500",
+                ),
+            ]
+        )
+
+    def build_request(
+        self,
+        *pdf_paths: Path,
+        kevin_answers: agent_schemas.TransactionPaperworkKevinAnswerPacket | None = None,
+        template_id: str = "trade_record_sheet",
+        template_version: str = "trade_record_sheet_blank_v1",
+        requested_fill_mode: agent_schemas.TransactionPaperworkTemplateFillMode = "overlay_coordinates",
+    ) -> agent_schemas.TransactionPaperworkRunRequest:
+        return agent_schemas.TransactionPaperworkRunRequest(
+            source_pdfs=[
+                agent_schemas.TransactionPaperworkPdfSourceInput(file_path=str(path))
+                for path in pdf_paths
+            ],
+            kevin_answer_packet=kevin_answers
+            or agent_schemas.TransactionPaperworkKevinAnswerPacket(),
+            template_id=template_id,
+            template_version=template_version,
+            requested_fill_mode=requested_fill_mode,
+        )
+
+    def create_non_paperwork_run(self) -> agent_models.AgentRun:
+        task = agent_models.AgentTask(
+            agent_type="buyer_match",
+            subject_type="contact",
+            subject_id=None,
+            payload="{}",
+            status="completed",
+            priority="normal",
+        )
+        self.db.add(task)
+        self.db.commit()
+        self.db.refresh(task)
+
+        run = agent_models.AgentRun(
+            task_id=task.id,
+            status="completed",
+            summary="non-paperwork run",
+        )
+        self.db.add(run)
+        self.db.commit()
+        self.db.refresh(run)
+        return run
+
+    def test_latest_returns_safe_empty_contract(self):
+        payload = agent_router.get_latest_transaction_paperwork_result(db=self.db)
+
+        self.assertEqual(
+            payload,
+            {
+                "run_id": None,
+                "status": None,
+                "error": None,
+                "result": None,
+            },
+        )
+
+    def test_transaction_paperwork_route_surface_is_scoped_and_safe(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = self.build_aps_pdf(Path(temp_dir) / "aps.pdf")
+            request = self.build_request(pdf_path)
+            paperwork_run = agent_router.trigger_transaction_paperwork_run_once(
+                request,
+                self.db,
+            )
+            non_paperwork_run = self.create_non_paperwork_run()
+
+            runs = agent_router.list_transaction_paperwork_runs(db=self.db)
+            latest = agent_router.get_latest_transaction_paperwork_result(db=self.db)
+            report = agent_router.get_transaction_paperwork_run_report(
+                paperwork_run.id,
+                db=self.db,
+            )
+            audit_logs = agent_router.list_transaction_paperwork_run_audit_logs(
+                paperwork_run.id,
+                db=self.db,
+            )
+
+            self.assertEqual([run.id for run in runs], [paperwork_run.id])
+            self.assertEqual(latest["run_id"], paperwork_run.id)
+            self.assertEqual(latest["status"], "completed")
+            self.assertEqual(latest["result"]["output_status"], "blocked")
+            self.assertEqual(report["output_status"], "blocked")
+            self.assertIn(
+                "commission_amount",
+                report["review_package"]["blocking_unresolved_field_keys"],
+            )
+            self.assertTrue(audit_logs)
+            self.assertEqual(
+                audit_logs[0].action,
+                "transaction_paperwork_intake_started",
+            )
+            self.assertEqual(self.db.query(agent_models.AgentApproval).count(), 0)
+
+            with self.assertRaises(HTTPException) as report_error:
+                agent_router.get_transaction_paperwork_run_report(
+                    non_paperwork_run.id,
+                    db=self.db,
+                )
+            self.assertEqual(report_error.exception.status_code, 404)
+
+            with self.assertRaises(HTTPException) as audit_error:
+                agent_router.list_transaction_paperwork_run_audit_logs(
+                    non_paperwork_run.id,
+                    db=self.db,
+                )
+            self.assertEqual(audit_error.exception.status_code, 404)
+
+    def test_route_surface_returns_rendered_report_when_kevin_confirmations_are_present(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = self.build_aps_pdf(Path(temp_dir) / "aps.pdf")
+            request = self.build_request(
+                pdf_path,
+                kevin_answers=self.build_answers(),
+            )
+
+            run = agent_router.trigger_transaction_paperwork_run_once(
+                request,
+                self.db,
+            )
+            latest = agent_router.get_latest_transaction_paperwork_result(db=self.db)
+            report = agent_router.get_transaction_paperwork_run_report(
+                run.id,
+                db=self.db,
+            )
+
+            self.assertEqual(latest["status"], "completed")
+            self.assertEqual(latest["result"]["output_status"], "rendered")
+            self.assertEqual(report["output_status"], "rendered")
+            self.assertTrue(report["review_package"]["review_ready"])
+            self.assertIsNotNone(report["render_result"]["artifact"])
+            self.assertEqual(
+                report["review_package"]["mapped_fields"]["commission_amount"][
+                    "value_source_category"
+                ],
+                "kevin_confirmed",
+            )
+
+    def test_route_surface_exposes_missing_pdf_intake_issue_without_crashing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_path = Path(temp_dir) / "missing.pdf"
+            request = self.build_request(missing_path)
+
+            run = agent_router.trigger_transaction_paperwork_run_once(
+                request,
+                self.db,
+            )
+            report = agent_router.get_transaction_paperwork_run_report(
+                run.id,
+                db=self.db,
+            )
+
+            self.assertEqual(run.status, "completed")
+            self.assertEqual(report["output_status"], "blocked")
+            self.assertEqual(
+                report["preparation_result"]["intake_issues"][0]["issue_code"],
+                "missing_file",
+            )
+
+    def test_route_surface_reports_failed_run_with_error_and_no_result(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = self.build_aps_pdf(Path(temp_dir) / "aps.pdf")
+            request = self.build_request(pdf_path)
+
+            with patch(
+                "app.agents.transaction_paperwork.orchestrate_transaction_paperwork_from_pdfs",
+                side_effect=RuntimeError("paperwork boom"),
+            ):
+                run = agent_router.trigger_transaction_paperwork_run_once(
+                    request,
+                    self.db,
+                )
+
+            latest = agent_router.get_latest_transaction_paperwork_result(db=self.db)
+
+            self.assertEqual(run.status, "failed")
+            self.assertEqual(latest["run_id"], run.id)
+            self.assertEqual(latest["status"], "failed")
+            self.assertIn("paperwork boom", latest["error"])
+            self.assertIsNone(latest["result"])
+
+            with self.assertRaises(HTTPException) as report_error:
+                agent_router.get_transaction_paperwork_run_report(
+                    run.id,
+                    db=self.db,
+                )
+            self.assertEqual(report_error.exception.status_code, 404)
+
+    def test_run_once_rejects_unsupported_template_or_fill_mode(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = self.build_aps_pdf(Path(temp_dir) / "aps.pdf")
+
+            with self.assertRaises(HTTPException) as template_error:
+                agent_router.trigger_transaction_paperwork_run_once(
+                    self.build_request(pdf_path, template_id="other_template"),
+                    self.db,
+                )
+            self.assertEqual(template_error.exception.status_code, 400)
+
+            with self.assertRaises(HTTPException) as fill_mode_error:
+                agent_router.trigger_transaction_paperwork_run_once(
+                    self.build_request(
+                        pdf_path,
+                        requested_fill_mode="fill_pdf_fields",
+                    ),
+                    self.db,
+                )
+            self.assertEqual(fill_mode_error.exception.status_code, 400)
 
 
 if __name__ == "__main__":

@@ -336,6 +336,39 @@ def inspect_trade_record_sheet_template() -> (
     )
 
 
+def normalize_run_request(
+    raw: agent_schemas.TransactionPaperworkRunRequest | dict[str, Any],
+) -> agent_schemas.TransactionPaperworkRunRequest:
+    if isinstance(raw, agent_schemas.TransactionPaperworkRunRequest):
+        request = raw
+    elif isinstance(raw, dict):
+        if hasattr(agent_schemas.TransactionPaperworkRunRequest, "model_validate"):
+            request = agent_schemas.TransactionPaperworkRunRequest.model_validate(raw)
+        else:
+            request = agent_schemas.TransactionPaperworkRunRequest.parse_obj(raw)
+    else:
+        raise TypeError("transaction_paperwork_request_must_be_dict")
+
+    template = paperwork_templates.get_trade_record_sheet_template()
+    if not request.source_pdfs:
+        raise ValueError("transaction_paperwork_source_pdfs_required")
+    if request.template_id != template.template_id:
+        raise ValueError(
+            f"unsupported_transaction_paperwork_template_id:{request.template_id}"
+        )
+    if request.template_version != template.template_version:
+        raise ValueError(
+            "unsupported_transaction_paperwork_template_version:"
+            f"{request.template_version}"
+        )
+    if request.requested_fill_mode != "overlay_coordinates":
+        raise ValueError(
+            "unsupported_transaction_paperwork_fill_mode:"
+            f"{request.requested_fill_mode}"
+        )
+    return request
+
+
 def _model_dump(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _model_dump(item) for key, item in value.items()}

@@ -20,6 +20,7 @@ from . import (
     schemas as agent_schemas,
     service,
     strategy_coordination,
+    transaction_paperwork,
 )
 
 
@@ -122,6 +123,27 @@ def _serialize_daily_market_scan_result(raw_result: str | None):
             model = agent_schemas.DailyMarketScanResultResponse.model_validate(parsed)
             return model.model_dump()
         model = agent_schemas.DailyMarketScanResultResponse.parse_obj(parsed)
+        return model.dict()
+    except (ValidationError, TypeError, ValueError):
+        return None
+
+
+def _serialize_transaction_paperwork_result(raw_result: str | None):
+    if not raw_result:
+        return None
+
+    try:
+        parsed = json.loads(raw_result)
+    except json.JSONDecodeError:
+        return None
+
+    try:
+        if hasattr(agent_schemas.TransactionPaperworkOrchestrationResult, "model_validate"):
+            model = agent_schemas.TransactionPaperworkOrchestrationResult.model_validate(
+                parsed
+            )
+            return model.model_dump()
+        model = agent_schemas.TransactionPaperworkOrchestrationResult.parse_obj(parsed)
         return model.dict()
     except (ValidationError, TypeError, ValueError):
         return None
@@ -856,6 +878,143 @@ def list_strategy_coordination_run_audit_logs(
         .filter(
             models.AgentRun.id == run_id,
             models.AgentTask.agent_type == "strategy_coordination",
+        )
+        .first()
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    return (
+        db.query(models.AgentAuditLog)
+        .filter(models.AgentAuditLog.run_id == run.id)
+        .order_by(models.AgentAuditLog.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+
+
+@router.post(
+    "/transaction-paperwork/run-once",
+    response_model=agent_schemas.AgentRun,
+    summary="Trigger a single Transaction Paperwork run (MVP).",
+)
+def trigger_transaction_paperwork_run_once(
+    request: agent_schemas.TransactionPaperworkRunRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Manually trigger the Transaction Paperwork layer to:
+    - intake machine-readable APS or Agreement to Lease PDFs
+    - build deterministic deal facts and Kevin question packets
+    - persist a review package and optional overlay draft render
+
+    This endpoint stays review-first and does NOT file, submit, or send anything.
+    """
+    try:
+        normalized_request = transaction_paperwork.normalize_run_request(request)
+    except ValueError as error:
+        raise _bad_request_from_value_error(error) from error
+
+    return transaction_paperwork.run_transaction_paperwork_once(
+        db,
+        pdf_sources=normalized_request.source_pdfs,
+        kevin_answers=normalized_request.kevin_answer_packet,
+    )
+
+
+@router.get(
+    "/transaction-paperwork/runs",
+    response_model=List[agent_schemas.AgentRun],
+    summary="List recent Transaction Paperwork runs.",
+)
+def list_transaction_paperwork_runs(
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(models.AgentTask.agent_type == "transaction_paperwork")
+        .order_by(models.AgentRun.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+@router.get(
+    "/transaction-paperwork/latest",
+    response_model=agent_schemas.TransactionPaperworkLatestResponse,
+    summary="Get the latest Transaction Paperwork result.",
+)
+def get_latest_transaction_paperwork_result(db: Session = Depends(get_db)):
+    run = (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(models.AgentTask.agent_type == "transaction_paperwork")
+        .order_by(models.AgentRun.created_at.desc())
+        .first()
+    )
+
+    if run is None:
+        return {
+            "run_id": None,
+            "status": None,
+            "error": None,
+            "result": None,
+        }
+
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "error": run.error,
+        "result": _serialize_transaction_paperwork_result(run.result),
+    }
+
+
+@router.get(
+    "/transaction-paperwork/runs/{run_id}/report",
+    response_model=agent_schemas.TransactionPaperworkOrchestrationResult,
+    summary="Get a structured Transaction Paperwork report for a run.",
+)
+def get_transaction_paperwork_run_report(
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    run = (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(
+            models.AgentRun.id == run_id,
+            models.AgentTask.agent_type == "transaction_paperwork",
+        )
+        .first()
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    result = _serialize_transaction_paperwork_result(run.result)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    return result
+
+
+@router.get(
+    "/transaction-paperwork/runs/{run_id}/audit-logs",
+    response_model=List[agent_schemas.AgentAuditLog],
+    summary="List audit logs for a Transaction Paperwork run.",
+)
+def list_transaction_paperwork_run_audit_logs(
+    run_id: int,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    run = (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(
+            models.AgentRun.id == run_id,
+            models.AgentTask.agent_type == "transaction_paperwork",
         )
         .first()
     )

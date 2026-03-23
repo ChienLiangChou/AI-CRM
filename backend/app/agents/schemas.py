@@ -984,6 +984,27 @@ class TransactionPaperworkOrchestrationResult(BaseModel):
     operator_notes: list[str] = Field(default_factory=list)
 
 
+class TransactionPaperworkRunRequest(BaseModel):
+    source_pdfs: list[TransactionPaperworkPdfSourceInput] = Field(
+        default_factory=list
+    )
+    kevin_answer_packet: TransactionPaperworkKevinAnswerPacket = Field(
+        default_factory=TransactionPaperworkKevinAnswerPacket
+    )
+    template_id: str = "trade_record_sheet"
+    template_version: str = "trade_record_sheet_blank_v1"
+    requested_fill_mode: TransactionPaperworkTemplateFillMode = (
+        "overlay_coordinates"
+    )
+
+
+class TransactionPaperworkLatestResponse(BaseModel):
+    run_id: Optional[int] = None
+    status: Optional[RunStatus] = None
+    error: Optional[str] = None
+    result: Optional[TransactionPaperworkOrchestrationResult] = None
+
+
 class TransactionPaperworkTemplateFieldDescriptor(BaseModel):
     key: str
     label: str
