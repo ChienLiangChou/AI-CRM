@@ -14,10 +14,36 @@ pywebpush_stub.WebPushException = Exception
 sys.modules.setdefault("pywebpush", pywebpush_stub)
 
 from app.agents import event_strategy_review
+from app.agents import event_strategy_review_retrieval
 from app.agents import models as agent_models
 from app.agents import router as agent_router
 from app.agents import schemas as agent_schemas
 from app.database import Base
+
+
+class StubCuratedSearchAdapter(
+    event_strategy_review_retrieval.BaseCuratedSearchAdapter
+):
+    adapter_key = "stub_curated_search"
+
+    def __init__(
+        self,
+        *,
+        status: str = "success",
+        candidates: list[event_strategy_review_retrieval.CuratedSearchCandidate]
+        | None = None,
+        notes: list[str] | None = None,
+    ):
+        self._status = status
+        self._candidates = tuple(candidates or [])
+        self._notes = tuple(notes or [])
+
+    def search(self, *, query: str, max_results: int, allowed_domains: list[str]):
+        return event_strategy_review_retrieval.CuratedSearchAdapterResponse(
+            status=self._status,
+            candidates=self._candidates,
+            notes=self._notes,
+        )
 
 
 class EventStrategyReviewContractTests(unittest.TestCase):
@@ -108,13 +134,16 @@ class EventStrategyReviewContractTests(unittest.TestCase):
         )
 
         self.assertEqual(report.retrieval_contract.source_mode, "curated_search_query")
-        self.assertFalse(report.retrieval_contract.live_retrieval_enabled)
+        self.assertTrue(report.retrieval_contract.live_retrieval_enabled)
         self.assertIn(
             "v1 preserves a controlled retrieval contract",
             report.operator_notes[1],
         )
         self.assertIn("rates", report.event_cluster.taxonomy_tags)
-        self.assertIn("no live retrieval", report.event_cluster.retrieval_notes[0].lower())
+        self.assertIn(
+            "no constrained retrieval outcome attached",
+            report.event_cluster.retrieval_notes[0].lower(),
+        )
 
     def test_build_internal_report_uses_fixed_perspective_blocks_and_action_split(self):
         report = event_strategy_review.build_internal_report(
@@ -376,7 +405,7 @@ class EventStrategyReviewPersistenceTests(unittest.TestCase):
             any(log.action == "event_strategy_review_duplicates_collapsed" for log in run.audit_logs)
         )
 
-    def test_curated_search_query_is_persisted_as_not_active_yet_without_crashing(self):
+    def test_curated_search_query_fails_soft_as_retrieval_unavailable_without_crashing(self):
         run = event_strategy_review.run_event_strategy_review_once(
             self.db,
             {
@@ -395,20 +424,164 @@ class EventStrategyReviewPersistenceTests(unittest.TestCase):
         self.assertEqual(run.approvals, [])
 
         result = self.parse_result(run)
-        self.assertEqual(result.execution_status, "not_active_yet")
+        self.assertEqual(result.execution_status, "retrieval_unavailable")
         self.assertIsNone(result.report)
         self.assertEqual(
             result.execution_plan.execution_path,
-            "curated_search_query_not_active_yet",
+            "curated_search_query_constrained_retrieval",
         )
         self.assertEqual(
-            result.inactive_reason,
-            event_strategy_review.CURATED_QUERY_NOT_ACTIVE_NOTE,
+            result.execution_plan.retrieval_metadata.retrieval_state,
+            "retrieval_unavailable",
+        )
+        self.assertIn(
+            "unavailable",
+            (result.inactive_reason or "").lower(),
         )
 
         audit_actions = [log.action for log in run.audit_logs]
-        self.assertIn("event_strategy_review_source_mode_not_active", audit_actions)
+        self.assertIn("event_strategy_review_retrieval_unavailable", audit_actions)
         self.assertIn("event_strategy_review_run_completed", audit_actions)
+
+    def test_curated_search_query_can_generate_report_from_constrained_retrieval(self):
+        adapter = StubCuratedSearchAdapter(
+            candidates=[
+                event_strategy_review_retrieval.CuratedSearchCandidate(
+                    url="https://www.bankofcanada.ca/2026/03/rate-decision",
+                    title="Bank of Canada rate decision",
+                    snippet="Toronto housing affordability and mortgage conditions may shift.",
+                    publisher="Bank of Canada",
+                    published_at="2026-03-23T10:00:00Z",
+                    observed_at="2026-03-23T10:05:00Z",
+                ),
+                event_strategy_review_retrieval.CuratedSearchCandidate(
+                    url="https://toronto.ca/news/housing-policy-update",
+                    title="Toronto housing policy update",
+                    snippet="City policy update may affect renters and sellers.",
+                    publisher="City of Toronto",
+                    published_at="2026-03-23T09:00:00Z",
+                    observed_at="2026-03-23T10:06:00Z",
+                ),
+                event_strategy_review_retrieval.CuratedSearchCandidate(
+                    url="https://cbc.ca/news/business/toronto-housing-rates",
+                    title="Toronto housing reacts to rate outlook",
+                    snippet="Buyers, sellers, and condo inventory remain in focus.",
+                    publisher="CBC News",
+                    published_at="2026-03-23T08:00:00Z",
+                    observed_at="2026-03-23T10:07:00Z",
+                ),
+                event_strategy_review_retrieval.CuratedSearchCandidate(
+                    url="https://spam.example.com/toronto-housing",
+                    title="Spam result",
+                    snippet="Should be filtered by allowed domains.",
+                ),
+            ],
+        )
+
+        run = event_strategy_review.run_event_strategy_review_once(
+            self.db,
+            {
+                "retrieval_contract": {
+                    "source_mode": "curated_search_query",
+                    "curated_search_query_input": {
+                        "query": "Toronto housing rates and policy",
+                        "allowed_domains": [
+                            "bankofcanada.ca",
+                            "toronto.ca",
+                            "cbc.ca",
+                        ],
+                        "max_results": 8,
+                    },
+                },
+                "topic_hints": ["mortgage", "policy"],
+                "geo_focus": ["Toronto", "GTA", "Ontario"],
+            },
+            curated_search_adapter=adapter,
+        )
+
+        result = self.parse_result(run)
+        self.assertEqual(result.execution_status, "report_generated")
+        self.assertIsNotNone(result.report)
+        self.assertEqual(
+            result.execution_plan.retrieval_metadata.retrieval_state,
+            "successful_retrieval",
+        )
+        self.assertEqual(result.execution_plan.retrieval_metadata.raw_candidate_cap, 8)
+        self.assertEqual(
+            result.execution_plan.retrieval_metadata.fetched_source_cap,
+            3,
+        )
+        self.assertEqual(
+            result.execution_plan.retrieval_metadata.fetched_source_count,
+            3,
+        )
+        self.assertEqual(
+            result.report.event_cluster.source_count,
+            3,
+        )
+        self.assertTrue(
+            all(
+                source.source_domain in {"bankofcanada.ca", "toronto.ca", "cbc.ca"}
+                for source in result.report.event_cluster.sources
+            )
+        )
+        self.assertTrue(
+            all(source.trust_tier is not None for source in result.report.event_cluster.sources)
+        )
+        self.assertTrue(
+            any(log.action == "event_strategy_review_curated_retrieval_completed" for log in run.audit_logs)
+        )
+
+    def test_curated_search_query_with_only_lower_confidence_support_stays_watchlist(self):
+        adapter = StubCuratedSearchAdapter(
+            candidates=[
+                event_strategy_review_retrieval.CuratedSearchCandidate(
+                    url="https://storeys.com/toronto-condo-outlook",
+                    title="Toronto condo outlook",
+                    snippet="Condo inventory and renter demand remain uneven.",
+                    publisher="Storeys",
+                    published_at="2026-03-23T08:00:00Z",
+                ),
+                event_strategy_review_retrieval.CuratedSearchCandidate(
+                    url="https://news.storeys.com/toronto-rental-outlook",
+                    title="Toronto rental outlook",
+                    snippet="Rental market signals remain mixed.",
+                    publisher="Storeys",
+                    published_at="2026-03-23T08:30:00Z",
+                ),
+            ],
+        )
+
+        run = event_strategy_review.run_event_strategy_review_once(
+            self.db,
+            {
+                "retrieval_contract": {
+                    "source_mode": "curated_search_query",
+                    "curated_search_query_input": {
+                        "query": "Toronto condo and rental outlook",
+                        "max_results": 8,
+                    },
+                },
+                "topic_hints": ["condo", "rental"],
+                "geo_focus": ["Toronto", "GTA"],
+            },
+            curated_search_adapter=adapter,
+        )
+
+        result = self.parse_result(run)
+        self.assertEqual(result.execution_status, "report_generated")
+        self.assertIsNotNone(result.report)
+        self.assertEqual(
+            result.execution_plan.retrieval_metadata.retrieval_state,
+            "low_confidence_watchlist",
+        )
+        self.assertEqual(
+            result.report.importance_assessment.classification,
+            "watchlist",
+        )
+        self.assertTrue(
+            any(log.action == "event_strategy_review_curated_retrieval_low_confidence" for log in run.audit_logs)
+        )
 
     def test_malformed_input_fails_safe_without_approvals(self):
         run = event_strategy_review.run_event_strategy_review_once(
@@ -563,7 +736,7 @@ class EventStrategyReviewRouteSurfaceTests(unittest.TestCase):
             )
         self.assertEqual(audit_error.exception.status_code, 404)
 
-    def test_route_surface_exposes_not_active_yet_state_without_crashing(self):
+    def test_route_surface_exposes_retrieval_unavailable_state_without_crashing(self):
         request = agent_schemas.EventStrategyReviewRunRequest(
             retrieval_contract=agent_schemas.EventStrategyReviewRetrievalContract(
                 source_mode="curated_search_query",
@@ -586,12 +759,12 @@ class EventStrategyReviewRouteSurfaceTests(unittest.TestCase):
 
         self.assertEqual(run.status, "completed")
         self.assertEqual(latest["status"], "completed")
-        self.assertEqual(latest["result"]["execution_status"], "not_active_yet")
-        self.assertEqual(report["execution_status"], "not_active_yet")
+        self.assertEqual(latest["result"]["execution_status"], "retrieval_unavailable")
+        self.assertEqual(report["execution_status"], "retrieval_unavailable")
         self.assertIsNone(report["report"])
-        self.assertEqual(
-            report["inactive_reason"],
-            event_strategy_review.CURATED_QUERY_NOT_ACTIVE_NOTE,
+        self.assertIn(
+            "unavailable",
+            report["inactive_reason"].lower(),
         )
 
     def test_route_surface_reports_failed_run_with_error_and_no_result(self):
@@ -768,7 +941,7 @@ class EventStrategyReviewRouteSurfaceTests(unittest.TestCase):
             " ".join(latest_package["result"]["operator_notes"]).lower(),
         )
 
-    def test_package_route_blocks_when_source_run_is_not_active_yet(self):
+    def test_package_route_blocks_when_source_run_has_no_retrieval_report(self):
         source_run = agent_router.trigger_event_strategy_review_run_once(
             agent_schemas.EventStrategyReviewRunRequest(
                 retrieval_contract=agent_schemas.EventStrategyReviewRetrievalContract(
@@ -797,7 +970,7 @@ class EventStrategyReviewRouteSurfaceTests(unittest.TestCase):
         self.assertEqual(latest_package["result"]["status"], "blocked")
         self.assertEqual(latest_package["result"]["artifacts"], [])
         self.assertIn(
-            "not active for report packaging yet",
+            "unavailable",
             " ".join(latest_package["result"]["operator_notes"]).lower(),
         )
 

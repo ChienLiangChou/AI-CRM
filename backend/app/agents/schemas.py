@@ -725,16 +725,34 @@ EventStrategyReviewImportance = Literal[
     "watchlist",
     "strategy_review_required",
 ]
+EventStrategyReviewSourceTrustTier = Literal[
+    "tier_1_primary",
+    "tier_2_reputable",
+    "tier_3_trade",
+    "untrusted",
+]
 EventStrategyReviewPerspectiveStatus = Literal["active", "placeholder", "skipped"]
 EventStrategyReviewExecutionMode = Literal["internal_review_only_non_executable"]
 EventStrategyReviewExecutionPath = Literal[
     "manual_summary_internal_report",
     "manual_url_bundle_internal_report",
     "curated_search_query_not_active_yet",
+    "curated_search_query_constrained_retrieval",
 ]
 EventStrategyReviewExecutionStatus = Literal[
     "report_generated",
     "not_active_yet",
+    "retrieval_unavailable",
+    "rate_limited",
+    "no_credible_sources",
+]
+EventStrategyReviewRetrievalState = Literal[
+    "not_requested",
+    "retrieval_unavailable",
+    "rate_limited",
+    "no_credible_sources",
+    "low_confidence_watchlist",
+    "successful_retrieval",
 ]
 EventStrategyReviewOutputMode = Literal[
     "internal_report_only",
@@ -804,8 +822,11 @@ class EventStrategyReviewClusteredSource(BaseModel):
     source_kind: EventStrategyReviewSourceMode
     title: Optional[str] = None
     url: Optional[str] = None
+    source_domain: Optional[str] = None
     publisher: Optional[str] = None
     published_at: Optional[str] = None
+    observed_at: Optional[str] = None
+    trust_tier: Optional[EventStrategyReviewSourceTrustTier] = None
     source_label: Optional[str] = None
     notes: list[str] = Field(default_factory=list)
 
@@ -873,6 +894,20 @@ class EventStrategyReviewExecutionPolicy(BaseModel):
     can_auto_deploy: bool = False
 
 
+class EventStrategyReviewRetrievalMetadata(BaseModel):
+    retrieval_state: EventStrategyReviewRetrievalState = "not_requested"
+    adapter_key: str = "none"
+    raw_candidate_cap: int = 8
+    raw_candidate_count: int = 0
+    fetched_source_cap: int = 3
+    fetched_source_count: int = 0
+    independent_source_count: int = 0
+    allowed_domains_applied: list[str] = Field(default_factory=list)
+    default_trusted_domain_policy_applied: bool = False
+    has_tier_one_or_two_support: bool = False
+    notes: list[str] = Field(default_factory=list)
+
+
 class EventStrategyReviewExecutionPlan(BaseModel):
     source_mode: EventStrategyReviewSourceMode
     execution_path: EventStrategyReviewExecutionPath
@@ -880,6 +915,9 @@ class EventStrategyReviewExecutionPlan(BaseModel):
     live_retrieval_enabled: bool = False
     deduped_source_count: int = 0
     duplicate_source_count: int = 0
+    retrieval_metadata: EventStrategyReviewRetrievalMetadata = Field(
+        default_factory=EventStrategyReviewRetrievalMetadata
+    )
     operator_notes: list[str] = Field(default_factory=list)
 
 

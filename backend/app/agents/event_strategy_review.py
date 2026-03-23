@@ -10,7 +10,12 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy.orm import Session
 
-from . import models, schemas as agent_schemas, service
+from . import (
+    event_strategy_review_retrieval,
+    models,
+    schemas as agent_schemas,
+    service,
+)
 
 
 AGENT_TYPE: agent_schemas.AgentType = "event_strategy_review"
@@ -28,8 +33,8 @@ INTERNAL_ONLY_OPERATOR_NOTE = (
 )
 RETRIEVAL_CONTRACT_NOTE = (
     "v1 preserves a controlled retrieval contract for manual_summary,"
-    " manual_url_bundle, and curated_search_query without enabling live web"
-    " retrieval in this backend slice."
+    " manual_url_bundle, and curated_search_query, with constrained retrieval"
+    " available only for curated_search_query."
 )
 PACKAGING_EXPLICIT_STEP_NOTE = (
     "HTML packaging remains a separate explicit operator step and does not"
@@ -42,6 +47,22 @@ PERSPECTIVE_SKELETON_NOTE = (
 CURATED_QUERY_NOT_ACTIVE_NOTE = (
     "curated_search_query is accepted by the contract in v1, but live retrieval"
     " remains disabled in this step."
+)
+CURATED_QUERY_RETRIEVAL_UNAVAILABLE_NOTE = (
+    "Controlled curated-query retrieval is enabled by contract, but no safe"
+    " constrained retrieval adapter is available for this run."
+)
+CURATED_QUERY_RATE_LIMITED_NOTE = (
+    "Controlled curated-query retrieval is temporarily rate limited and did not"
+    " produce a reviewable source cluster for this run."
+)
+CURATED_QUERY_NO_CREDIBLE_SOURCES_NOTE = (
+    "Controlled curated-query retrieval did not find enough credible sources"
+    " after domain and trust filtering."
+)
+CURATED_QUERY_LOW_CONFIDENCE_NOTE = (
+    "Controlled curated-query retrieval produced only lower-confidence support,"
+    " so the result stays at watchlist level."
 )
 URL_DEDUPE_NOTE = (
     "Manual URL bundle entries are deduplicated conservatively by normalized URL"
@@ -356,7 +377,7 @@ def normalize_retrieval_contract(
         manual_summary_input=manual_summary_input,
         manual_url_bundle_input=manual_url_bundle_input,
         curated_search_query_input=curated_search_query_input,
-        live_retrieval_enabled=False,
+        live_retrieval_enabled=source_mode == "curated_search_query",
     )
 
 
@@ -485,6 +506,9 @@ def _derive_geography_tags(
 
 def _build_clustered_sources(
     request: agent_schemas.EventStrategyReviewRunRequest,
+    curated_retrieval_outcome: (
+        event_strategy_review_retrieval.CuratedRetrievalOutcome | None
+    ) = None,
 ) -> list[agent_schemas.EventStrategyReviewClusteredSource]:
     contract = request.retrieval_contract
     sources: list[agent_schemas.EventStrategyReviewClusteredSource] = []
@@ -519,6 +543,9 @@ def _build_clustered_sources(
             )
         return sources
 
+    if curated_retrieval_outcome is not None and curated_retrieval_outcome.sources:
+        return list(curated_retrieval_outcome.sources)
+
     query_input = contract.curated_search_query_input
     if query_input is not None:
         sources.append(
@@ -527,7 +554,7 @@ def _build_clustered_sources(
                 source_label="curated_search_query",
                 notes=[
                     f"query preserved: {query_input.query}",
-                    "no live retrieval executed in this step",
+                    "no constrained retrieval outcome attached to this report build",
                 ],
             )
         )
@@ -537,10 +564,16 @@ def _build_clustered_sources(
 
 def build_event_cluster(
     request: agent_schemas.EventStrategyReviewRunRequest | dict[str, Any],
+    curated_retrieval_outcome: (
+        event_strategy_review_retrieval.CuratedRetrievalOutcome | None
+    ) = None,
 ) -> agent_schemas.EventStrategyReviewEventCluster:
     normalized_request = normalize_run_request(request)
     contract = normalized_request.retrieval_contract
-    sources = _build_clustered_sources(normalized_request)
+    sources = _build_clustered_sources(
+        normalized_request,
+        curated_retrieval_outcome=curated_retrieval_outcome,
+    )
 
     if contract.manual_summary_input is not None:
         canonical_title = contract.manual_summary_input.headline
@@ -563,7 +596,7 @@ def build_event_cluster(
             "Manual URL bundle accepted without uncontrolled crawling.",
             RETRIEVAL_CONTRACT_NOTE,
         ]
-    else:
+    elif curated_retrieval_outcome is None:
         curated_query = contract.curated_search_query_input
         assert curated_query is not None
         canonical_title = f"Curated search query: {curated_query.query}"
@@ -572,7 +605,25 @@ def build_event_cluster(
             " 1 records the retrieval contract but does not execute live search."
         )
         retrieval_notes = [
-            "Curated search query contract accepted with no live retrieval executed.",
+            "Curated search query contract accepted with no constrained retrieval outcome attached.",
+            RETRIEVAL_CONTRACT_NOTE,
+        ]
+    else:
+        curated_query = contract.curated_search_query_input
+        assert curated_query is not None
+        canonical_title = (
+            curated_retrieval_outcome.canonical_event_title
+            or f"Curated search query: {curated_query.query}"
+        )
+        canonical_summary = (
+            curated_retrieval_outcome.canonical_summary
+            or (
+                "Controlled curated-query retrieval produced a constrained source"
+                " cluster for internal strategy review."
+            )
+        )
+        retrieval_notes = list(curated_retrieval_outcome.retrieval_notes) or [
+            "Controlled curated-query retrieval completed.",
             RETRIEVAL_CONTRACT_NOTE,
         ]
 
@@ -585,7 +636,7 @@ def build_event_cluster(
         )
     cluster_strength = source_count
     if contract.source_mode == "curated_search_query":
-        cluster_strength = 0
+        cluster_strength = source_count if curated_retrieval_outcome is not None else 0
 
     return agent_schemas.EventStrategyReviewEventCluster(
         source_mode=contract.source_mode,
@@ -607,7 +658,18 @@ def build_score_breakdown(
 ) -> agent_schemas.EventStrategyReviewScoreBreakdown:
     normalized_request = normalize_run_request(request)
     cluster = event_cluster or build_event_cluster(normalized_request)
-    text = _text_corpus(normalized_request)
+    text = " ".join(
+        part
+        for part in [
+            _text_corpus(normalized_request),
+            cluster.canonical_event_title,
+            cluster.canonical_summary,
+            " ".join(filter(None, (source.title or "" for source in cluster.sources))),
+            " ".join(filter(None, (source.publisher or "" for source in cluster.sources))),
+            " ".join(filter(None, (source.source_domain or "" for source in cluster.sources))),
+        ]
+        if part
+    ).lower()
     selection_notes: list[str] = []
 
     relevance_score = min(30.0, float(len(cluster.taxonomy_tags) * 7))
@@ -634,6 +696,28 @@ def build_score_breakdown(
         )
     elif normalized_request.retrieval_contract.source_mode == "manual_summary":
         source_credibility_score = 2.0
+    elif normalized_request.retrieval_contract.source_mode == "curated_search_query":
+        credibility_weights = {
+            "tier_1_primary": 5.0,
+            "tier_2_reputable": 4.0,
+            "tier_3_trade": 2.0,
+        }
+        source_credibility_score = min(
+            10.0,
+            float(
+                sum(
+                    credibility_weights.get(source.trust_tier or "", 0.0)
+                    for source in cluster.sources
+                )
+            ),
+        )
+        if any(
+            source.trust_tier in {"tier_1_primary", "tier_2_reputable"}
+            for source in cluster.sources
+        ):
+            selection_notes.append("tier_one_or_two_support_present")
+        elif cluster.sources:
+            selection_notes.append("retrieval_support_below_tier_two")
 
     cluster_strength_score = min(10.0, float(cluster.cluster_strength * 3))
     if cluster_strength_score:
@@ -725,6 +809,22 @@ def conservative_importance_assessment(
         reason = (
             "Event remains below the threshold for structured strategy review and"
             " should stay out of active packaging or execution flows."
+        )
+
+    has_tier_one_or_two_support = any(
+        source.trust_tier in {"tier_1_primary", "tier_2_reputable"}
+        for source in cluster.sources
+    )
+    if (
+        cluster.source_mode == "curated_search_query"
+        and cluster.sources
+        and not has_tier_one_or_two_support
+        and classification == "strategy_review_required"
+    ):
+        classification = "watchlist"
+        reason = (
+            "Curated retrieval found only lower-confidence support, so the event"
+            " stays at watchlist level even though its topic signal is strong."
         )
 
     confidence = 0.58
@@ -884,6 +984,9 @@ def build_affected_entities(
 
 def build_execution_plan(
     request: agent_schemas.EventStrategyReviewRunRequest | dict[str, Any],
+    curated_retrieval_outcome: (
+        event_strategy_review_retrieval.CuratedRetrievalOutcome | None
+    ) = None,
 ) -> agent_schemas.EventStrategyReviewExecutionPlan:
     normalized_request = normalize_run_request(request)
     contract = normalized_request.retrieval_contract
@@ -891,6 +994,7 @@ def build_execution_plan(
     deduped_source_count = 0
     duplicate_source_count = 0
     operator_notes: list[str] = [RETRIEVAL_CONTRACT_NOTE]
+    retrieval_metadata = agent_schemas.EventStrategyReviewRetrievalMetadata()
 
     if contract.manual_summary_input is not None:
         deduped_source_count = 1
@@ -904,6 +1008,7 @@ def build_execution_plan(
             live_retrieval_enabled=False,
             deduped_source_count=deduped_source_count,
             duplicate_source_count=duplicate_source_count,
+            retrieval_metadata=retrieval_metadata,
             operator_notes=operator_notes,
         )
 
@@ -926,21 +1031,51 @@ def build_execution_plan(
             live_retrieval_enabled=False,
             deduped_source_count=deduped_source_count,
             duplicate_source_count=duplicate_source_count,
+            retrieval_metadata=retrieval_metadata,
             operator_notes=operator_notes,
         )
 
-    operator_notes.append(CURATED_QUERY_NOT_ACTIVE_NOTE)
-    query_input = contract.curated_search_query_input
-    if query_input is not None:
-        deduped_source_count = len(query_input.allowed_domains)
+    if curated_retrieval_outcome is None:
+        query_input = contract.curated_search_query_input
+        if query_input is not None:
+            deduped_source_count = len(query_input.allowed_domains)
+        operator_notes.append(
+            "curated_search_query is wired to constrained retrieval and will execute only through the controlled retrieval helper."
+        )
+        return agent_schemas.EventStrategyReviewExecutionPlan(
+            source_mode="curated_search_query",
+            execution_path="curated_search_query_constrained_retrieval",
+            accepted_for_execution=True,
+            live_retrieval_enabled=True,
+            deduped_source_count=deduped_source_count,
+            duplicate_source_count=0,
+            retrieval_metadata=agent_schemas.EventStrategyReviewRetrievalMetadata(
+                retrieval_state="not_requested",
+                adapter_key="unresolved",
+                raw_candidate_cap=event_strategy_review_retrieval.RAW_CANDIDATE_CAP,
+                fetched_source_cap=event_strategy_review_retrieval.FETCHED_SOURCE_CAP,
+                allowed_domains_applied=(
+                    list(contract.curated_search_query_input.allowed_domains)
+                    if contract.curated_search_query_input is not None
+                    else []
+                ),
+                default_trusted_domain_policy_applied=(
+                    contract.curated_search_query_input is not None
+                    and not contract.curated_search_query_input.allowed_domains
+                ),
+            ),
+            operator_notes=operator_notes,
+        )
 
     return agent_schemas.EventStrategyReviewExecutionPlan(
         source_mode="curated_search_query",
-        execution_path="curated_search_query_not_active_yet",
-        accepted_for_execution=False,
-        live_retrieval_enabled=False,
-        deduped_source_count=deduped_source_count,
+        execution_path="curated_search_query_constrained_retrieval",
+        accepted_for_execution=curated_retrieval_outcome.execution_status
+        == "report_generated",
+        live_retrieval_enabled=True,
+        deduped_source_count=curated_retrieval_outcome.retrieval_metadata.fetched_source_count,
         duplicate_source_count=0,
+        retrieval_metadata=curated_retrieval_outcome.retrieval_metadata,
         operator_notes=operator_notes,
     )
 
@@ -989,7 +1124,7 @@ def _build_recommended_actions(
 
     if request.retrieval_contract.source_mode == "curated_search_query":
         human_review_actions.append(
-            "Kevin should confirm whether the curated query should proceed to a later controlled retrieval step."
+            "Kevin should review whether the constrained curated-query retrieval result is strong enough for continued strategy review."
         )
 
     if importance_assessment.classification == "noise":
@@ -1022,26 +1157,54 @@ def _build_recommended_actions(
 
 def execute_event_strategy_review_request(
     request: agent_schemas.EventStrategyReviewRunRequest | dict[str, Any],
+    *,
+    curated_search_adapter: (
+        event_strategy_review_retrieval.BaseCuratedSearchAdapter | None
+    ) = None,
 ) -> agent_schemas.EventStrategyReviewExecutionResult:
     normalized_request = normalize_run_request(request)
-    execution_plan = build_execution_plan(normalized_request)
-
-    if not execution_plan.accepted_for_execution:
-        return agent_schemas.EventStrategyReviewExecutionResult(
-            source_mode=normalized_request.retrieval_contract.source_mode,
-            execution_status="not_active_yet",
-            execution_plan=execution_plan,
-            report=None,
-            inactive_reason=CURATED_QUERY_NOT_ACTIVE_NOTE,
-            operator_notes=[
-                INTERNAL_ONLY_OPERATOR_NOTE,
-                CURATED_QUERY_NOT_ACTIVE_NOTE,
-            ],
+    curated_retrieval_outcome = None
+    if normalized_request.retrieval_contract.source_mode == "curated_search_query":
+        curated_retrieval_outcome = (
+            event_strategy_review_retrieval.run_curated_search_query(
+                normalized_request,
+                adapter=curated_search_adapter,
+            )
         )
+    execution_plan = build_execution_plan(
+        normalized_request,
+        curated_retrieval_outcome=curated_retrieval_outcome,
+    )
 
-    report = build_internal_report(normalized_request)
+    if curated_retrieval_outcome is not None:
+        if curated_retrieval_outcome.execution_status != "report_generated":
+            return agent_schemas.EventStrategyReviewExecutionResult(
+                source_mode=normalized_request.retrieval_contract.source_mode,
+                execution_status=curated_retrieval_outcome.execution_status,
+                execution_plan=execution_plan,
+                report=None,
+                inactive_reason=curated_retrieval_outcome.inactive_reason,
+                operator_notes=[
+                    INTERNAL_ONLY_OPERATOR_NOTE,
+                    *execution_plan.operator_notes,
+                    *curated_retrieval_outcome.retrieval_metadata.notes,
+                ],
+            )
+        report = build_internal_report(
+            normalized_request,
+            curated_retrieval_outcome=curated_retrieval_outcome,
+        )
+    else:
+        report = build_internal_report(normalized_request)
+
     operator_notes = [INTERNAL_ONLY_OPERATOR_NOTE]
     operator_notes.extend(note for note in execution_plan.operator_notes if note)
+    if curated_retrieval_outcome is not None:
+        operator_notes.extend(
+            note
+            for note in curated_retrieval_outcome.retrieval_metadata.notes
+            if note
+        )
 
     return agent_schemas.EventStrategyReviewExecutionResult(
         source_mode=normalized_request.retrieval_contract.source_mode,
@@ -1101,9 +1264,15 @@ def _parse_package_result(
 
 def build_internal_report(
     request: agent_schemas.EventStrategyReviewRunRequest | dict[str, Any],
+    curated_retrieval_outcome: (
+        event_strategy_review_retrieval.CuratedRetrievalOutcome | None
+    ) = None,
 ) -> agent_schemas.EventStrategyReviewReportResponse:
     normalized_request = normalize_run_request(request)
-    event_cluster = build_event_cluster(normalized_request)
+    event_cluster = build_event_cluster(
+        normalized_request,
+        curated_retrieval_outcome=curated_retrieval_outcome,
+    )
     score_breakdown = build_score_breakdown(normalized_request, event_cluster)
     importance_assessment = conservative_importance_assessment(
         normalized_request,
@@ -1131,6 +1300,20 @@ def build_internal_report(
         f" classifies it as {importance_assessment.classification}."
     )
 
+    operator_notes = [
+        INTERNAL_ONLY_OPERATOR_NOTE,
+        RETRIEVAL_CONTRACT_NOTE,
+        PACKAGING_EXPLICIT_STEP_NOTE,
+    ]
+    if (
+        curated_retrieval_outcome is not None
+        and curated_retrieval_outcome.retrieval_metadata.retrieval_state
+        == "low_confidence_watchlist"
+    ):
+        operator_notes.append(CURATED_QUERY_LOW_CONFIDENCE_NOTE)
+    if curated_retrieval_outcome is not None:
+        operator_notes.extend(curated_retrieval_outcome.retrieval_metadata.notes)
+
     return agent_schemas.EventStrategyReviewReportResponse(
         report_title=report_title,
         retrieval_contract=normalized_request.retrieval_contract,
@@ -1150,11 +1333,7 @@ def build_internal_report(
         ),
         recommended_next_actions=recommended_actions,
         output_mode_options=build_output_mode_options(),
-        operator_notes=[
-            INTERNAL_ONLY_OPERATOR_NOTE,
-            RETRIEVAL_CONTRACT_NOTE,
-            PACKAGING_EXPLICIT_STEP_NOTE,
-        ],
+        operator_notes=operator_notes,
     )
 
 
@@ -1437,6 +1616,10 @@ def build_event_strategy_review_html_package(
 def run_event_strategy_review_once(
     db: Session,
     request: agent_schemas.EventStrategyReviewRunRequest | dict[str, Any] | Any,
+    *,
+    curated_search_adapter: (
+        event_strategy_review_retrieval.BaseCuratedSearchAdapter | None
+    ) = None,
 ) -> models.AgentRun:
     payload_json = _safe_task_payload_json(request)
     try:
@@ -1506,16 +1689,36 @@ def run_event_strategy_review_once(
                 ),
             )
 
-        execution_result = execute_event_strategy_review_request(normalized_request)
+        if curated_search_adapter is None:
+            execution_result = execute_event_strategy_review_request(
+                normalized_request,
+            )
+        else:
+            execution_result = execute_event_strategy_review_request(
+                normalized_request,
+                curated_search_adapter=curated_search_adapter,
+            )
 
-        if execution_result.execution_status == "not_active_yet":
+        if execution_result.execution_status in {
+            "not_active_yet",
+            "retrieval_unavailable",
+            "rate_limited",
+            "no_credible_sources",
+        }:
             result_json = _json_dumps(execution_result)
+            failure_action = "event_strategy_review_source_mode_not_active"
+            if execution_result.execution_status == "retrieval_unavailable":
+                failure_action = "event_strategy_review_retrieval_unavailable"
+            elif execution_result.execution_status == "rate_limited":
+                failure_action = "event_strategy_review_retrieval_rate_limited"
+            elif execution_result.execution_status == "no_credible_sources":
+                failure_action = "event_strategy_review_no_credible_sources"
             service.write_audit_log(
                 db,
                 run=run,
                 task=task,
                 actor_type="system",
-                action="event_strategy_review_source_mode_not_active",
+                action=failure_action,
                 details=result_json,
             )
             finished_at = datetime.utcnow()
@@ -1540,6 +1743,20 @@ def run_event_strategy_review_once(
         report = execution_result.report
         if report is None:
             raise RuntimeError("event_strategy_review_report_missing")
+
+        retrieval_state = execution_result.execution_plan.retrieval_metadata.retrieval_state
+        if retrieval_state in {"successful_retrieval", "low_confidence_watchlist"}:
+            retrieval_action = "event_strategy_review_curated_retrieval_completed"
+            if retrieval_state == "low_confidence_watchlist":
+                retrieval_action = "event_strategy_review_curated_retrieval_low_confidence"
+            service.write_audit_log(
+                db,
+                run=run,
+                task=task,
+                actor_type="agent",
+                action=retrieval_action,
+                details=_json_dumps(execution_result.execution_plan.retrieval_metadata),
+            )
 
         service.write_audit_log(
             db,
@@ -1685,6 +1902,20 @@ def run_event_strategy_review_package_once(
                 source_run_id=source_run.id,
                 package_request=package_request,
                 notes=[PACKAGE_SOURCE_NOT_ACTIVE_NOTE, PACKAGING_EXPLICIT_STEP_NOTE],
+            )
+        elif (
+            source_execution_result is not None
+            and source_execution_result.report is None
+            and source_execution_result.execution_status
+            in {"retrieval_unavailable", "rate_limited", "no_credible_sources"}
+        ):
+            package_result = _blocked_package_result(
+                source_run_id=source_run.id,
+                package_request=package_request,
+                notes=[
+                    source_execution_result.inactive_reason or PACKAGE_SOURCE_MISSING_NOTE,
+                    PACKAGING_EXPLICIT_STEP_NOTE,
+                ],
             )
         elif source_execution_result is None or source_execution_result.report is None:
             package_result = _blocked_package_result(
