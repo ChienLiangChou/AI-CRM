@@ -13,6 +13,7 @@ AgentType = Literal[
     "daily_market_scan",
     "mls_auth",
     "transaction_paperwork",
+    "event_strategy_review",
 ]
 TaskStatus = Literal[
     "queued",
@@ -712,6 +713,200 @@ class StrategyCoordinationLatestResponse(BaseModel):
     status: Optional[RunStatus] = None
     error: Optional[str] = None
     result: Optional[StrategyCoordinationResultResponse] = None
+
+
+EventStrategyReviewSourceMode = Literal[
+    "manual_summary",
+    "manual_url_bundle",
+    "curated_search_query",
+]
+EventStrategyReviewImportance = Literal[
+    "noise",
+    "watchlist",
+    "strategy_review_required",
+]
+EventStrategyReviewPerspectiveStatus = Literal["active", "placeholder", "skipped"]
+EventStrategyReviewExecutionMode = Literal["internal_review_only_non_executable"]
+EventStrategyReviewOutputMode = Literal[
+    "internal_report_only",
+    "html_report_package",
+    "social_post_draft_pack",
+    "email_newsletter_draft_pack",
+    "client_summary_draft_pack",
+]
+EventStrategyReviewOutputModeStatus = Literal["first_class_v1", "planned_later"]
+EventStrategyReviewPackageStatus = Literal[
+    "not_generated",
+    "draft_ready",
+    "blocked",
+]
+EventStrategyReviewArtifactType = Literal[
+    "static_html_bundle",
+    "draft_pack",
+    "json_report",
+]
+
+
+class EventStrategyReviewManualSummaryInput(BaseModel):
+    headline: str
+    summary: str
+    source_label: Optional[str] = None
+    event_date: Optional[str] = None
+
+
+class EventStrategyReviewUrlSourceInput(BaseModel):
+    url: str
+    title: Optional[str] = None
+    publisher: Optional[str] = None
+    published_at: Optional[str] = None
+
+
+class EventStrategyReviewManualUrlBundleInput(BaseModel):
+    items: list[EventStrategyReviewUrlSourceInput] = Field(default_factory=list)
+
+
+class EventStrategyReviewCuratedSearchQueryInput(BaseModel):
+    query: str
+    geography_hint: Optional[str] = None
+    topic_hints: list[str] = Field(default_factory=list)
+    allowed_domains: list[str] = Field(default_factory=list)
+    max_results: int = 10
+
+
+class EventStrategyReviewRetrievalContract(BaseModel):
+    source_mode: EventStrategyReviewSourceMode
+    manual_summary_input: Optional[EventStrategyReviewManualSummaryInput] = None
+    manual_url_bundle_input: Optional[EventStrategyReviewManualUrlBundleInput] = None
+    curated_search_query_input: Optional[
+        EventStrategyReviewCuratedSearchQueryInput
+    ] = None
+    live_retrieval_enabled: bool = False
+
+
+class EventStrategyReviewRunRequest(BaseModel):
+    retrieval_contract: EventStrategyReviewRetrievalContract
+    operator_notes: Optional[str] = None
+    geo_focus: list[str] = Field(default_factory=list)
+
+
+class EventStrategyReviewClusteredSource(BaseModel):
+    source_kind: EventStrategyReviewSourceMode
+    title: Optional[str] = None
+    url: Optional[str] = None
+    publisher: Optional[str] = None
+    published_at: Optional[str] = None
+    source_label: Optional[str] = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class EventStrategyReviewEventCluster(BaseModel):
+    source_mode: EventStrategyReviewSourceMode
+    canonical_event_title: str
+    canonical_summary: str
+    taxonomy_tags: list[str] = Field(default_factory=list)
+    geography_tags: list[str] = Field(default_factory=list)
+    source_count: int = 0
+    cluster_strength: int = 0
+    duplicate_count: int = 0
+    sources: list[EventStrategyReviewClusteredSource] = Field(default_factory=list)
+    retrieval_notes: list[str] = Field(default_factory=list)
+
+
+class EventStrategyReviewScoreBreakdown(BaseModel):
+    relevance_score: float = 0.0
+    geography_score: float = 0.0
+    recency_score: float = 0.0
+    source_credibility_score: float = 0.0
+    cluster_strength_score: float = 0.0
+    operator_usefulness_score: float = 0.0
+    total_score: float = 0.0
+    selection_notes: list[str] = Field(default_factory=list)
+
+
+class EventStrategyReviewImportanceAssessment(BaseModel):
+    classification: EventStrategyReviewImportance
+    reason: str
+    confidence: float
+
+
+class EventStrategyReviewPerspectiveBlock(BaseModel):
+    status: EventStrategyReviewPerspectiveStatus = "placeholder"
+    summary: str
+    why_it_matters: list[str] = Field(default_factory=list)
+    business_implications: list[str] = Field(default_factory=list)
+    recommended_internal_actions: list[str] = Field(default_factory=list)
+    cautions: list[str] = Field(default_factory=list)
+
+
+class EventStrategyReviewPerspectiveBlocks(BaseModel):
+    follow_up: EventStrategyReviewPerspectiveBlock
+    conversation_retention: EventStrategyReviewPerspectiveBlock
+    listing_seller: EventStrategyReviewPerspectiveBlock
+    cma_market: EventStrategyReviewPerspectiveBlock
+    ops_compliance: EventStrategyReviewPerspectiveBlock
+    buyer_renter: EventStrategyReviewPerspectiveBlock
+
+
+class EventStrategyReviewExecutionPolicy(BaseModel):
+    mode: EventStrategyReviewExecutionMode = "internal_review_only_non_executable"
+    can_auto_send: bool = False
+    can_auto_publish: bool = False
+    can_auto_execute: bool = False
+    can_auto_deploy: bool = False
+
+
+class EventStrategyReviewRecommendedActions(BaseModel):
+    internal_actions: list[str] = Field(default_factory=list)
+    human_review_actions: list[str] = Field(default_factory=list)
+
+
+class EventStrategyReviewSynthesis(BaseModel):
+    summary: str
+    key_takeaways: list[str] = Field(default_factory=list)
+
+
+class EventStrategyReviewOutputModeOption(BaseModel):
+    mode: EventStrategyReviewOutputMode
+    status: EventStrategyReviewOutputModeStatus
+    reason: Optional[str] = None
+
+
+class EventStrategyReviewReportResponse(BaseModel):
+    report_title: str
+    retrieval_contract: EventStrategyReviewRetrievalContract
+    event_cluster: EventStrategyReviewEventCluster
+    score_breakdown: EventStrategyReviewScoreBreakdown
+    importance_assessment: EventStrategyReviewImportanceAssessment
+    execution_policy: EventStrategyReviewExecutionPolicy
+    perspective_blocks: EventStrategyReviewPerspectiveBlocks
+    strategy_synthesis: EventStrategyReviewSynthesis
+    recommended_next_actions: EventStrategyReviewRecommendedActions
+    output_mode_options: list[EventStrategyReviewOutputModeOption] = Field(
+        default_factory=list
+    )
+    operator_notes: list[str] = Field(default_factory=list)
+
+
+class EventStrategyReviewPackageRequest(BaseModel):
+    source_run_id: Optional[int] = None
+    selected_output_mode: EventStrategyReviewOutputMode
+    title_override: Optional[str] = None
+    audience_label: Optional[str] = None
+    operator_notes: Optional[str] = None
+
+
+class EventStrategyReviewPackageArtifact(BaseModel):
+    artifact_type: EventStrategyReviewArtifactType = "static_html_bundle"
+    path: Optional[str] = None
+    label: Optional[str] = None
+
+
+class EventStrategyReviewPackageResult(BaseModel):
+    selected_output_mode: EventStrategyReviewOutputMode
+    status: EventStrategyReviewPackageStatus
+    requires_explicit_operator_step: bool = True
+    artifacts: list[EventStrategyReviewPackageArtifact] = Field(default_factory=list)
+    operator_notes: list[str] = Field(default_factory=list)
 
 
 TransactionPaperworkSourceDocType = Literal[
