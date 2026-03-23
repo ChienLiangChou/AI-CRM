@@ -734,6 +734,9 @@ TransactionPaperworkQuestionReason = Literal[
     "conflicting_field",
 ]
 TransactionPaperworkIntakeIssueCode = Literal[
+    "missing_file",
+    "unreadable_pdf",
+    "textless_pdf",
     "missing_text",
     "unsupported_document_type",
 ]
@@ -742,6 +745,7 @@ TransactionPaperworkMappedFieldValueSource = Literal[
     "kevin_confirmed",
     "unresolved",
 ]
+TransactionPaperworkPdfLoadStatus = Literal["loaded", "blocked"]
 TransactionPaperworkRenderStatus = Literal["rendered", "blocked"]
 TransactionPaperworkValueType = Literal[
     "text",
@@ -859,6 +863,22 @@ class TransactionPaperworkKevinAnswerPacket(BaseModel):
     answers: list[TransactionPaperworkKevinAnswer] = Field(default_factory=list)
 
 
+class TransactionPaperworkPdfSourceInput(BaseModel):
+    file_path: str
+    document_label: Optional[str] = None
+
+
+class TransactionPaperworkPdfSourceResult(BaseModel):
+    document_label: str
+    file_path: str
+    file_name: str
+    load_status: TransactionPaperworkPdfLoadStatus
+    extraction_method: str = "pdftotext"
+    page_count: int = 0
+    extracted_text_present: bool = False
+    notes: list[str] = Field(default_factory=list)
+
+
 class TransactionPaperworkPreparationResult(BaseModel):
     source_documents: list[TransactionPaperworkSourceDocumentIntake] = Field(
         default_factory=list
@@ -934,6 +954,19 @@ class TransactionPaperworkRenderResult(BaseModel):
     traceability_by_field_key: dict[str, TransactionPaperworkFieldTraceability] = Field(
         default_factory=dict
     )
+    operator_notes: list[str] = Field(default_factory=list)
+
+
+class TransactionPaperworkOrchestrationResult(BaseModel):
+    pdf_sources: list[TransactionPaperworkPdfSourceResult] = Field(
+        default_factory=list
+    )
+    preparation_result: TransactionPaperworkPreparationResult = Field(
+        default_factory=TransactionPaperworkPreparationResult
+    )
+    review_package: TransactionPaperworkReviewPackage
+    render_result: TransactionPaperworkRenderResult
+    output_status: TransactionPaperworkRenderStatus
     operator_notes: list[str] = Field(default_factory=list)
 
 

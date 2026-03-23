@@ -1,10 +1,12 @@
 import hashlib
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from pypdf import PdfReader
+from reportlab.pdfgen import canvas
 
 from app.agents import paperwork_templates, schemas as agent_schemas
 from app.agents import transaction_paperwork
@@ -747,6 +749,241 @@ class TransactionPaperworkOverlayRenderTests(unittest.TestCase):
             self.assertTrue(
                 any("blocked" in note.lower() for note in result.operator_notes)
             )
+
+
+class TransactionPaperworkPdfOrchestrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        if shutil.which("/opt/homebrew/bin/pdftotext") is None and shutil.which(
+            "pdftotext"
+        ) is None:
+            raise unittest.SkipTest("pdftotext is unavailable")
+
+    def create_pdf(
+        self,
+        output_path: Path,
+        *pages: list[str],
+    ) -> Path:
+        pdf = canvas.Canvas(str(output_path))
+        for index, lines in enumerate(pages):
+            y = 760
+            for line in lines:
+                pdf.drawString(72, y, line)
+                y -= 16
+            if index < len(pages) - 1:
+                pdf.showPage()
+        pdf.save()
+        return output_path
+
+    def build_aps_pdf(self, output_path: Path) -> Path:
+        return self.create_pdf(
+            output_path,
+            [
+                "Agreement of Purchase and Sale",
+                "MLS Number: C1234567",
+                "Property Address: 123 King St W, Toronto, ON",
+                "Unit: 1102",
+                "Offer Date: March 1, 2026",
+                "Closing Date: May 30, 2026",
+                "Conditional / Firm: Conditional",
+                "Firm Date: March 5, 2026",
+                "Buyer: Alice Buyer and Bob Buyer",
+                "Seller: Sally Seller",
+                "Purchase Price: $1,250,000",
+                "Deposit: $50,000",
+                "Deposit Holder: Freeman Real Estate Ltd.",
+                "Buyer's Solicitor: Hart Law LLP, 416-555-0100",
+                "Seller's Solicitor: North Legal PC, 416-555-0199",
+                "Commission: 2.5% to co-operating brokerage",
+                "Commission Split: 50/50",
+                "Referral Fee: 15%",
+                "Marketing Fee: $500",
+            ],
+        )
+
+    def build_lease_pdf(self, output_path: Path) -> Path:
+        return self.create_pdf(
+            output_path,
+            [
+                "Residential Agreement to Lease",
+                "Premises: 88 Harbour St, Toronto, ON",
+                "Offer Date: April 2, 2026",
+                "Occupancy Date: June 1, 2026",
+                "Tenant: Terry Tenant",
+                "Landlord: Larry Landlord and Linda Landlord",
+                "Rent: $3,200 / month",
+                "Deposit Holder: Harbour Realty Inc.",
+                "Tenant's Solicitor: Tenant Counsel LLP",
+                "Landlord's Solicitor: Owner Counsel LLP",
+            ],
+        )
+
+    def build_answers(self) -> agent_schemas.TransactionPaperworkKevinAnswerPacket:
+        return agent_schemas.TransactionPaperworkKevinAnswerPacket(
+            answers=[
+                agent_schemas.TransactionPaperworkKevinAnswer(
+                    field_key="commission_amount",
+                    value="2.5%",
+                ),
+                agent_schemas.TransactionPaperworkKevinAnswer(
+                    field_key="commission_split",
+                    value="50/50",
+                ),
+                agent_schemas.TransactionPaperworkKevinAnswer(
+                    field_key="referral_fee",
+                    value="15%",
+                ),
+                agent_schemas.TransactionPaperworkKevinAnswer(
+                    field_key="marketing_fee",
+                    value="$500",
+                ),
+            ]
+        )
+
+    def test_machine_readable_aps_pdf_intake_extracts_text(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = self.build_aps_pdf(Path(temp_dir) / "aps.pdf")
+
+            source_result, source_document, issues = (
+                transaction_paperwork.load_transaction_paperwork_source_pdf(pdf_path)
+            )
+
+            self.assertEqual(source_result.load_status, "loaded")
+            self.assertEqual(source_result.file_name, "aps.pdf")
+            self.assertTrue(source_result.extracted_text_present)
+            self.assertGreaterEqual(source_result.page_count, 1)
+            self.assertEqual(issues, [])
+            self.assertIsNotNone(source_document)
+            self.assertIn("Agreement of Purchase and Sale", source_document.pages[0].text)
+            self.assertIn("MLS Number: C1234567", source_document.pages[0].text)
+
+    def test_machine_readable_agreement_to_lease_pdf_flows_into_supported_extraction(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = self.build_lease_pdf(Path(temp_dir) / "lease.pdf")
+
+            result = transaction_paperwork.orchestrate_transaction_paperwork_from_pdfs(
+                [pdf_path],
+                render_output_dir=temp_dir,
+            )
+
+            self.assertEqual(result.pdf_sources[0].load_status, "loaded")
+            self.assertEqual(
+                result.preparation_result.source_documents[0].source_doc_type,
+                "agreement_to_lease",
+            )
+            fact_map = {
+                fact.field_key: fact
+                for fact in result.preparation_result.canonical_deal_facts.facts
+            }
+            self.assertEqual(fact_map["sale_type"].value, "lease")
+            self.assertEqual(fact_map["occupancy_date"].value, "2026-06-01")
+            self.assertEqual(result.output_status, "blocked")
+
+    def test_textless_pdf_fail_softs_without_source_document(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = Path(temp_dir) / "textless.pdf"
+            pdf = canvas.Canvas(str(pdf_path))
+            pdf.showPage()
+            pdf.save()
+
+            source_result, source_document, issues = (
+                transaction_paperwork.load_transaction_paperwork_source_pdf(pdf_path)
+            )
+
+            self.assertEqual(source_result.load_status, "blocked")
+            self.assertFalse(source_result.extracted_text_present)
+            self.assertIsNone(source_document)
+            self.assertEqual(len(issues), 1)
+            self.assertEqual(issues[0].issue_code, "textless_pdf")
+
+    def test_unsupported_pdf_fail_softs_through_orchestration(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = self.create_pdf(
+                Path(temp_dir) / "unsupported.pdf",
+                [
+                    "Notice of Fulfillment",
+                    "This document is not an APS or Agreement to Lease.",
+                ],
+            )
+
+            result = transaction_paperwork.orchestrate_transaction_paperwork_from_pdfs(
+                [pdf_path],
+                render_output_dir=temp_dir,
+            )
+
+            self.assertEqual(result.pdf_sources[0].load_status, "loaded")
+            self.assertFalse(result.preparation_result.source_documents[0].supported)
+            self.assertEqual(
+                result.preparation_result.intake_issues[0].issue_code,
+                "unsupported_document_type",
+            )
+            self.assertEqual(result.output_status, "blocked")
+            self.assertIsNone(result.render_result.artifact)
+
+    def test_blocked_orchestration_does_not_render_without_kevin_confirmations(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = self.build_aps_pdf(Path(temp_dir) / "aps.pdf")
+
+            result = transaction_paperwork.orchestrate_transaction_paperwork_from_pdfs(
+                [pdf_path],
+                render_output_dir=temp_dir,
+            )
+
+            self.assertEqual(result.output_status, "blocked")
+            self.assertFalse(result.review_package.review_ready)
+            self.assertEqual(result.render_result.output_status, "blocked")
+            self.assertIsNone(result.render_result.artifact)
+            self.assertEqual(
+                result.review_package.blocking_unresolved_field_keys,
+                [
+                    "commission_amount",
+                    "commission_split",
+                    "referral_fee",
+                    "marketing_fee",
+                ],
+            )
+
+    def test_rendered_orchestration_builds_review_package_and_overlay_draft(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = self.build_aps_pdf(Path(temp_dir) / "aps.pdf")
+
+            result = transaction_paperwork.orchestrate_transaction_paperwork_from_pdfs(
+                [pdf_path],
+                kevin_answers=self.build_answers(),
+                render_output_dir=temp_dir,
+            )
+
+            self.assertEqual(result.output_status, "rendered")
+            self.assertTrue(result.review_package.review_ready)
+            self.assertEqual(result.render_result.output_status, "rendered")
+            self.assertIsNotNone(result.render_result.artifact)
+            self.assertTrue(Path(result.render_result.artifact.output_pdf_path).is_file())
+            self.assertEqual(
+                result.render_result.template_id,
+                result.review_package.template_id,
+            )
+            self.assertEqual(
+                result.render_result.template_version,
+                result.review_package.template_version,
+            )
+            self.assertEqual(
+                result.render_result.rendered_field_count,
+                len(result.render_result.rendered_field_keys),
+            )
+            self.assertEqual(
+                result.render_result.traceability_by_field_key[
+                    "commission_amount"
+                ].transform_used,
+                "kevin_confirmed_merge",
+            )
+            rendered_reader = PdfReader(result.render_result.artifact.output_pdf_path)
+            rendered_text = "\n".join(
+                page.extract_text() or "" for page in rendered_reader.pages
+            )
+            self.assertIn("Alice Buyer", rendered_text)
+            self.assertIn("2.5%", rendered_text)
+            self.assertIn("$500", rendered_text)
 
 
 if __name__ == "__main__":

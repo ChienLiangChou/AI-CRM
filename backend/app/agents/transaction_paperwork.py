@@ -22,6 +22,10 @@ PDFINFO_CANDIDATE_PATHS = (
     "/opt/homebrew/bin/pdfinfo",
     "pdfinfo",
 )
+PDFTOTEXT_CANDIDATE_PATHS = (
+    "/opt/homebrew/bin/pdftotext",
+    "pdftotext",
+)
 SUPPORTED_SOURCE_DOC_TYPES = frozenset({"aps", "agreement_to_lease"})
 LOW_CONFIDENCE_THRESHOLD = 0.85
 DATE_INPUT_FORMATS = (
@@ -174,6 +178,17 @@ def _absolute_template_path(relative_path: str) -> Path:
 
 def _resolve_pdfinfo_command() -> str | None:
     for candidate in PDFINFO_CANDIDATE_PATHS:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+        candidate_path = Path(candidate)
+        if candidate_path.is_file():
+            return str(candidate_path)
+    return None
+
+
+def _resolve_pdftotext_command() -> str | None:
+    for candidate in PDFTOTEXT_CANDIDATE_PATHS:
         resolved = shutil.which(candidate)
         if resolved:
             return resolved
@@ -460,6 +475,9 @@ def build_trade_record_review_package(
     operator_notes = list(preparation_result.operator_notes)
     operator_notes.extend(preparation_result.canonical_deal_facts.operator_notes)
     operator_notes.extend(preparation_result.question_packet.operator_notes)
+    operator_notes.extend(
+        issue.detail for issue in preparation_result.intake_issues
+    )
     operator_notes.extend(ignored_answer_notes)
 
     for section in template.sections:
@@ -612,6 +630,187 @@ def render_trade_record_review_draft(
     )
 
 
+def load_transaction_paperwork_source_pdf(
+    pdf_source: (
+        agent_schemas.TransactionPaperworkPdfSourceInput | str | Path
+    ),
+) -> tuple[
+    agent_schemas.TransactionPaperworkPdfSourceResult,
+    agent_schemas.TransactionPaperworkSourceDocument | None,
+    list[agent_schemas.TransactionPaperworkIntakeIssue],
+]:
+    source_input = _normalize_pdf_source_input(pdf_source)
+    pdf_path = Path(source_input.file_path)
+    document_label = source_input.document_label or pdf_path.stem
+    file_name = pdf_path.name
+
+    if not pdf_path.is_file():
+        issue = agent_schemas.TransactionPaperworkIntakeIssue(
+            document_label=document_label,
+            issue_code="missing_file",
+            detail=f"Source PDF not found: {pdf_path}",
+        )
+        return (
+            agent_schemas.TransactionPaperworkPdfSourceResult(
+                document_label=document_label,
+                file_path=str(pdf_path),
+                file_name=file_name,
+                load_status="blocked",
+                notes=[issue.detail],
+            ),
+            None,
+            [issue],
+        )
+
+    pdftotext_command = _resolve_pdftotext_command()
+    if not pdftotext_command:
+        issue = agent_schemas.TransactionPaperworkIntakeIssue(
+            document_label=document_label,
+            issue_code="unreadable_pdf",
+            detail="pdftotext is unavailable, so machine-readable PDF intake cannot run.",
+        )
+        return (
+            agent_schemas.TransactionPaperworkPdfSourceResult(
+                document_label=document_label,
+                file_path=str(pdf_path),
+                file_name=file_name,
+                load_status="blocked",
+                notes=[issue.detail],
+            ),
+            None,
+            [issue],
+        )
+
+    page_count = _inspect_pdf_page_count(pdf_path)
+    completed = subprocess.run(
+        [pdftotext_command, "-layout", str(pdf_path), "-"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        issue = agent_schemas.TransactionPaperworkIntakeIssue(
+            document_label=document_label,
+            issue_code="unreadable_pdf",
+            detail=(
+                completed.stderr.strip()
+                or "pdftotext returned a non-zero exit code for the source PDF."
+            ),
+        )
+        return (
+            agent_schemas.TransactionPaperworkPdfSourceResult(
+                document_label=document_label,
+                file_path=str(pdf_path),
+                file_name=file_name,
+                load_status="blocked",
+                page_count=page_count or 0,
+                notes=[issue.detail],
+            ),
+            None,
+            [issue],
+        )
+
+    pages = _parse_pdftotext_pages(completed.stdout)
+    if not pages:
+        issue = agent_schemas.TransactionPaperworkIntakeIssue(
+            document_label=document_label,
+            issue_code="textless_pdf",
+            detail=(
+                "Source PDF has no machine-readable text. OCR/scanned-PDF fallback"
+                " is out of scope for this step."
+            ),
+        )
+        return (
+            agent_schemas.TransactionPaperworkPdfSourceResult(
+                document_label=document_label,
+                file_path=str(pdf_path),
+                file_name=file_name,
+                load_status="blocked",
+                page_count=page_count or 0,
+                extracted_text_present=False,
+                notes=[issue.detail],
+            ),
+            None,
+            [issue],
+        )
+
+    source_document = agent_schemas.TransactionPaperworkSourceDocument(
+        document_label=document_label,
+        file_name=file_name,
+        pages=pages,
+    )
+    return (
+        agent_schemas.TransactionPaperworkPdfSourceResult(
+            document_label=document_label,
+            file_path=str(pdf_path),
+            file_name=file_name,
+            load_status="loaded",
+            page_count=page_count or len(pages),
+            extracted_text_present=True,
+        ),
+        source_document,
+        [],
+    )
+
+
+def orchestrate_transaction_paperwork_from_pdfs(
+    pdf_sources: list[agent_schemas.TransactionPaperworkPdfSourceInput | str | Path],
+    *,
+    kevin_answers: agent_schemas.TransactionPaperworkKevinAnswerPacket | None = None,
+    render_output_dir: str | Path | None = None,
+) -> agent_schemas.TransactionPaperworkOrchestrationResult:
+    pdf_source_results: list[agent_schemas.TransactionPaperworkPdfSourceResult] = []
+    source_documents: list[agent_schemas.TransactionPaperworkSourceDocument] = []
+    intake_issues: list[agent_schemas.TransactionPaperworkIntakeIssue] = []
+    orchestration_notes: list[str] = []
+
+    for pdf_source in pdf_sources:
+        source_result, source_document, source_issues = load_transaction_paperwork_source_pdf(
+            pdf_source
+        )
+        pdf_source_results.append(source_result)
+        if source_document is not None:
+            source_documents.append(source_document)
+        if source_issues:
+            intake_issues.extend(source_issues)
+            orchestration_notes.extend(issue.detail for issue in source_issues)
+        orchestration_notes.extend(source_result.notes)
+
+    preparation_result = prepare_transaction_paperwork_review(source_documents)
+    if intake_issues:
+        preparation_result = agent_schemas.TransactionPaperworkPreparationResult(
+            source_documents=preparation_result.source_documents,
+            canonical_deal_facts=preparation_result.canonical_deal_facts,
+            question_packet=preparation_result.question_packet,
+            intake_issues=preparation_result.intake_issues + intake_issues,
+            operator_notes=_dedupe_preserve_order(
+                list(preparation_result.operator_notes)
+                + [issue.detail for issue in intake_issues]
+            ),
+        )
+
+    review_package = build_trade_record_review_package(
+        preparation_result,
+        kevin_answers=kevin_answers,
+    )
+    render_result = render_trade_record_review_draft(
+        review_package,
+        output_dir=render_output_dir,
+    )
+    orchestration_notes.extend(preparation_result.operator_notes)
+    orchestration_notes.extend(review_package.operator_notes)
+    orchestration_notes.extend(render_result.operator_notes)
+
+    return agent_schemas.TransactionPaperworkOrchestrationResult(
+        pdf_sources=pdf_source_results,
+        preparation_result=preparation_result,
+        review_package=review_package,
+        render_result=render_result,
+        output_status=render_result.output_status,
+        operator_notes=_dedupe_preserve_order(orchestration_notes),
+    )
+
+
 def _parse_positive_int(value: str | None) -> int | None:
     if value is None:
         return None
@@ -635,6 +834,46 @@ def _document_pages(
             )
         ]
     return []
+
+
+def _normalize_pdf_source_input(
+    pdf_source: agent_schemas.TransactionPaperworkPdfSourceInput | str | Path,
+) -> agent_schemas.TransactionPaperworkPdfSourceInput:
+    if isinstance(pdf_source, agent_schemas.TransactionPaperworkPdfSourceInput):
+        return pdf_source
+    return agent_schemas.TransactionPaperworkPdfSourceInput(file_path=str(pdf_source))
+
+
+def _inspect_pdf_page_count(pdf_path: Path) -> int | None:
+    pdfinfo_command = _resolve_pdfinfo_command()
+    if not pdfinfo_command:
+        return None
+    completed = subprocess.run(
+        [pdfinfo_command, str(pdf_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+    return _parse_positive_int(_parse_pdfinfo_output(completed.stdout).get("Pages"))
+
+
+def _parse_pdftotext_pages(
+    output: str,
+) -> list[agent_schemas.TransactionPaperworkSourcePage]:
+    pages: list[agent_schemas.TransactionPaperworkSourcePage] = []
+    for index, raw_page in enumerate(output.split("\f"), start=1):
+        normalized = raw_page.replace("\x00", "").strip()
+        if not normalized:
+            continue
+        pages.append(
+            agent_schemas.TransactionPaperworkSourcePage(
+                page_number=index,
+                text=normalized,
+            )
+        )
+    return pages
 
 
 def _build_trade_record_overlay_pdf(
