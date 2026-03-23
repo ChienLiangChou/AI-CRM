@@ -172,5 +172,218 @@ class TransactionPaperworkSchemaContractTests(unittest.TestCase):
         )
 
 
+class TransactionPaperworkIntakeAndExtractionTests(unittest.TestCase):
+    def build_document(
+        self,
+        document_label: str,
+        *pages: str,
+        file_name: str | None = None,
+    ) -> agent_schemas.TransactionPaperworkSourceDocument:
+        return agent_schemas.TransactionPaperworkSourceDocument(
+            document_label=document_label,
+            file_name=file_name,
+            pages=[
+                agent_schemas.TransactionPaperworkSourcePage(
+                    page_number=index + 1,
+                    text=text,
+                )
+                for index, text in enumerate(pages)
+            ],
+        )
+
+    def fact_map(
+        self,
+        result: agent_schemas.TransactionPaperworkPreparationResult,
+    ) -> dict[str, agent_schemas.TransactionPaperworkCanonicalDealFact]:
+        return {fact.field_key: fact for fact in result.canonical_deal_facts.facts}
+
+    def question_map(
+        self,
+        result: agent_schemas.TransactionPaperworkPreparationResult,
+    ) -> dict[str, agent_schemas.TransactionPaperworkQuestionItem]:
+        return {question.field_key: question for question in result.question_packet.questions}
+
+    def test_prepare_review_extracts_high_value_aps_fields_and_commission_questions(self):
+        document = self.build_document(
+            "Downtown APS",
+            "\n".join(
+                [
+                    "Agreement of Purchase and Sale",
+                    "MLS Number: C1234567",
+                    "Property Address: 123 King St W, Toronto, ON",
+                    "Unit: 1102",
+                    "Offer Date: March 1, 2026",
+                    "Closing Date: May 30, 2026",
+                    "Conditional / Firm: Conditional",
+                    "Firm Date: March 5, 2026",
+                    "Buyer: Alice Buyer and Bob Buyer",
+                    "Seller: Sally Seller",
+                    "Purchase Price: $1,250,000",
+                    "Deposit: $50,000",
+                    "Deposit Holder: Freeman Real Estate Ltd.",
+                    "Buyer's Solicitor: Hart Law LLP, 416-555-0100",
+                    "Seller's Solicitor: North Legal PC, 416-555-0199",
+                    "Commission: 2.5% to co-operating brokerage",
+                    "Commission Split: 50/50",
+                    "Referral Fee: 15%",
+                    "Marketing Fee: $500",
+                ]
+            ),
+        )
+
+        result = transaction_paperwork.prepare_transaction_paperwork_review([document])
+        facts = self.fact_map(result)
+        questions = self.question_map(result)
+
+        self.assertEqual(len(result.source_documents), 1)
+        self.assertEqual(result.source_documents[0].source_doc_type, "aps")
+        self.assertTrue(result.source_documents[0].supported)
+
+        self.assertEqual(facts["mls_number"].value, "C1234567")
+        self.assertEqual(
+            facts["property_address"].value,
+            "123 King St W, Toronto, ON, Unit 1102",
+        )
+        self.assertEqual(facts["offer_date"].value, "2026-03-01")
+        self.assertEqual(facts["closing_date"].value, "2026-05-30")
+        self.assertEqual(facts["conditional_status"].value, "conditional")
+        self.assertEqual(facts["firm_date"].value, "2026-03-05")
+        self.assertEqual(facts["sale_type"].value, "sale")
+        self.assertEqual(facts["client_primary_name"].value, "Alice Buyer")
+        self.assertEqual(facts["client_secondary_name"].value, "Bob Buyer")
+        self.assertEqual(facts["counterparty_primary_name"].value, "Sally Seller")
+        self.assertEqual(facts["sale_price_or_lease_rent"].value, "$1,250,000")
+        self.assertEqual(facts["deposit_amount"].value, "$50,000")
+        self.assertEqual(facts["deposit_holder"].value, "Freeman Real Estate Ltd.")
+        self.assertEqual(
+            facts["client_solicitor_details"].value,
+            "Hart Law LLP, 416-555-0100",
+        )
+        self.assertEqual(
+            facts["counterparty_solicitor_details"].value,
+            "North Legal PC, 416-555-0199",
+        )
+        self.assertEqual(facts["closing_date"].source_doc_type, "aps")
+        self.assertEqual(
+            facts["closing_date"].evidence[0].evidence_anchor,
+            "Closing Date",
+        )
+        self.assertEqual(result.canonical_deal_facts.unresolved_field_keys, [])
+
+        self.assertEqual(
+            questions["commission_amount"].reason,
+            "commission_confirmation_required",
+        )
+        self.assertEqual(
+            questions["commission_amount"].suggested_value,
+            "2.5% to co-operating brokerage",
+        )
+        self.assertEqual(questions["commission_split"].suggested_value, "50/50")
+        self.assertEqual(questions["referral_fee"].suggested_value, "15%")
+        self.assertEqual(questions["marketing_fee"].suggested_value, "$500")
+        self.assertEqual(
+            result.question_packet.blocking_field_keys,
+            [
+                "commission_amount",
+                "commission_split",
+                "referral_fee",
+                "marketing_fee",
+            ],
+        )
+
+    def test_prepare_review_extracts_agreement_to_lease_and_flags_low_confidence_fields(self):
+        document = self.build_document(
+            "Harbour Lease",
+            "\n".join(
+                [
+                    "Residential Agreement to Lease",
+                    "Premises: 88 Harbour St, Toronto, ON",
+                    "Offer Date: April 2, 2026",
+                    "Occupancy Date: June 1, 2026",
+                    "Tenant: Terry Tenant",
+                    "Landlord: Larry Landlord and Linda Landlord",
+                    "Rent: $3,200 / month",
+                    "Deposit Holder: Harbour Realty Inc.",
+                    "Tenant's Solicitor: Tenant Counsel LLP",
+                    "Landlord's Solicitor: Owner Counsel LLP",
+                ]
+            ),
+        )
+
+        result = transaction_paperwork.prepare_transaction_paperwork_review([document])
+        facts = self.fact_map(result)
+        questions = self.question_map(result)
+
+        self.assertEqual(result.source_documents[0].source_doc_type, "agreement_to_lease")
+        self.assertEqual(facts["sale_type"].value, "lease")
+        self.assertEqual(facts["offer_date"].value, "2026-04-02")
+        self.assertEqual(facts["occupancy_date"].value, "2026-06-01")
+        self.assertEqual(facts["client_primary_name"].value, "Terry Tenant")
+        self.assertEqual(facts["counterparty_primary_name"].value, "Larry Landlord")
+        self.assertEqual(facts["counterparty_secondary_name"].value, "Linda Landlord")
+        self.assertEqual(facts["sale_price_or_lease_rent"].value, "$3,200/month")
+        self.assertEqual(facts["property_address"].value, "88 Harbour St, Toronto, ON")
+        self.assertEqual(facts["property_address"].confirmation_state, "required")
+        self.assertIn("property_address", result.canonical_deal_facts.unresolved_field_keys)
+        self.assertEqual(questions["property_address"].reason, "low_confidence_field")
+        self.assertEqual(
+            questions["property_address"].suggested_value,
+            "88 Harbour St, Toronto, ON",
+        )
+        self.assertEqual(
+            questions["commission_amount"].reason,
+            "commission_confirmation_required",
+        )
+
+    def test_prepare_review_reports_conflicting_fields_without_silently_filling(self):
+        document = self.build_document(
+            "Conflicting APS",
+            "\n".join(
+                [
+                    "Agreement of Purchase and Sale",
+                    "Property Address: 10 Front St E, Toronto, ON",
+                    "Offer Date: March 1, 2026",
+                    "Closing Date: May 30, 2026",
+                    "Closing Date: June 5, 2026",
+                    "Buyer: Alice Buyer",
+                    "Seller: Sally Seller",
+                    "Purchase Price: $950,000",
+                ]
+            ),
+        )
+
+        result = transaction_paperwork.prepare_transaction_paperwork_review([document])
+        facts = self.fact_map(result)
+        questions = self.question_map(result)
+
+        self.assertNotIn("closing_date", facts)
+        self.assertIn("closing_date", result.canonical_deal_facts.unresolved_field_keys)
+        self.assertEqual(questions["closing_date"].reason, "conflicting_field")
+        self.assertIn("2026-05-30", questions["closing_date"].prompt)
+        self.assertIn("2026-06-05", questions["closing_date"].prompt)
+
+    def test_prepare_review_fail_softs_for_unsupported_document_type(self):
+        document = self.build_document(
+            "Unsupported Notice",
+            "\n".join(
+                [
+                    "Notice of Fulfillment",
+                    "This document is not an APS or Agreement to Lease.",
+                ]
+            ),
+        )
+
+        result = transaction_paperwork.prepare_transaction_paperwork_review([document])
+
+        self.assertFalse(result.source_documents[0].supported)
+        self.assertEqual(
+            result.intake_issues[0].issue_code,
+            "unsupported_document_type",
+        )
+        self.assertEqual(result.canonical_deal_facts.facts, [])
+        self.assertEqual(result.question_packet.questions, [])
+        self.assertTrue(result.operator_notes)
+
+
 if __name__ == "__main__":
     unittest.main()

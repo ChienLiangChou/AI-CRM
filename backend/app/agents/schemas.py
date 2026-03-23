@@ -733,6 +733,10 @@ TransactionPaperworkQuestionReason = Literal[
     "low_confidence_field",
     "conflicting_field",
 ]
+TransactionPaperworkIntakeIssueCode = Literal[
+    "missing_text",
+    "unsupported_document_type",
+]
 TransactionPaperworkValueType = Literal[
     "text",
     "date",
@@ -756,11 +760,42 @@ class TransactionPaperworkEvidenceReference(BaseModel):
     document_label: Optional[str] = None
 
 
+class TransactionPaperworkSourcePage(BaseModel):
+    page_number: int
+    text: str
+
+
+class TransactionPaperworkSourceDocument(BaseModel):
+    document_label: str
+    file_name: Optional[str] = None
+    pages: list[TransactionPaperworkSourcePage] = Field(default_factory=list)
+    raw_text: Optional[str] = None
+
+
+class TransactionPaperworkSourceDocumentIntake(BaseModel):
+    document_label: str
+    file_name: Optional[str] = None
+    source_doc_type: TransactionPaperworkSourceDocType = (
+        "transaction_related_document"
+    )
+    supported: bool = False
+    confidence: float = 0.0
+    classification_basis: Optional[str] = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class TransactionPaperworkIntakeIssue(BaseModel):
+    document_label: str
+    issue_code: TransactionPaperworkIntakeIssueCode
+    detail: str
+
+
 class TransactionPaperworkCanonicalDealFact(BaseModel):
     field_key: str
     section_key: str
     label: str
     value: Optional[str] = None
+    source_doc_type: Optional[TransactionPaperworkSourceDocType] = None
     confidence: float = 0.0
     confirmation_state: TransactionPaperworkConfirmationState = "not_required"
     requires_kevin_confirmation: bool = False
@@ -805,6 +840,22 @@ class TransactionPaperworkQuestionItem(BaseModel):
 class TransactionPaperworkQuestionPacket(BaseModel):
     questions: list[TransactionPaperworkQuestionItem] = Field(default_factory=list)
     blocking_field_keys: list[str] = Field(default_factory=list)
+    operator_notes: list[str] = Field(default_factory=list)
+
+
+class TransactionPaperworkPreparationResult(BaseModel):
+    source_documents: list[TransactionPaperworkSourceDocumentIntake] = Field(
+        default_factory=list
+    )
+    canonical_deal_facts: TransactionPaperworkCanonicalDealFacts = Field(
+        default_factory=TransactionPaperworkCanonicalDealFacts
+    )
+    question_packet: TransactionPaperworkQuestionPacket = Field(
+        default_factory=TransactionPaperworkQuestionPacket
+    )
+    intake_issues: list[TransactionPaperworkIntakeIssue] = Field(
+        default_factory=list
+    )
     operator_notes: list[str] = Field(default_factory=list)
 
 
