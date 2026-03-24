@@ -4,6 +4,7 @@ import { agentsService } from '../../services/agents';
 import type {
     AgentAuditLog,
     AgentRun,
+    EventStrategyReviewClusteredSource,
     EventStrategyReviewExecutionResult,
     EventStrategyReviewLatestResponse,
     EventStrategyReviewOutputMode,
@@ -11,6 +12,7 @@ import type {
     EventStrategyReviewPackageLatestResponse,
     EventStrategyReviewPackageRequest,
     EventStrategyReviewPerspectiveBlock,
+    EventStrategyReviewRetrievalMetadata,
     EventStrategyReviewReportResponse,
     EventStrategyReviewRunRequest,
     EventStrategyReviewSourceMode,
@@ -141,6 +143,92 @@ const humanizeEnum = (value: string) =>
         .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
         .join(' ');
 
+const joinList = (items: string[], fallback = 'none') => (items.length > 0 ? items.join(' | ') : fallback);
+
+const getRetrievalStateLabel = (metadata: EventStrategyReviewRetrievalMetadata) =>
+    humanizeEnum(metadata.retrieval_state);
+
+const getExecutionStateMessage = (executionResult: EventStrategyReviewExecutionResult) => {
+    switch (executionResult.execution_status) {
+        case 'retrieval_unavailable':
+            return 'No structured report was generated because controlled curated retrieval was unavailable for this run.';
+        case 'rate_limited':
+            return 'No structured report was generated because the constrained retrieval provider was rate limited for this run.';
+        case 'no_credible_sources':
+            return 'No structured report was generated because the curated retrieval results did not yield enough credible sources after trust filtering.';
+        case 'not_active_yet':
+            return executionResult.source_mode === 'curated_search_query'
+                ? 'Curated search query was accepted, but this run remained non-active and did not generate a structured report.'
+                : 'No structured report was generated for this run.';
+        default:
+            return 'No structured report was generated for this run.';
+    }
+};
+
+const summarizeTrustCoverage = (sources: EventStrategyReviewClusteredSource[]) => {
+    const counts = sources.reduce<Record<string, number>>((accumulator, source) => {
+        if (!source.trust_tier) {
+            return accumulator;
+        }
+        accumulator[source.trust_tier] = (accumulator[source.trust_tier] ?? 0) + 1;
+        return accumulator;
+    }, {});
+
+    const orderedTiers = [
+        'tier_1_primary',
+        'tier_2_reputable',
+        'tier_3_trade',
+        'untrusted',
+    ] as const;
+
+    const summary = orderedTiers
+        .filter((tier) => counts[tier] > 0)
+        .map((tier) => `${humanizeEnum(tier)}: ${counts[tier]}`);
+
+    return summary.length > 0 ? summary.join(' | ') : 'No trust-tier summary available.';
+};
+
+const renderSourceList = (sources: EventStrategyReviewClusteredSource[]) => {
+    if (sources.length === 0) {
+        return <div className="text-sm text-gray-500">No source citations recorded.</div>;
+    }
+
+    return (
+        <div className="space-y-3">
+            {sources.map((source, index) => (
+                <div
+                    key={`${source.url ?? source.title ?? source.source_label ?? 'source'}-${index}`}
+                    className="rounded border border-white/10 bg-black/10 p-3 space-y-1 text-sm"
+                >
+                    <div className="flex items-start justify-between gap-3">
+                        <div className="font-medium">{source.title || source.source_label || 'Source'}</div>
+                        {source.trust_tier && (
+                            <div className="rounded border border-white/10 bg-white/5 px-2 py-0.5 text-[11px] text-gray-200">
+                                {humanizeEnum(source.trust_tier)}
+                            </div>
+                        )}
+                    </div>
+                    <div className="text-xs text-gray-400">
+                        Domain: {source.source_domain || 'n/a'} · Publisher: {source.publisher || 'n/a'}
+                    </div>
+                    <div className="text-xs text-gray-400">
+                        Published: {formatTimestamp(source.published_at)} · Observed:{' '}
+                        {formatTimestamp(source.observed_at)}
+                    </div>
+                    {source.url && (
+                        <div className="text-xs text-sky-200 break-all">
+                            {source.url}
+                        </div>
+                    )}
+                    {source.notes.length > 0 && (
+                        <div className="text-xs text-gray-300">{source.notes.join(' | ')}</div>
+                    )}
+                </div>
+            ))}
+        </div>
+    );
+};
+
 const perspectiveEntries = (
     report: EventStrategyReviewReportResponse,
 ): Array<[string, EventStrategyReviewPerspectiveBlock]> => [
@@ -200,17 +288,67 @@ const renderReport = (executionResult: EventStrategyReviewExecutionResult | null
         return <div className="text-sm text-gray-500">No structured report available for this run.</div>;
     }
 
-    if (executionResult.execution_status === 'not_active_yet' || !executionResult.report) {
+    const retrievalMetadata = executionResult.execution_plan.retrieval_metadata;
+    const report = executionResult.report;
+
+    if (executionResult.execution_status !== 'report_generated' || !report) {
         return (
             <div className="border rounded p-3 bg-white/5 space-y-2 text-sm">
                 <div className="font-medium">Execution state: {humanizeEnum(executionResult.execution_status)}</div>
+                <div className="text-xs text-gray-400">
+                    Retrieval state: {getRetrievalStateLabel(retrievalMetadata)} · Execution path:{' '}
+                    {humanizeEnum(executionResult.execution_plan.execution_path)}
+                </div>
+                <div className="text-gray-300">{getExecutionStateMessage(executionResult)}</div>
                 {executionResult.inactive_reason && (
                     <div className="text-gray-300">{executionResult.inactive_reason}</div>
                 )}
-                <div className="text-xs text-gray-400">
-                    Source mode: {humanizeEnum(executionResult.source_mode)} · Execution path:{' '}
-                    {humanizeEnum(executionResult.execution_plan.execution_path)}
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    <div className="rounded border border-white/10 bg-black/10 p-3 space-y-1">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-gray-300">
+                            Retrieval Summary
+                        </div>
+                        <div>Raw candidates: {retrievalMetadata.raw_candidate_count} / {retrievalMetadata.raw_candidate_cap}</div>
+                        <div>Fetched sources: {retrievalMetadata.fetched_source_count} / {retrievalMetadata.fetched_source_cap}</div>
+                        <div>Independent sources: {retrievalMetadata.independent_source_count}</div>
+                    </div>
+                    <div className="rounded border border-white/10 bg-black/10 p-3 space-y-1">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-gray-300">
+                            Trust Policy
+                        </div>
+                        <div>Adapter: {retrievalMetadata.adapter_key || 'none'}</div>
+                        <div>
+                            Tier 1 / 2 support:{' '}
+                            {retrievalMetadata.has_tier_one_or_two_support ? 'present' : 'not present'}
+                        </div>
+                        <div>
+                            Allowed domains:{' '}
+                            {joinList(retrievalMetadata.allowed_domains_applied, retrievalMetadata.default_trusted_domain_policy_applied
+                                ? 'default trusted-domain policy'
+                                : 'none')}
+                        </div>
+                    </div>
+                    <div className="rounded border border-white/10 bg-black/10 p-3 space-y-1">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-gray-300">
+                            Source Mode
+                        </div>
+                        <div>{humanizeEnum(executionResult.source_mode)}</div>
+                        <div>Deduped sources: {executionResult.execution_plan.deduped_source_count}</div>
+                        <div>Duplicates collapsed: {executionResult.execution_plan.duplicate_source_count}</div>
+                    </div>
                 </div>
+                {retrievalMetadata.notes.length > 0 && (
+                    <div className="space-y-1">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-gray-300">
+                            Retrieval Notes
+                        </div>
+                        {retrievalMetadata.notes.map((note, index) => (
+                            <div key={`${note}-${index}`} className="text-xs text-gray-300">
+                                {note}
+                            </div>
+                        ))}
+                    </div>
+                )}
                 {executionResult.operator_notes.length > 0 && (
                     <div className="space-y-1">
                         {executionResult.operator_notes.map((note, index) => (
@@ -224,7 +362,6 @@ const renderReport = (executionResult: EventStrategyReviewExecutionResult | null
         );
     }
 
-    const report = executionResult.report;
     const scores = report.score_breakdown;
 
     return (
@@ -236,10 +373,26 @@ const renderReport = (executionResult: EventStrategyReviewExecutionResult | null
                     {humanizeEnum(executionResult.execution_plan.execution_path)}
                 </div>
                 <div className="text-xs text-gray-400">
+                    Execution status: {humanizeEnum(executionResult.execution_status)} · Retrieval state:{' '}
+                    {getRetrievalStateLabel(retrievalMetadata)}
+                </div>
+                <div className="text-xs text-gray-400">
                     Event cluster: {report.event_cluster.canonical_event_title}
                 </div>
                 <div className="text-gray-200">{report.event_cluster.canonical_summary}</div>
             </div>
+
+            {retrievalMetadata.retrieval_state === 'low_confidence_watchlist' && (
+                <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                    This report was generated from a low-confidence curated retrieval result and should be treated as watchlist-grade internal intelligence, not a strong confirmed event package.
+                </div>
+            )}
+
+            {retrievalMetadata.retrieval_state === 'successful_retrieval' && (
+                <div className="rounded border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-100">
+                    Controlled curated retrieval completed successfully and produced a structured report from the stored source cluster.
+                </div>
+            )}
 
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <div className="rounded border border-white/10 bg-black/10 p-3 space-y-1">
@@ -276,6 +429,7 @@ const renderReport = (executionResult: EventStrategyReviewExecutionResult | null
                     <div>Sources: {report.event_cluster.source_count}</div>
                     <div>Duplicates collapsed: {report.event_cluster.duplicate_count}</div>
                     <div>Cluster strength: {report.event_cluster.cluster_strength}</div>
+                    <div>Independent sources: {retrievalMetadata.independent_source_count}</div>
                 </div>
                 <div className="rounded border border-white/10 bg-black/10 p-3 space-y-1">
                     <div className="text-xs font-semibold uppercase tracking-wide text-gray-300">
@@ -286,6 +440,56 @@ const renderReport = (executionResult: EventStrategyReviewExecutionResult | null
                     <div>Business functions: {report.affected_entities.business_functions.join(' | ') || 'none'}</div>
                 </div>
             </div>
+
+            {(executionResult.source_mode === 'curated_search_query' ||
+                retrievalMetadata.retrieval_state !== 'not_requested') && (
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                    <div className="rounded border border-white/10 bg-black/10 p-3 space-y-1">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-gray-300">
+                            Retrieval Summary
+                        </div>
+                        <div>Adapter: {retrievalMetadata.adapter_key || 'none'}</div>
+                        <div>
+                            Raw candidates: {retrievalMetadata.raw_candidate_count} / {retrievalMetadata.raw_candidate_cap}
+                        </div>
+                        <div>
+                            Fetched sources: {retrievalMetadata.fetched_source_count} / {retrievalMetadata.fetched_source_cap}
+                        </div>
+                    </div>
+                    <div className="rounded border border-white/10 bg-black/10 p-3 space-y-1">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-gray-300">
+                            Trust Coverage
+                        </div>
+                        <div>
+                            Tier 1 / 2 support:{' '}
+                            {retrievalMetadata.has_tier_one_or_two_support ? 'present' : 'not present'}
+                        </div>
+                        <div className="text-xs text-gray-400">
+                            {summarizeTrustCoverage(report.event_cluster.sources)}
+                        </div>
+                    </div>
+                    <div className="rounded border border-white/10 bg-black/10 p-3 space-y-1">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-gray-300">
+                            Domain Policy
+                        </div>
+                        <div>
+                            {joinList(
+                                retrievalMetadata.allowed_domains_applied,
+                                retrievalMetadata.default_trusted_domain_policy_applied
+                                    ? 'Default trusted-domain policy'
+                                    : 'No explicit domains recorded',
+                            )}
+                        </div>
+                    </div>
+                    <div className="rounded border border-white/10 bg-black/10 p-3 space-y-1">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-gray-300">
+                            Deduping
+                        </div>
+                        <div>Deduped sources: {executionResult.execution_plan.deduped_source_count}</div>
+                        <div>Duplicates collapsed: {executionResult.execution_plan.duplicate_source_count}</div>
+                    </div>
+                </div>
+            )}
 
             {(report.event_cluster.taxonomy_tags.length > 0 || report.event_cluster.geography_tags.length > 0) && (
                 <div className="grid gap-3 md:grid-cols-2">
@@ -324,6 +528,26 @@ const renderReport = (executionResult: EventStrategyReviewExecutionResult | null
                     ))}
                 </div>
             )}
+
+            {(report.event_cluster.retrieval_notes.length > 0 || retrievalMetadata.notes.length > 0) && (
+                <div className="space-y-1">
+                    <div className="text-xs font-semibold uppercase tracking-wide text-gray-300">
+                        Retrieval Notes
+                    </div>
+                    {[...report.event_cluster.retrieval_notes, ...retrievalMetadata.notes].map((note, index) => (
+                        <div key={`${note}-${index}`} className="text-xs text-gray-300">
+                            {note}
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            <div className="space-y-2">
+                <div className="text-xs font-semibold uppercase tracking-wide text-gray-300">
+                    Citations / Source List
+                </div>
+                {renderSourceList(report.event_cluster.sources)}
+            </div>
 
             <div className="space-y-2">
                 <div className="text-xs font-semibold uppercase tracking-wide text-gray-300">
@@ -617,7 +841,7 @@ const EventStrategyReviewPanel = () => {
         const baseRequest: EventStrategyReviewRunRequest = {
             retrieval_contract: {
                 source_mode: sourceMode,
-                live_retrieval_enabled: false,
+                live_retrieval_enabled: sourceMode === 'curated_search_query',
             },
             operator_notes: operatorNotes.trim() || null,
             topic_hints: parseTextList(topicHintsText),
@@ -663,7 +887,7 @@ const EventStrategyReviewPanel = () => {
             geography_hint: geoFocus[0] || undefined,
             topic_hints: parseTextList(topicHintsText),
             allowed_domains: [],
-            max_results: 10,
+            max_results: 8,
         };
         return baseRequest;
     };
@@ -714,7 +938,6 @@ const EventStrategyReviewPanel = () => {
         }
     };
 
-    const latestReport = latest.result?.report ?? null;
     const selectedRun = runs.find((run) => run.id === selectedRunId) ?? null;
     const selectedOutputModeOptions =
         selectedReport?.report?.output_mode_options.length
@@ -759,7 +982,7 @@ const EventStrategyReviewPanel = () => {
                 <div>
                     <h2 className="text-lg font-medium">Event Strategy Review</h2>
                     <p className="text-sm text-gray-400">
-                        Internal event-driven strategy review only. Manual trigger, manual refresh, no live retrieval, no publishing.
+                        Internal event-driven strategy review only. Manual trigger, manual refresh, controlled curated-query retrieval only, no auto-send, no publishing.
                     </p>
                 </div>
                 <button
@@ -782,7 +1005,7 @@ const EventStrategyReviewPanel = () => {
                     <div className="space-y-2">
                         <div className="text-sm font-medium">Manual Event Intake</div>
                         <div className="text-xs text-gray-400">
-                            Use manual summary or manual URL bundle for active execution. Curated search query is accepted but remains non-active until live retrieval is approved later.
+                            Use manual summary or manual URL bundle for direct internal analysis. Curated search query uses the controlled retrieval path when available and fails soft when retrieval is unavailable or low-confidence.
                         </div>
                     </div>
 
@@ -893,7 +1116,7 @@ const EventStrategyReviewPanel = () => {
                     {sourceMode === 'curated_search_query' && (
                         <div className="space-y-3">
                             <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
-                                Curated search query is accepted by the contract but live retrieval is not active in this phase. Submitting it records a non-active run with clear status.
+                                Curated search query uses the controlled retrieval path in this phase. If provider access is unavailable, rate limited, or no credible sources survive filtering, the run fails soft with a clear stored state instead of faking a report.
                             </div>
                             <label className="space-y-1">
                                 <span className="text-xs font-semibold uppercase tracking-wide text-gray-300">
@@ -936,7 +1159,7 @@ const EventStrategyReviewPanel = () => {
 
                     <div className="flex items-center justify-between gap-3">
                         <div className="text-xs text-gray-400">
-                            Manual trigger only. No live retrieval, no auto-send, no hidden automation.
+                            Manual trigger only. Curated query retrieval is controlled and capped. No auto-send, no hidden automation.
                         </div>
                         <button
                             onClick={handleRunOnce}
@@ -967,6 +1190,14 @@ const EventStrategyReviewPanel = () => {
                                 <div className="text-xs text-gray-400">
                                     Execution: {humanizeEnum(latest.result?.execution_status || 'not_active_yet')}
                                 </div>
+                                {latest.result && (
+                                    <div className="text-xs text-gray-400">
+                                        Retrieval:{' '}
+                                        {getRetrievalStateLabel(
+                                            latest.result.execution_plan.retrieval_metadata,
+                                        )}
+                                    </div>
+                                )}
                                 {latest.result?.report && (
                                     <>
                                         <div className="text-gray-200">
@@ -989,10 +1220,10 @@ const EventStrategyReviewPanel = () => {
                                 )}
                             </div>
 
-                            {latestReport ? (
+                            {latest.result ? (
                                 <div className="space-y-2">
                                     <div className="text-xs font-semibold uppercase tracking-wide text-gray-300">
-                                        Latest Structured Report
+                                        Latest Result Detail
                                     </div>
                                     {renderReport(latest.result)}
                                 </div>
@@ -1122,7 +1353,9 @@ const EventStrategyReviewPanel = () => {
 
                         {!canPackageSelectedRun && selectedRunId !== null && (
                             <div className="text-xs text-gray-400">
-                                Packaging stays disabled until the selected run has a stored structured report with `report_generated` status.
+                                {selectedReport && !selectedReport.report
+                                    ? `Packaging is blocked because this run does not have a stored structured report (${humanizeEnum(selectedReport.execution_status)}).`
+                                    : 'Packaging stays disabled until the selected run has a stored structured report with `report_generated` status.'}
                             </div>
                         )}
 

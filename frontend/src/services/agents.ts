@@ -594,13 +594,31 @@ export type EventStrategyReviewImportance =
     | 'noise'
     | 'watchlist'
     | 'strategy_review_required';
+export type EventStrategyReviewSourceTrustTier =
+    | 'tier_1_primary'
+    | 'tier_2_reputable'
+    | 'tier_3_trade'
+    | 'untrusted';
 export type EventStrategyReviewPerspectiveStatus = 'active' | 'placeholder' | 'skipped';
 export type EventStrategyReviewExecutionMode = 'internal_review_only_non_executable';
 export type EventStrategyReviewExecutionPath =
     | 'manual_summary_internal_report'
     | 'manual_url_bundle_internal_report'
-    | 'curated_search_query_not_active_yet';
-export type EventStrategyReviewExecutionStatus = 'report_generated' | 'not_active_yet';
+    | 'curated_search_query_not_active_yet'
+    | 'curated_search_query_constrained_retrieval';
+export type EventStrategyReviewExecutionStatus =
+    | 'report_generated'
+    | 'not_active_yet'
+    | 'retrieval_unavailable'
+    | 'rate_limited'
+    | 'no_credible_sources';
+export type EventStrategyReviewRetrievalState =
+    | 'not_requested'
+    | 'retrieval_unavailable'
+    | 'rate_limited'
+    | 'no_credible_sources'
+    | 'low_confidence_watchlist'
+    | 'successful_retrieval';
 export type EventStrategyReviewOutputMode =
     | 'internal_report_only'
     | 'html_report_package'
@@ -660,8 +678,11 @@ export interface EventStrategyReviewClusteredSource {
     source_kind: EventStrategyReviewSourceMode;
     title?: string | null;
     url?: string | null;
+    source_domain?: string | null;
     publisher?: string | null;
     published_at?: string | null;
+    observed_at?: string | null;
+    trust_tier?: EventStrategyReviewSourceTrustTier | null;
     source_label?: string | null;
     notes: string[];
 }
@@ -729,6 +750,20 @@ export interface EventStrategyReviewExecutionPolicy {
     can_auto_deploy: boolean;
 }
 
+export interface EventStrategyReviewRetrievalMetadata {
+    retrieval_state: EventStrategyReviewRetrievalState;
+    adapter_key: string;
+    raw_candidate_cap: number;
+    raw_candidate_count: number;
+    fetched_source_cap: number;
+    fetched_source_count: number;
+    independent_source_count: number;
+    allowed_domains_applied: string[];
+    default_trusted_domain_policy_applied: boolean;
+    has_tier_one_or_two_support: boolean;
+    notes: string[];
+}
+
 export interface EventStrategyReviewExecutionPlan {
     source_mode: EventStrategyReviewSourceMode;
     execution_path: EventStrategyReviewExecutionPath;
@@ -736,6 +771,7 @@ export interface EventStrategyReviewExecutionPlan {
     live_retrieval_enabled: boolean;
     deduped_source_count: number;
     duplicate_source_count: number;
+    retrieval_metadata: EventStrategyReviewRetrievalMetadata;
     operator_notes: string[];
 }
 
@@ -1718,8 +1754,17 @@ const normalizeEventStrategyReviewClusteredSource = (
                 : 'curated_search_query',
         title: typeof value?.title === 'string' ? value.title : null,
         url: typeof value?.url === 'string' ? value.url : null,
+        source_domain: typeof value?.source_domain === 'string' ? value.source_domain : null,
         publisher: typeof value?.publisher === 'string' ? value.publisher : null,
         published_at: typeof value?.published_at === 'string' ? value.published_at : null,
+        observed_at: typeof value?.observed_at === 'string' ? value.observed_at : null,
+        trust_tier:
+            value?.trust_tier === 'tier_1_primary' ||
+            value?.trust_tier === 'tier_2_reputable' ||
+            value?.trust_tier === 'tier_3_trade' ||
+            value?.trust_tier === 'untrusted'
+                ? value.trust_tier
+                : null,
         source_label: typeof value?.source_label === 'string' ? value.source_label : null,
         notes: ensureArray<string>(value?.notes),
     };
@@ -1831,6 +1876,39 @@ const normalizeEventStrategyReviewExecutionPolicy = (
     };
 };
 
+const normalizeEventStrategyReviewRetrievalMetadata = (
+    value: Partial<EventStrategyReviewRetrievalMetadata> | null | undefined,
+): EventStrategyReviewRetrievalMetadata => {
+    return {
+        retrieval_state:
+            value?.retrieval_state === 'retrieval_unavailable' ||
+            value?.retrieval_state === 'rate_limited' ||
+            value?.retrieval_state === 'no_credible_sources' ||
+            value?.retrieval_state === 'low_confidence_watchlist' ||
+            value?.retrieval_state === 'successful_retrieval'
+                ? value.retrieval_state
+                : 'not_requested',
+        adapter_key: typeof value?.adapter_key === 'string' ? value.adapter_key : 'none',
+        raw_candidate_cap:
+            typeof value?.raw_candidate_cap === 'number' ? value.raw_candidate_cap : 8,
+        raw_candidate_count:
+            typeof value?.raw_candidate_count === 'number' ? value.raw_candidate_count : 0,
+        fetched_source_cap:
+            typeof value?.fetched_source_cap === 'number' ? value.fetched_source_cap : 3,
+        fetched_source_count:
+            typeof value?.fetched_source_count === 'number' ? value.fetched_source_count : 0,
+        independent_source_count:
+            typeof value?.independent_source_count === 'number'
+                ? value.independent_source_count
+                : 0,
+        allowed_domains_applied: ensureArray<string>(value?.allowed_domains_applied),
+        default_trusted_domain_policy_applied:
+            value?.default_trusted_domain_policy_applied === true,
+        has_tier_one_or_two_support: value?.has_tier_one_or_two_support === true,
+        notes: ensureArray<string>(value?.notes),
+    };
+};
+
 const normalizeEventStrategyReviewExecutionPlan = (
     value: Partial<EventStrategyReviewExecutionPlan> | null | undefined,
 ): EventStrategyReviewExecutionPlan => {
@@ -1842,7 +1920,8 @@ const normalizeEventStrategyReviewExecutionPlan = (
                 : 'curated_search_query',
         execution_path:
             value?.execution_path === 'manual_summary_internal_report' ||
-            value?.execution_path === 'manual_url_bundle_internal_report'
+            value?.execution_path === 'manual_url_bundle_internal_report' ||
+            value?.execution_path === 'curated_search_query_constrained_retrieval'
                 ? value.execution_path
                 : 'curated_search_query_not_active_yet',
         accepted_for_execution: value?.accepted_for_execution === true,
@@ -1853,6 +1932,9 @@ const normalizeEventStrategyReviewExecutionPlan = (
             typeof value?.duplicate_source_count === 'number'
                 ? value.duplicate_source_count
                 : 0,
+        retrieval_metadata: normalizeEventStrategyReviewRetrievalMetadata(
+            value?.retrieval_metadata,
+        ),
         operator_notes: ensureArray<string>(value?.operator_notes),
     };
 };
@@ -1938,7 +2020,12 @@ const normalizeEventStrategyReviewExecutionResult = (
                 ? value.source_mode
                 : 'curated_search_query',
         execution_status:
-            value?.execution_status === 'report_generated' ? 'report_generated' : 'not_active_yet',
+            value?.execution_status === 'report_generated' ||
+            value?.execution_status === 'retrieval_unavailable' ||
+            value?.execution_status === 'rate_limited' ||
+            value?.execution_status === 'no_credible_sources'
+                ? value.execution_status
+                : 'not_active_yet',
         execution_plan: normalizeEventStrategyReviewExecutionPlan(value.execution_plan),
         report: normalizeEventStrategyReviewReport(value.report),
         inactive_reason:
