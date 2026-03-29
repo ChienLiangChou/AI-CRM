@@ -251,6 +251,176 @@ export interface BuyerMatchLatestResponse {
     result: BuyerMatchResultResponse | null;
 }
 
+export type ListingAlertExecutionMode = 'manual' | 'automatic';
+export type ListingAlertMarketType = 'sale' | 'rent' | 'unknown';
+export type ListingAlertRepresentationIntent =
+    | 'buyer_purchase'
+    | 'renter_representation';
+export type ListingAlertExecutionStatus =
+    | 'packet_ready'
+    | 'blocked_no_candidates'
+    | 'blocked_no_client_match'
+    | 'blocked_ambiguous_client_match'
+    | 'blocked_ambiguous_intent'
+    | 'blocked_intent_mismatch';
+export type ListingAlertReviewOutcome = 'waiting_approval' | 'completed_no_draft';
+export type ListingAlertAssociationMethod =
+    | 'expected_contact_id'
+    | 'explicit_mapping'
+    | 'deterministic_metadata'
+    | 'heuristic_fallback'
+    | 'blocked';
+export type ListingAlertAssociationStatus =
+    | 'matched'
+    | 'blocked_no_match'
+    | 'blocked_ambiguous'
+    | 'blocked_ambiguous_intent'
+    | 'blocked_intent_mismatch';
+
+export interface ListingAlertGmailMessageInput {
+    message_id: string;
+    thread_id: string;
+    received_at?: string | null;
+    subject: string;
+    from_address?: string | null;
+    to_addresses: string[];
+    cc_addresses: string[];
+    label_ids: string[];
+    snippet?: string | null;
+    plain_text_body?: string | null;
+    html_body?: string | null;
+    attachment_names: string[];
+}
+
+export interface ListingAlertRunRequest {
+    execution_mode?: ListingAlertExecutionMode;
+    gmail_alert: ListingAlertGmailMessageInput;
+    expected_contact_id?: number | null;
+    operator_notes?: string | null;
+    manual_reasoning_surface?: string | null;
+}
+
+export interface ListingAlertNormalizedListing {
+    listing_ref: string;
+    address: string;
+    price?: number | null;
+    market_type: ListingAlertMarketType;
+    property_type?: string | null;
+    bedrooms?: number | null;
+    bathrooms?: number | null;
+    neighborhood?: string | null;
+    listing_url?: string | null;
+    source_excerpt: string;
+    match_notes: string[];
+}
+
+export interface ListingAlertClientAssociationResponse {
+    status: ListingAlertAssociationStatus;
+    method: ListingAlertAssociationMethod;
+    contact_id?: number | null;
+    contact_name?: string | null;
+    representation_intent?: ListingAlertRepresentationIntent | null;
+    confidence?: number | null;
+    matched_on: string[];
+    blocked_reason?: string | null;
+    candidate_contact_ids: number[];
+}
+
+export interface ListingAlertManualReviewPacket {
+    packet_version: string;
+    workflow_mode: 'manual';
+    manual_reasoning_surface: string;
+    source_message: ListingAlertGmailMessageInput;
+    association: ListingAlertClientAssociationResponse;
+    contact_context: Record<string, unknown>;
+    comparison_frame: Record<string, unknown>;
+    extracted_listing_count: number;
+    extracted_listings: ListingAlertNormalizedListing[];
+    shortlist_cap: number;
+    draft_output_cap: number;
+    draft_constraints: string[];
+    recommended_prompt_context: string[];
+    return_contract: Record<string, unknown>;
+}
+
+export interface ListingAlertManualPacketResultResponse {
+    execution_status: ListingAlertExecutionStatus;
+    association: ListingAlertClientAssociationResponse;
+    extracted_listings: ListingAlertNormalizedListing[];
+    manual_review_packet?: ListingAlertManualReviewPacket | null;
+    risk_flags: string[];
+    operator_notes: string[];
+}
+
+export interface ListingAlertReviewedShortlistSubmissionItem {
+    listing_ref: string;
+    rank: number;
+    why_selected: string[];
+}
+
+export interface ListingAlertClientDraftSubmissionItem {
+    variant?: string;
+    subject: string;
+    body: string;
+}
+
+export interface ListingAlertManualReviewSubmissionRequest {
+    source_run_id: number;
+    shortlisted_listings: ListingAlertReviewedShortlistSubmissionItem[];
+    tradeoff_notes: string[];
+    recommendation_reasoning: string;
+    client_facing_drafts: ListingAlertClientDraftSubmissionItem[];
+    operator_notes: string[];
+}
+
+export interface ListingAlertReviewedShortlistResultItem {
+    listing_ref: string;
+    address: string;
+    rank: number;
+    why_selected: string[];
+}
+
+export interface ListingAlertClientDraftResultItem {
+    variant: string;
+    subject: string;
+    body: string;
+    approval_id?: number | null;
+}
+
+export interface ListingAlertReviewedSubmissionResultResponse {
+    source_run_id: number;
+    source_task_id: number;
+    packet_version: string;
+    association: ListingAlertClientAssociationResponse;
+    review_outcome: ListingAlertReviewOutcome;
+    shortlisted_listings: ListingAlertReviewedShortlistResultItem[];
+    tradeoff_notes: string[];
+    recommendation_reasoning: string;
+    client_facing_drafts: ListingAlertClientDraftResultItem[];
+    risk_flags: string[];
+    operator_notes: string[];
+}
+
+export type ListingAlertRecommendationStoredResult =
+    | ListingAlertManualPacketResultResponse
+    | ListingAlertReviewedSubmissionResultResponse;
+
+export interface ListingAlertRecommendationLatestResponse {
+    run_id: number | null;
+    status: string | null;
+    error: string | null;
+    result: ListingAlertRecommendationStoredResult | null;
+}
+
+export interface ListingAlertRecommendationRunReportResponse {
+    run_id: number;
+    task_id: number;
+    status: string;
+    summary?: string | null;
+    error?: string | null;
+    result: ListingAlertRecommendationStoredResult | null;
+}
+
 export type MlsAuthProviderKey = 'stratus_authenticated';
 export type MlsAuthState =
     | 'available'
@@ -956,6 +1126,10 @@ const ensureArray = <T>(value: unknown): T[] => {
     return Array.isArray(value) ? (value as T[]) : [];
 };
 
+const isRecord = (value: unknown): value is Record<string, unknown> => {
+    return typeof value === 'object' && value !== null;
+};
+
 const normalizeFollowUpResponse = (
     value: Partial<FollowUpRecommendationsResponse> | null | undefined,
 ): FollowUpRecommendationsResponse => {
@@ -1172,6 +1346,255 @@ const normalizeBuyerMatchLatest = (
         status: typeof value?.status === 'string' ? value.status : null,
         error: typeof value?.error === 'string' ? value.error : null,
         result: normalizeBuyerMatchResult(value?.result),
+    };
+};
+
+const normalizeListingAlertMessage = (
+    value: Partial<ListingAlertGmailMessageInput> | null | undefined,
+): ListingAlertGmailMessageInput => {
+    return {
+        message_id: typeof value?.message_id === 'string' ? value.message_id : '',
+        thread_id: typeof value?.thread_id === 'string' ? value.thread_id : '',
+        received_at: typeof value?.received_at === 'string' ? value.received_at : null,
+        subject: typeof value?.subject === 'string' ? value.subject : '',
+        from_address:
+            typeof value?.from_address === 'string' ? value.from_address : null,
+        to_addresses: ensureArray<string>(value?.to_addresses),
+        cc_addresses: ensureArray<string>(value?.cc_addresses),
+        label_ids: ensureArray<string>(value?.label_ids),
+        snippet: typeof value?.snippet === 'string' ? value.snippet : null,
+        plain_text_body:
+            typeof value?.plain_text_body === 'string' ? value.plain_text_body : null,
+        html_body: typeof value?.html_body === 'string' ? value.html_body : null,
+        attachment_names: ensureArray<string>(value?.attachment_names),
+    };
+};
+
+const normalizeListingAlertAssociation = (
+    value: Partial<ListingAlertClientAssociationResponse> | null | undefined,
+): ListingAlertClientAssociationResponse => {
+    return {
+        status:
+            value?.status === 'matched' ||
+            value?.status === 'blocked_no_match' ||
+            value?.status === 'blocked_ambiguous' ||
+            value?.status === 'blocked_ambiguous_intent' ||
+            value?.status === 'blocked_intent_mismatch'
+                ? value.status
+                : 'blocked_no_match',
+        method:
+            value?.method === 'expected_contact_id' ||
+            value?.method === 'explicit_mapping' ||
+            value?.method === 'deterministic_metadata' ||
+            value?.method === 'heuristic_fallback'
+                ? value.method
+                : 'blocked',
+        contact_id: typeof value?.contact_id === 'number' ? value.contact_id : null,
+        contact_name:
+            typeof value?.contact_name === 'string' ? value.contact_name : null,
+        representation_intent:
+            value?.representation_intent === 'buyer_purchase' ||
+            value?.representation_intent === 'renter_representation'
+                ? value.representation_intent
+                : null,
+        confidence: typeof value?.confidence === 'number' ? value.confidence : null,
+        matched_on: ensureArray<string>(value?.matched_on),
+        blocked_reason:
+            typeof value?.blocked_reason === 'string' ? value.blocked_reason : null,
+        candidate_contact_ids: ensureArray<number>(value?.candidate_contact_ids).filter(
+            (item) => typeof item === 'number',
+        ),
+    };
+};
+
+const normalizeListingAlertNormalizedListing = (
+    value: Partial<ListingAlertNormalizedListing> | null | undefined,
+): ListingAlertNormalizedListing => {
+    return {
+        listing_ref: typeof value?.listing_ref === 'string' ? value.listing_ref : '',
+        address: typeof value?.address === 'string' ? value.address : '',
+        price: typeof value?.price === 'number' ? value.price : null,
+        market_type:
+            value?.market_type === 'sale' ||
+            value?.market_type === 'rent' ||
+            value?.market_type === 'unknown'
+                ? value.market_type
+                : 'unknown',
+        property_type:
+            typeof value?.property_type === 'string' ? value.property_type : null,
+        bedrooms: typeof value?.bedrooms === 'number' ? value.bedrooms : null,
+        bathrooms: typeof value?.bathrooms === 'number' ? value.bathrooms : null,
+        neighborhood:
+            typeof value?.neighborhood === 'string' ? value.neighborhood : null,
+        listing_url:
+            typeof value?.listing_url === 'string' ? value.listing_url : null,
+        source_excerpt:
+            typeof value?.source_excerpt === 'string' ? value.source_excerpt : '',
+        match_notes: ensureArray<string>(value?.match_notes),
+    };
+};
+
+const normalizeListingAlertManualReviewPacket = (
+    value: Partial<ListingAlertManualReviewPacket> | null | undefined,
+): ListingAlertManualReviewPacket | null => {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    return {
+        packet_version:
+            typeof value.packet_version === 'string'
+                ? value.packet_version
+                : 'listing_alert_manual_review_v1',
+        workflow_mode: 'manual',
+        manual_reasoning_surface:
+            typeof value.manual_reasoning_surface === 'string'
+                ? value.manual_reasoning_surface
+                : 'chatgpt_pro_gpt_5_4',
+        source_message: normalizeListingAlertMessage(value.source_message),
+        association: normalizeListingAlertAssociation(value.association),
+        contact_context: isRecord(value.contact_context) ? value.contact_context : {},
+        comparison_frame: isRecord(value.comparison_frame) ? value.comparison_frame : {},
+        extracted_listing_count:
+            typeof value.extracted_listing_count === 'number'
+                ? value.extracted_listing_count
+                : 0,
+        extracted_listings: ensureArray<Partial<ListingAlertNormalizedListing>>(
+            value.extracted_listings,
+        ).map(normalizeListingAlertNormalizedListing),
+        shortlist_cap: typeof value.shortlist_cap === 'number' ? value.shortlist_cap : 3,
+        draft_output_cap:
+            typeof value.draft_output_cap === 'number' ? value.draft_output_cap : 1,
+        draft_constraints: ensureArray<string>(value.draft_constraints),
+        recommended_prompt_context: ensureArray<string>(value.recommended_prompt_context),
+        return_contract: isRecord(value.return_contract) ? value.return_contract : {},
+    };
+};
+
+const normalizeListingAlertManualPacketResult = (
+    value: Partial<ListingAlertManualPacketResultResponse> | null | undefined,
+): ListingAlertManualPacketResultResponse | null => {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    return {
+        execution_status:
+            value.execution_status === 'packet_ready' ||
+            value.execution_status === 'blocked_no_candidates' ||
+            value.execution_status === 'blocked_no_client_match' ||
+            value.execution_status === 'blocked_ambiguous_client_match' ||
+            value.execution_status === 'blocked_ambiguous_intent' ||
+            value.execution_status === 'blocked_intent_mismatch'
+                ? value.execution_status
+                : 'blocked_no_client_match',
+        association: normalizeListingAlertAssociation(value.association),
+        extracted_listings: ensureArray<Partial<ListingAlertNormalizedListing>>(
+            value.extracted_listings,
+        ).map(normalizeListingAlertNormalizedListing),
+        manual_review_packet: normalizeListingAlertManualReviewPacket(
+            value.manual_review_packet,
+        ),
+        risk_flags: ensureArray<string>(value.risk_flags),
+        operator_notes: ensureArray<string>(value.operator_notes),
+    };
+};
+
+const normalizeListingAlertReviewedShortlistResultItem = (
+    value: Partial<ListingAlertReviewedShortlistResultItem> | null | undefined,
+): ListingAlertReviewedShortlistResultItem => {
+    return {
+        listing_ref: typeof value?.listing_ref === 'string' ? value.listing_ref : '',
+        address: typeof value?.address === 'string' ? value.address : '',
+        rank: typeof value?.rank === 'number' ? value.rank : 0,
+        why_selected: ensureArray<string>(value?.why_selected),
+    };
+};
+
+const normalizeListingAlertClientDraftResultItem = (
+    value: Partial<ListingAlertClientDraftResultItem> | null | undefined,
+): ListingAlertClientDraftResultItem => {
+    return {
+        variant: typeof value?.variant === 'string' ? value.variant : 'shortlist_summary',
+        subject: typeof value?.subject === 'string' ? value.subject : '',
+        body: typeof value?.body === 'string' ? value.body : '',
+        approval_id: typeof value?.approval_id === 'number' ? value.approval_id : null,
+    };
+};
+
+const normalizeListingAlertReviewedSubmissionResult = (
+    value: Partial<ListingAlertReviewedSubmissionResultResponse> | null | undefined,
+): ListingAlertReviewedSubmissionResultResponse | null => {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    return {
+        source_run_id: typeof value.source_run_id === 'number' ? value.source_run_id : 0,
+        source_task_id:
+            typeof value.source_task_id === 'number' ? value.source_task_id : 0,
+        packet_version:
+            typeof value.packet_version === 'string' ? value.packet_version : '',
+        association: normalizeListingAlertAssociation(value.association),
+        review_outcome:
+            value.review_outcome === 'waiting_approval'
+                ? 'waiting_approval'
+                : 'completed_no_draft',
+        shortlisted_listings: ensureArray<Partial<ListingAlertReviewedShortlistResultItem>>(
+            value.shortlisted_listings,
+        ).map(normalizeListingAlertReviewedShortlistResultItem),
+        tradeoff_notes: ensureArray<string>(value.tradeoff_notes),
+        recommendation_reasoning:
+            typeof value.recommendation_reasoning === 'string'
+                ? value.recommendation_reasoning
+                : '',
+        client_facing_drafts: ensureArray<Partial<ListingAlertClientDraftResultItem>>(
+            value.client_facing_drafts,
+        ).map(normalizeListingAlertClientDraftResultItem),
+        risk_flags: ensureArray<string>(value.risk_flags),
+        operator_notes: ensureArray<string>(value.operator_notes),
+    };
+};
+
+const normalizeListingAlertStoredResult = (
+    value: Partial<ListingAlertRecommendationStoredResult> | null | undefined,
+): ListingAlertRecommendationStoredResult | null => {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    if ('execution_status' in value) {
+        return normalizeListingAlertManualPacketResult(value);
+    }
+
+    if ('review_outcome' in value) {
+        return normalizeListingAlertReviewedSubmissionResult(value);
+    }
+
+    return null;
+};
+
+const normalizeListingAlertLatest = (
+    value: Partial<ListingAlertRecommendationLatestResponse> | null | undefined,
+): ListingAlertRecommendationLatestResponse => {
+    return {
+        run_id: typeof value?.run_id === 'number' ? value.run_id : null,
+        status: typeof value?.status === 'string' ? value.status : null,
+        error: typeof value?.error === 'string' ? value.error : null,
+        result: normalizeListingAlertStoredResult(value?.result),
+    };
+};
+
+const normalizeListingAlertRunReport = (
+    value: Partial<ListingAlertRecommendationRunReportResponse> | null | undefined,
+): ListingAlertRecommendationRunReportResponse => {
+    return {
+        run_id: typeof value?.run_id === 'number' ? value.run_id : 0,
+        task_id: typeof value?.task_id === 'number' ? value.task_id : 0,
+        status: typeof value?.status === 'string' ? value.status : 'failed',
+        summary: typeof value?.summary === 'string' ? value.summary : null,
+        error: typeof value?.error === 'string' ? value.error : null,
+        result: normalizeListingAlertStoredResult(value?.result),
     };
 };
 
@@ -2416,6 +2839,79 @@ export const agentsService = {
             },
         );
         return ensureArray<AgentAuditLog>(res.data);
+    },
+
+    prepareListingAlertManualPacket: async (
+        payload: ListingAlertRunRequest,
+    ): Promise<AgentRun> => {
+        const res = await api.post<AgentRun>(
+            '/agents/listing-alert-recommendation/prepare-manual-packet',
+            payload,
+        );
+        return res.data;
+    },
+
+    submitListingAlertManualReview: async (
+        payload: ListingAlertManualReviewSubmissionRequest,
+    ): Promise<AgentRun> => {
+        const res = await api.post<AgentRun>(
+            '/agents/listing-alert-recommendation/submit-manual-review',
+            payload,
+        );
+        return res.data;
+    },
+
+    getListingAlertRecommendationRuns: async (limit = 20): Promise<AgentRun[]> => {
+        const res = await api.get<AgentRun[]>('/agents/listing-alert-recommendation/runs', {
+            params: { limit },
+        });
+        return ensureArray<AgentRun>(res.data);
+    },
+
+    getLatestListingAlertRecommendationResult: async (): Promise<ListingAlertRecommendationLatestResponse> => {
+        const res = await api.get<ListingAlertRecommendationLatestResponse>(
+            '/agents/listing-alert-recommendation/latest',
+        );
+        return normalizeListingAlertLatest(res.data);
+    },
+
+    getListingAlertRecommendationRunReport: async (
+        runId: number,
+    ): Promise<ListingAlertRecommendationRunReportResponse> => {
+        const res = await api.get<ListingAlertRecommendationRunReportResponse>(
+            `/agents/listing-alert-recommendation/runs/${runId}/report`,
+        );
+        return normalizeListingAlertRunReport(res.data);
+    },
+
+    getListingAlertRecommendationRunAuditLogs: async (
+        runId: number,
+        limit = 100,
+    ): Promise<AgentAuditLog[]> => {
+        const res = await api.get<AgentAuditLog[]>(
+            `/agents/listing-alert-recommendation/runs/${runId}/audit-logs`,
+            {
+                params: { limit },
+            },
+        );
+        return ensureArray<AgentAuditLog>(res.data);
+    },
+
+    getListingAlertRecommendationPendingApprovals: async (): Promise<AgentApproval[]> => {
+        const res = await api.get<AgentApproval[]>('/agents/listing-alert-recommendation/approvals');
+        return ensureArray<AgentApproval>(res.data);
+    },
+
+    getListingAlertRecommendationApprovalHistory: async (
+        limit = 20,
+    ): Promise<AgentApproval[]> => {
+        const res = await api.get<AgentApproval[]>(
+            '/agents/listing-alert-recommendation/approvals/history',
+            {
+                params: { limit },
+            },
+        );
+        return ensureArray<AgentApproval>(res.data);
     },
 
     startMlsAuthAttempt: async (

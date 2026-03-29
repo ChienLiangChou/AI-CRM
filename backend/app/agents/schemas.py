@@ -9,6 +9,7 @@ AgentType = Literal[
     "conversation_closer",
     "listing_cma",
     "buyer_match",
+    "listing_alert_recommendation",
     "strategy_coordination",
     "daily_market_scan",
     "mls_auth",
@@ -335,6 +336,197 @@ class BuyerMatchLatestResponse(BaseModel):
     status: Optional[RunStatus] = None
     error: Optional[str] = None
     result: Optional[BuyerMatchResultResponse] = None
+
+
+ListingAlertExecutionMode = Literal["manual", "automatic"]
+ListingAlertMarketType = Literal["sale", "rent", "unknown"]
+ListingAlertRepresentationIntent = Literal[
+    "buyer_purchase",
+    "renter_representation",
+]
+ListingAlertExecutionStatus = Literal[
+    "packet_ready",
+    "blocked_no_candidates",
+    "blocked_no_client_match",
+    "blocked_ambiguous_client_match",
+    "blocked_ambiguous_intent",
+    "blocked_intent_mismatch",
+]
+ListingAlertReviewOutcome = Literal[
+    "waiting_approval",
+    "completed_no_draft",
+]
+ListingAlertAssociationMethod = Literal[
+    "expected_contact_id",
+    "explicit_mapping",
+    "deterministic_metadata",
+    "heuristic_fallback",
+    "blocked",
+]
+ListingAlertAssociationStatus = Literal[
+    "matched",
+    "blocked_no_match",
+    "blocked_ambiguous",
+    "blocked_ambiguous_intent",
+    "blocked_intent_mismatch",
+]
+
+
+class ListingAlertGmailMessageInput(BaseModel):
+    message_id: str
+    thread_id: str
+    received_at: Optional[datetime] = None
+    subject: str
+    from_address: Optional[str] = None
+    to_addresses: list[str] = []
+    cc_addresses: list[str] = []
+    label_ids: list[str] = []
+    snippet: Optional[str] = None
+    plain_text_body: Optional[str] = None
+    html_body: Optional[str] = None
+    attachment_names: list[str] = []
+
+
+class ListingAlertExplicitContactMappingInput(BaseModel):
+    contact_id: int
+    representation_intent: Optional[ListingAlertRepresentationIntent] = None
+    recipient_address: Optional[str] = None
+    sender_address: Optional[str] = None
+    subject_contains: Optional[str] = None
+    label_id: Optional[str] = None
+
+
+class ListingAlertRunRequest(BaseModel):
+    execution_mode: ListingAlertExecutionMode = "manual"
+    gmail_alert: ListingAlertGmailMessageInput
+    expected_contact_id: Optional[int] = None
+    explicit_contact_mappings: list[ListingAlertExplicitContactMappingInput] = []
+    operator_notes: Optional[str] = None
+    provider_strategy: Optional[dict[str, Any]] = None
+    manual_reasoning_surface: Optional[str] = "chatgpt_pro_gpt_5_4"
+
+
+class ListingAlertNormalizedListing(BaseModel):
+    listing_ref: str
+    address: str
+    price: Optional[float] = None
+    market_type: ListingAlertMarketType = "unknown"
+    property_type: Optional[str] = None
+    bedrooms: Optional[float] = None
+    bathrooms: Optional[float] = None
+    neighborhood: Optional[str] = None
+    listing_url: Optional[str] = None
+    source_excerpt: str
+    match_notes: list[str] = []
+
+
+class ListingAlertClientAssociationResponse(BaseModel):
+    status: ListingAlertAssociationStatus
+    method: ListingAlertAssociationMethod = "blocked"
+    contact_id: Optional[int] = None
+    contact_name: Optional[str] = None
+    representation_intent: Optional[ListingAlertRepresentationIntent] = None
+    confidence: Optional[float] = None
+    matched_on: list[str] = []
+    blocked_reason: Optional[str] = None
+    candidate_contact_ids: list[int] = []
+
+
+class ListingAlertManualReviewPacket(BaseModel):
+    packet_version: str = "listing_alert_manual_review_v1"
+    workflow_mode: Literal["manual"] = "manual"
+    manual_reasoning_surface: str = "chatgpt_pro_gpt_5_4"
+    source_message: ListingAlertGmailMessageInput
+    association: ListingAlertClientAssociationResponse
+    contact_context: dict[str, Any] = Field(default_factory=dict)
+    comparison_frame: dict[str, Any] = Field(default_factory=dict)
+    extracted_listing_count: int
+    extracted_listings: list[ListingAlertNormalizedListing] = []
+    shortlist_cap: int = 3
+    draft_output_cap: int = 1
+    draft_constraints: list[str] = []
+    recommended_prompt_context: list[str] = []
+    return_contract: dict[str, Any] = Field(default_factory=dict)
+
+
+class ListingAlertManualPacketResultResponse(BaseModel):
+    execution_status: ListingAlertExecutionStatus
+    association: ListingAlertClientAssociationResponse
+    extracted_listings: list[ListingAlertNormalizedListing] = []
+    manual_review_packet: Optional[ListingAlertManualReviewPacket] = None
+    risk_flags: list[str] = []
+    operator_notes: list[str] = []
+
+
+class ListingAlertReviewedShortlistSubmissionItem(BaseModel):
+    listing_ref: str
+    rank: int
+    why_selected: list[str] = []
+
+
+class ListingAlertClientDraftSubmissionItem(BaseModel):
+    variant: str = "shortlist_summary"
+    subject: str
+    body: str
+
+
+class ListingAlertManualReviewSubmissionRequest(BaseModel):
+    source_run_id: int
+    shortlisted_listings: list[ListingAlertReviewedShortlistSubmissionItem] = []
+    tradeoff_notes: list[str] = []
+    recommendation_reasoning: str
+    client_facing_drafts: list[ListingAlertClientDraftSubmissionItem] = []
+    operator_notes: list[str] = []
+
+
+class ListingAlertReviewedShortlistResultItem(BaseModel):
+    listing_ref: str
+    address: str
+    rank: int
+    why_selected: list[str] = []
+
+
+class ListingAlertClientDraftResultItem(BaseModel):
+    variant: str
+    subject: str
+    body: str
+    approval_id: Optional[int] = None
+
+
+class ListingAlertReviewedSubmissionResultResponse(BaseModel):
+    source_run_id: int
+    source_task_id: int
+    packet_version: str
+    association: ListingAlertClientAssociationResponse
+    review_outcome: ListingAlertReviewOutcome
+    shortlisted_listings: list[ListingAlertReviewedShortlistResultItem] = []
+    tradeoff_notes: list[str] = []
+    recommendation_reasoning: str
+    client_facing_drafts: list[ListingAlertClientDraftResultItem] = []
+    risk_flags: list[str] = []
+    operator_notes: list[str] = []
+
+
+ListingAlertRecommendationStoredResult = (
+    ListingAlertManualPacketResultResponse
+    | ListingAlertReviewedSubmissionResultResponse
+)
+
+
+class ListingAlertRecommendationLatestResponse(BaseModel):
+    run_id: Optional[int] = None
+    status: Optional[RunStatus] = None
+    error: Optional[str] = None
+    result: Optional[ListingAlertRecommendationStoredResult] = None
+
+
+class ListingAlertRecommendationRunReportResponse(BaseModel):
+    run_id: int
+    task_id: int
+    status: RunStatus
+    summary: Optional[str] = None
+    error: Optional[str] = None
+    result: Optional[ListingAlertRecommendationStoredResult] = None
 
 
 MlsAuthProviderKey = Literal["stratus_authenticated"]

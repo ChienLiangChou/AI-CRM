@@ -1,0 +1,1670 @@
+import axios from 'axios';
+import { useEffect, useState } from 'react';
+import { agentsService } from '../../services/agents';
+import type {
+    AgentApproval,
+    AgentAuditLog,
+    AgentRun,
+    ListingAlertClientAssociationResponse,
+    ListingAlertManualPacketResultResponse,
+    ListingAlertManualReviewPacket,
+    ListingAlertManualReviewSubmissionRequest,
+    ListingAlertRecommendationLatestResponse,
+    ListingAlertRecommendationRunReportResponse,
+    ListingAlertReviewedSubmissionResultResponse,
+    ListingAlertRunRequest,
+} from '../../services/agents';
+
+const EMPTY_LATEST: ListingAlertRecommendationLatestResponse = {
+    run_id: null,
+    status: null,
+    error: null,
+    result: null,
+};
+
+type PacketFormState = {
+    expectedContactId: string;
+    messageId: string;
+    threadId: string;
+    receivedAt: string;
+    subject: string;
+    fromAddress: string;
+    toAddresses: string;
+    snippet: string;
+    plainTextBody: string;
+    htmlBody: string;
+    labelIds: string;
+    operatorNotes: string;
+};
+
+type ShortlistSelectionState = {
+    selected: boolean;
+    rank: string;
+    whySelected: string;
+};
+
+type ReviewFormState = {
+    recommendationReasoning: string;
+    tradeoffNotes: string;
+    draftSubject: string;
+    draftBody: string;
+    operatorNotes: string;
+};
+
+type ApprovalPayloadPreview = {
+    subject?: string;
+    body?: string;
+    contact_id?: number;
+    shortlist_refs?: string[];
+    shortlist_addresses?: string[];
+    review_mode?: string;
+    recommendation_reasoning?: string;
+    tradeoff_notes?: string[];
+    source_run_id?: number;
+};
+
+const EMPTY_PACKET_FORM: PacketFormState = {
+    expectedContactId: '',
+    messageId: '',
+    threadId: '',
+    receivedAt: '',
+    subject: '',
+    fromAddress: '',
+    toAddresses: '',
+    snippet: '',
+    plainTextBody: '',
+    htmlBody: '',
+    labelIds: '',
+    operatorNotes: '',
+};
+
+const EMPTY_REVIEW_FORM: ReviewFormState = {
+    recommendationReasoning: '',
+    tradeoffNotes: '',
+    draftSubject: '',
+    draftBody: '',
+    operatorNotes: '',
+};
+
+const parseJsonText = (value?: string) => {
+    if (!value) {
+        return null;
+    }
+
+    try {
+        return JSON.parse(value);
+    } catch {
+        return null;
+    }
+};
+
+const parseApprovalPayload = (payload?: string): ApprovalPayloadPreview => {
+    const parsed = parseJsonText(payload);
+    if (!parsed || typeof parsed !== 'object') {
+        return {};
+    }
+
+    return parsed as ApprovalPayloadPreview;
+};
+
+const formatAuditDetails = (value?: string) => {
+    const parsed = parseJsonText(value);
+    if (parsed) {
+        return JSON.stringify(parsed, null, 2);
+    }
+    return value ?? '';
+};
+
+const getErrorMessage = (error: unknown, fallback: string) => {
+    if (axios.isAxiosError(error)) {
+        const detail = error.response?.data?.detail;
+        if (typeof detail === 'string' && detail.trim()) {
+            return detail;
+        }
+    }
+    return fallback;
+};
+
+const splitList = (value: string) =>
+    value
+        .split(/[\n,]/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+
+const formatTimestamp = (value?: string | null) => {
+    if (!value) {
+        return 'n/a';
+    }
+
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+        return value;
+    }
+    return date.toLocaleString();
+};
+
+const formatCurrency = (value?: number | null) => {
+    if (typeof value !== 'number' || Number.isNaN(value)) {
+        return 'n/a';
+    }
+
+    return new Intl.NumberFormat('en-CA', {
+        style: 'currency',
+        currency: 'CAD',
+        maximumFractionDigits: 0,
+    }).format(value);
+};
+
+const humanizeEnum = (value?: string | null) => {
+    if (!value) {
+        return 'n/a';
+    }
+
+    return value
+        .split('_')
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ');
+};
+
+const isPacketResult = (
+    result: ListingAlertRecommendationRunReportResponse['result'] | ListingAlertRecommendationLatestResponse['result'],
+): result is ListingAlertManualPacketResultResponse => {
+    return Boolean(result && 'execution_status' in result);
+};
+
+const isReviewedSubmissionResult = (
+    result: ListingAlertRecommendationRunReportResponse['result'] | ListingAlertRecommendationLatestResponse['result'],
+): result is ListingAlertReviewedSubmissionResultResponse => {
+    return Boolean(result && 'review_outcome' in result);
+};
+
+const getRunKindLabel = (result: ListingAlertRecommendationRunReportResponse['result']) => {
+    if (isPacketResult(result)) {
+        return 'Packet prep';
+    }
+    if (isReviewedSubmissionResult(result)) {
+        return 'Reviewed submission';
+    }
+    return 'Unknown';
+};
+
+const getAssociationTone = (association: ListingAlertClientAssociationResponse) => {
+    if (association.status === 'matched') {
+        return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100';
+    }
+
+    return 'border-amber-500/30 bg-amber-500/10 text-amber-100';
+};
+
+const getExecutionTone = (executionStatus: ListingAlertManualPacketResultResponse['execution_status']) => {
+    if (executionStatus === 'packet_ready') {
+        return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100';
+    }
+
+    return 'border-amber-500/30 bg-amber-500/10 text-amber-100';
+};
+
+const getApprovalDecisionMeta = (approval: AgentApproval) => {
+    if (approval.status === 'approved' && approval.approved_at) {
+        return `Approved ${new Date(approval.approved_at).toLocaleString()}`;
+    }
+    if (approval.status === 'rejected' && approval.rejected_at) {
+        return `Rejected ${new Date(approval.rejected_at).toLocaleString()}`;
+    }
+    return `Created ${new Date(approval.created_at).toLocaleString()}`;
+};
+
+const findPacketReadyResult = (
+    report: ListingAlertRecommendationRunReportResponse | null,
+) => {
+    if (!report?.result || !isPacketResult(report.result)) {
+        return null;
+    }
+
+    if (report.result.execution_status !== 'packet_ready') {
+        return null;
+    }
+
+    return report.result;
+};
+
+const renderContextValue = (value: unknown) => {
+    if (Array.isArray(value)) {
+        return value.length > 0 ? value.join(' | ') : 'none';
+    }
+
+    if (typeof value === 'boolean') {
+        return value ? 'Yes' : 'No';
+    }
+
+    if (value === null || value === undefined || value === '') {
+        return 'n/a';
+    }
+
+    if (typeof value === 'object') {
+        return JSON.stringify(value);
+    }
+
+    return String(value);
+};
+
+const ListingAlertRecommendationPanel = () => {
+    const [packetForm, setPacketForm] = useState<PacketFormState>(EMPTY_PACKET_FORM);
+    const [reviewForm, setReviewForm] = useState<ReviewFormState>(EMPTY_REVIEW_FORM);
+    const [shortlistSelections, setShortlistSelections] = useState<
+        Record<string, ShortlistSelectionState>
+    >({});
+
+    const [runs, setRuns] = useState<AgentRun[]>([]);
+    const [runReports, setRunReports] = useState<Record<number, ListingAlertRecommendationRunReportResponse>>(
+        {},
+    );
+    const [latest, setLatest] = useState<ListingAlertRecommendationLatestResponse>(EMPTY_LATEST);
+    const [approvals, setApprovals] = useState<AgentApproval[]>([]);
+    const [approvalHistory, setApprovalHistory] = useState<AgentApproval[]>([]);
+    const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
+    const [auditLogs, setAuditLogs] = useState<AgentAuditLog[]>([]);
+
+    const [loading, setLoading] = useState(true);
+    const [refreshing, setRefreshing] = useState(false);
+    const [prepareSubmitting, setPrepareSubmitting] = useState(false);
+    const [reviewSubmitting, setReviewSubmitting] = useState(false);
+    const [reportLoading, setReportLoading] = useState(false);
+    const [auditLoading, setAuditLoading] = useState(false);
+    const [activeApprovalId, setActiveApprovalId] = useState<number | null>(null);
+
+    const [error, setError] = useState<string | null>(null);
+    const [reportError, setReportError] = useState<string | null>(null);
+    const [auditError, setAuditError] = useState<string | null>(null);
+    const [approvalError, setApprovalError] = useState<string | null>(null);
+    const [reviewFormError, setReviewFormError] = useState<string | null>(null);
+
+    const selectedRun = runs.find((run) => run.id === selectedRunId) ?? null;
+    const selectedReport = selectedRunId !== null ? runReports[selectedRunId] ?? null : null;
+    const selectedPacketResult = findPacketReadyResult(selectedReport);
+    const selectedPacket = selectedPacketResult?.manual_review_packet ?? null;
+    const selectedShortlistCount = Object.values(shortlistSelections).filter(
+        (item) => item.selected,
+    ).length;
+    const isBusy = loading || refreshing;
+
+    const loadReportsForRuns = async (runList: AgentRun[]) => {
+        const settled = await Promise.allSettled(
+            runList.map(async (run) => agentsService.getListingAlertRecommendationRunReport(run.id)),
+        );
+
+        const nextReports: Record<number, ListingAlertRecommendationRunReportResponse> = {};
+        for (const item of settled) {
+            if (item.status === 'fulfilled') {
+                nextReports[item.value.run_id] = item.value;
+            }
+        }
+
+        setRunReports(nextReports);
+        return nextReports;
+    };
+
+    const loadAuditLogs = async (runId: number) => {
+        setAuditLoading(true);
+        setAuditError(null);
+        try {
+            const logs = await agentsService.getListingAlertRecommendationRunAuditLogs(runId);
+            setAuditLogs(logs);
+        } catch (loadError) {
+            setAuditLogs([]);
+            setAuditError(getErrorMessage(loadError, 'Audit history is unavailable for this run.'));
+        } finally {
+            setAuditLoading(false);
+        }
+    };
+
+    const loadReport = async (runId: number) => {
+        setReportLoading(true);
+        setReportError(null);
+        try {
+            const report = await agentsService.getListingAlertRecommendationRunReport(runId);
+            setRunReports((current) => ({
+                ...current,
+                [report.run_id]: report,
+            }));
+        } catch (loadError) {
+            setReportError(getErrorMessage(loadError, 'Run report is unavailable.'));
+        } finally {
+            setReportLoading(false);
+        }
+    };
+
+    const loadData = async (
+        mode: 'initial' | 'refresh' = 'refresh',
+        preferredRunId?: number | null,
+    ) => {
+        if (mode === 'initial') {
+            setLoading(true);
+        } else {
+            setRefreshing(true);
+        }
+        setError(null);
+        setApprovalError(null);
+
+        try {
+            const [runsData, latestData, approvalsData, approvalHistoryData] = await Promise.all([
+                agentsService.getListingAlertRecommendationRuns(),
+                agentsService.getLatestListingAlertRecommendationResult(),
+                agentsService.getListingAlertRecommendationPendingApprovals(),
+                agentsService.getListingAlertRecommendationApprovalHistory(),
+            ]);
+
+            setRuns(runsData);
+            setLatest(latestData);
+            setApprovals(approvalsData);
+            setApprovalHistory(approvalHistoryData);
+
+            const nextSelectedRunId =
+                preferredRunId && runsData.some((run) => run.id === preferredRunId)
+                    ? preferredRunId
+                    : selectedRunId && runsData.some((run) => run.id === selectedRunId)
+                        ? selectedRunId
+                        : (runsData[0]?.id ?? null);
+
+            setSelectedRunId(nextSelectedRunId);
+            await loadReportsForRuns(runsData);
+        } catch (loadError) {
+            setError(
+                getErrorMessage(loadError, 'Failed to load Listing Alert Recommendation data.'),
+            );
+        } finally {
+            if (mode === 'initial') {
+                setLoading(false);
+            } else {
+                setRefreshing(false);
+            }
+        }
+    };
+
+    useEffect(() => {
+        void loadData('initial');
+    }, []);
+
+    useEffect(() => {
+        if (selectedRunId === null) {
+            setAuditLogs([]);
+            setAuditError(null);
+            setReportError(null);
+            return;
+        }
+
+        if (!runReports[selectedRunId]) {
+            void loadReport(selectedRunId);
+        }
+        void loadAuditLogs(selectedRunId);
+    }, [selectedRunId]);
+
+    useEffect(() => {
+        if (!selectedPacket) {
+            setShortlistSelections({});
+            setReviewForm(EMPTY_REVIEW_FORM);
+            setReviewFormError(null);
+            return;
+        }
+
+        const nextSelections: Record<string, ShortlistSelectionState> = {};
+        for (const listing of selectedPacket.extracted_listings) {
+            nextSelections[listing.listing_ref] = {
+                selected: false,
+                rank: '',
+                whySelected: '',
+            };
+        }
+
+        setShortlistSelections(nextSelections);
+        setReviewForm(EMPTY_REVIEW_FORM);
+        setReviewFormError(null);
+    }, [selectedRunId, selectedPacket?.packet_version]);
+
+    const updatePacketField = (key: keyof PacketFormState, value: string) => {
+        setPacketForm((current) => ({
+            ...current,
+            [key]: value,
+        }));
+    };
+
+    const updateReviewField = (key: keyof ReviewFormState, value: string) => {
+        setReviewForm((current) => ({
+            ...current,
+            [key]: value,
+        }));
+    };
+
+    const toggleListingSelection = (listingRef: string, selected: boolean) => {
+        setShortlistSelections((current) => {
+            const currentEntry = current[listingRef] ?? {
+                selected: false,
+                rank: '',
+                whySelected: '',
+            };
+
+            if (selected && !currentEntry.selected) {
+                const selectedCount = Object.values(current).filter((item) => item.selected).length;
+                if (selectedCount >= 3) {
+                    return current;
+                }
+            }
+
+            return {
+                ...current,
+                [listingRef]: {
+                    ...currentEntry,
+                    selected,
+                    rank: selected
+                        ? currentEntry.rank || String(
+                              Object.values(current).filter((item) => item.selected).length + 1,
+                          )
+                        : '',
+                },
+            };
+        });
+    };
+
+    const updateListingSelection = (
+        listingRef: string,
+        field: 'rank' | 'whySelected',
+        value: string,
+    ) => {
+        setShortlistSelections((current) => ({
+            ...current,
+            [listingRef]: {
+                ...(current[listingRef] ?? {
+                    selected: false,
+                    rank: '',
+                    whySelected: '',
+                }),
+                [field]: value,
+            },
+        }));
+    };
+
+    const handlePreparePacket = async () => {
+        if (!packetForm.messageId.trim()) {
+            setError('Message ID is required before preparing a manual review packet.');
+            return;
+        }
+
+        if (!packetForm.subject.trim()) {
+            setError('Subject is required before preparing a manual review packet.');
+            return;
+        }
+
+        if (!packetForm.snippet.trim() && !packetForm.plainTextBody.trim() && !packetForm.htmlBody.trim()) {
+            setError('Provide at least snippet, plain text body, or HTML body.');
+            return;
+        }
+
+        const expectedContactId = packetForm.expectedContactId.trim();
+        if (expectedContactId && !Number.isFinite(Number(expectedContactId))) {
+            setError('Expected contact ID must be a valid number when provided.');
+            return;
+        }
+
+        setPrepareSubmitting(true);
+        setError(null);
+
+        const payload: ListingAlertRunRequest = {
+            execution_mode: 'manual',
+            expected_contact_id: expectedContactId ? Number(expectedContactId) : null,
+            operator_notes: packetForm.operatorNotes.trim() || null,
+            manual_reasoning_surface: 'chatgpt_pro_gpt_5_4',
+            gmail_alert: {
+                message_id: packetForm.messageId.trim(),
+                thread_id: packetForm.threadId.trim() || packetForm.messageId.trim(),
+                received_at: packetForm.receivedAt.trim() || null,
+                subject: packetForm.subject.trim(),
+                from_address: packetForm.fromAddress.trim() || null,
+                to_addresses: splitList(packetForm.toAddresses),
+                cc_addresses: [],
+                label_ids: splitList(packetForm.labelIds),
+                snippet: packetForm.snippet.trim() || null,
+                plain_text_body: packetForm.plainTextBody.trim() || null,
+                html_body: packetForm.htmlBody.trim() || null,
+                attachment_names: [],
+            },
+        };
+
+        try {
+            const run = await agentsService.prepareListingAlertManualPacket(payload);
+            await loadData('refresh', run.id);
+        } catch (submitError) {
+            setError(getErrorMessage(submitError, 'Failed to prepare manual review packet.'));
+        } finally {
+            setPrepareSubmitting(false);
+        }
+    };
+
+    const handleSubmitManualReview = async () => {
+        if (!selectedPacket || selectedRunId === null) {
+            setReviewFormError('Select a packet-ready run before submitting manual review output.');
+            return;
+        }
+
+        const shortlistedListings = Object.entries(shortlistSelections)
+            .filter(([, value]) => value.selected)
+            .map(([listingRef, value]) => ({
+                listing_ref: listingRef,
+                rank: Number(value.rank),
+                why_selected: splitList(value.whySelected),
+            }));
+
+        if (shortlistedListings.length > 3) {
+            setReviewFormError('Shortlist cannot exceed 3 listings.');
+            return;
+        }
+
+        if (
+            shortlistedListings.some(
+                (item) =>
+                    !Number.isFinite(item.rank) ||
+                    item.rank <= 0 ||
+                    item.rank > selectedPacket.shortlist_cap ||
+                    item.why_selected.length === 0,
+            )
+        ) {
+            setReviewFormError(
+                `Each shortlisted listing needs a unique rank between 1 and ${selectedPacket.shortlist_cap} and at least one why-selected note.`,
+            );
+            return;
+        }
+
+        const uniqueRanks = new Set(shortlistedListings.map((item) => item.rank));
+        if (uniqueRanks.size !== shortlistedListings.length) {
+            setReviewFormError('Shortlisted listing ranks must be unique.');
+            return;
+        }
+
+        if (!reviewForm.recommendationReasoning.trim()) {
+            setReviewFormError('Recommendation reasoning is required.');
+            return;
+        }
+
+        const hasDraftSubject = reviewForm.draftSubject.trim().length > 0;
+        const hasDraftBody = reviewForm.draftBody.trim().length > 0;
+        if (hasDraftSubject !== hasDraftBody) {
+            setReviewFormError('Draft subject and body must both be provided or both left blank.');
+            return;
+        }
+
+        const payload: ListingAlertManualReviewSubmissionRequest = {
+            source_run_id: selectedRunId,
+            shortlisted_listings: shortlistedListings,
+            tradeoff_notes: splitList(reviewForm.tradeoffNotes),
+            recommendation_reasoning: reviewForm.recommendationReasoning.trim(),
+            client_facing_drafts:
+                hasDraftSubject && hasDraftBody
+                    ? [
+                          {
+                              variant: 'shortlist_summary',
+                              subject: reviewForm.draftSubject.trim(),
+                              body: reviewForm.draftBody.trim(),
+                          },
+                      ]
+                    : [],
+            operator_notes: splitList(reviewForm.operatorNotes),
+        };
+
+        setReviewSubmitting(true);
+        setReviewFormError(null);
+        setError(null);
+
+        try {
+            const run = await agentsService.submitListingAlertManualReview(payload);
+            await loadData('refresh', run.id);
+        } catch (submitError) {
+            setReviewFormError(
+                getErrorMessage(submitError, 'Failed to submit manual review result.'),
+            );
+        } finally {
+            setReviewSubmitting(false);
+        }
+    };
+
+    const handleApprove = async (approvalId: number) => {
+        setActiveApprovalId(approvalId);
+        setApprovalError(null);
+        try {
+            await agentsService.approve(approvalId);
+            await loadData('refresh', selectedRunId);
+        } catch (decisionError) {
+            setApprovalError(getErrorMessage(decisionError, 'Failed to approve review item.'));
+        } finally {
+            setActiveApprovalId(null);
+        }
+    };
+
+    const handleReject = async (approvalId: number) => {
+        const reason = window.prompt('Rejection reason (optional):');
+        if (reason === null) {
+            return;
+        }
+
+        setActiveApprovalId(approvalId);
+        setApprovalError(null);
+        try {
+            await agentsService.reject(approvalId, reason);
+            await loadData('refresh', selectedRunId);
+        } catch (decisionError) {
+            setApprovalError(getErrorMessage(decisionError, 'Failed to reject review item.'));
+        } finally {
+            setActiveApprovalId(null);
+        }
+    };
+
+    const renderPacketDetails = (packet: ListingAlertManualReviewPacket) => {
+        return (
+            <div className="space-y-4">
+                <div className="rounded border border-white/10 bg-black/10 p-3 text-sm space-y-2">
+                    <div className="font-medium">Packet Summary</div>
+                    <div className="text-xs text-gray-400">
+                        Packet version: {packet.packet_version} · Manual reasoning surface:{' '}
+                        {packet.manual_reasoning_surface}
+                    </div>
+                    <div className="text-xs text-gray-400">
+                        Shortlist cap: {packet.shortlist_cap} · Draft cap: {packet.draft_output_cap}
+                    </div>
+                    <div className="text-xs text-gray-400">
+                        Message: {packet.source_message.message_id} · Thread:{' '}
+                        {packet.source_message.thread_id || 'n/a'}
+                    </div>
+                </div>
+
+                <div className={`rounded border px-3 py-2 text-sm ${getAssociationTone(packet.association)}`}>
+                    Association status: {humanizeEnum(packet.association.status)}
+                    {packet.association.blocked_reason && (
+                        <div className="mt-1 text-xs text-amber-50">
+                            Blocked reason: {packet.association.blocked_reason}
+                        </div>
+                    )}
+                    {packet.association.contact_name && (
+                        <div className="mt-1 text-xs text-current">
+                            Matched contact: {packet.association.contact_name} (#{packet.association.contact_id})
+                        </div>
+                    )}
+                    {packet.association.representation_intent && (
+                        <div className="mt-1 text-xs text-current">
+                            Representation intent: {humanizeEnum(packet.association.representation_intent)}
+                        </div>
+                    )}
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-2">
+                    <div className="rounded border border-white/10 bg-white/5 p-3 space-y-2">
+                        <div className="font-medium text-sm">Contact Context</div>
+                        {Object.keys(packet.contact_context).length === 0 ? (
+                            <div className="text-sm text-gray-500">No contact context recorded.</div>
+                        ) : (
+                            <div className="space-y-2 text-sm">
+                                {Object.entries(packet.contact_context).map(([key, value]) => (
+                                    <div key={key}>
+                                        <div className="text-xs font-semibold text-gray-300">
+                                            {humanizeEnum(key)}
+                                        </div>
+                                        <div className="text-xs text-gray-200">
+                                            {renderContextValue(value)}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="rounded border border-white/10 bg-white/5 p-3 space-y-2">
+                        <div className="font-medium text-sm">Prompt / Draft Constraints</div>
+                        <div className="text-xs text-gray-400">
+                            Gmail-driven MLS alert intake only. No Gmail API is connected in this phase.
+                        </div>
+                        <div>
+                            <div className="text-xs font-semibold text-gray-300">Draft constraints</div>
+                            {packet.draft_constraints.length === 0 ? (
+                                <div className="text-xs text-gray-500">No draft constraints recorded.</div>
+                            ) : (
+                                <ul className="mt-1 list-disc pl-5 text-xs text-gray-200 space-y-1">
+                                    {packet.draft_constraints.map((item) => (
+                                        <li key={item}>{item}</li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+                        <div>
+                            <div className="text-xs font-semibold text-gray-300">Recommended prompt context</div>
+                            {packet.recommended_prompt_context.length === 0 ? (
+                                <div className="text-xs text-gray-500">No prompt context recorded.</div>
+                            ) : (
+                                <ul className="mt-1 list-disc pl-5 text-xs text-gray-200 space-y-1">
+                                    {packet.recommended_prompt_context.map((item) => (
+                                        <li key={item}>{item}</li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+                    </div>
+                </div>
+
+                <div className="rounded border border-white/10 bg-white/5 p-3 space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                        <div className="font-medium text-sm">Extracted Listings</div>
+                        <div className="text-xs text-gray-400">
+                            {packet.extracted_listing_count} extracted · cap 10
+                        </div>
+                    </div>
+                    {packet.extracted_listings.length === 0 ? (
+                        <div className="text-sm text-gray-500">No candidate listings were extracted.</div>
+                    ) : (
+                        <div className="space-y-3">
+                            {packet.extracted_listings.map((listing) => (
+                                <div
+                                    key={listing.listing_ref}
+                                    className="rounded border border-white/10 bg-black/10 p-3 text-sm"
+                                >
+                                    <div className="flex items-start justify-between gap-3">
+                                        <div>
+                                            <div className="font-medium">{listing.address}</div>
+                                            <div className="text-xs text-gray-400">
+                                                Ref: {listing.listing_ref} · Market:{' '}
+                                                {humanizeEnum(listing.market_type)} · Price:{' '}
+                                                {formatCurrency(listing.price)}
+                                            </div>
+                                        </div>
+                                        <div className="text-xs text-gray-400">
+                                            {listing.property_type || 'Unknown type'}
+                                        </div>
+                                    </div>
+                                    <div className="mt-2 text-xs text-gray-300">
+                                        Beds: {listing.bedrooms ?? 'n/a'} · Baths:{' '}
+                                        {listing.bathrooms ?? 'n/a'} · Area:{' '}
+                                        {listing.neighborhood || 'n/a'}
+                                    </div>
+                                    {listing.match_notes.length > 0 && (
+                                        <div className="mt-2 text-xs text-gray-300">
+                                            Notes: {listing.match_notes.join(' | ')}
+                                        </div>
+                                    )}
+                                    <div className="mt-2 text-xs text-gray-400 whitespace-pre-wrap">
+                                        Source excerpt: {listing.source_excerpt}
+                                    </div>
+                                    {listing.listing_url && (
+                                        <div className="mt-2 text-xs text-sky-200 break-all">
+                                            {listing.listing_url}
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            </div>
+        );
+    };
+
+    const renderReviewedSubmissionDetails = (
+        result: ListingAlertReviewedSubmissionResultResponse,
+    ) => {
+        const hasDraft = result.client_facing_drafts.length > 0;
+
+        return (
+            <div className="space-y-4">
+                <div
+                    className={`rounded border px-3 py-2 text-sm ${
+                        result.review_outcome === 'waiting_approval'
+                            ? 'border-sky-500/30 bg-sky-500/10 text-sky-100'
+                            : 'border-white/10 bg-black/10 text-gray-100'
+                    }`}
+                >
+                    Review outcome: {humanizeEnum(result.review_outcome)}
+                    {!hasDraft && (
+                        <div className="mt-1 text-xs text-gray-300">
+                            Internal-only completion. No client-facing draft was submitted.
+                        </div>
+                    )}
+                    {hasDraft && (
+                        <div className="mt-1 text-xs text-sky-50">
+                            Client-facing draft was submitted and approval was created.
+                        </div>
+                    )}
+                </div>
+
+                <div className={`rounded border px-3 py-2 text-sm ${getAssociationTone(result.association)}`}>
+                    Association status: {humanizeEnum(result.association.status)}
+                    {result.association.contact_name && (
+                        <div className="mt-1 text-xs text-current">
+                            Contact: {result.association.contact_name} (#{result.association.contact_id})
+                        </div>
+                    )}
+                    {result.association.representation_intent && (
+                        <div className="mt-1 text-xs text-current">
+                            Intent: {humanizeEnum(result.association.representation_intent)}
+                        </div>
+                    )}
+                </div>
+
+                <div className="rounded border border-white/10 bg-white/5 p-3 space-y-2">
+                    <div className="font-medium text-sm">Shortlist</div>
+                    {result.shortlisted_listings.length === 0 ? (
+                        <div className="text-sm text-gray-500">No shortlisted listings were submitted.</div>
+                    ) : (
+                        <div className="space-y-3">
+                            {result.shortlisted_listings
+                                .slice()
+                                .sort((a, b) => a.rank - b.rank)
+                                .map((item) => (
+                                    <div
+                                        key={`${item.listing_ref}-${item.rank}`}
+                                        className="rounded border border-white/10 bg-black/10 p-3 text-sm"
+                                    >
+                                        <div className="font-medium">
+                                            #{item.rank} · {item.address}
+                                        </div>
+                                        <div className="text-xs text-gray-400">
+                                            Ref: {item.listing_ref}
+                                        </div>
+                                        <div className="mt-2 text-xs text-gray-200">
+                                            {item.why_selected.join(' | ')}
+                                        </div>
+                                    </div>
+                                ))}
+                        </div>
+                    )}
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-2">
+                    <div className="rounded border border-white/10 bg-white/5 p-3 space-y-2">
+                        <div className="font-medium text-sm">Tradeoff Notes</div>
+                        {result.tradeoff_notes.length === 0 ? (
+                            <div className="text-sm text-gray-500">No tradeoff notes submitted.</div>
+                        ) : (
+                            <ul className="list-disc pl-5 text-sm text-gray-200 space-y-1">
+                                {result.tradeoff_notes.map((item) => (
+                                    <li key={item}>{item}</li>
+                                ))}
+                            </ul>
+                        )}
+                    </div>
+                    <div className="rounded border border-white/10 bg-white/5 p-3 space-y-2">
+                        <div className="font-medium text-sm">Recommendation Reasoning</div>
+                        <div className="text-sm whitespace-pre-wrap text-gray-200">
+                            {result.recommendation_reasoning}
+                        </div>
+                    </div>
+                </div>
+
+                <div className="rounded border border-white/10 bg-white/5 p-3 space-y-3">
+                    <div className="font-medium text-sm">Client-Facing Draft</div>
+                    {result.client_facing_drafts.length === 0 ? (
+                        <div className="text-sm text-gray-500">
+                            No client-facing draft stored for this reviewed submission.
+                        </div>
+                    ) : (
+                        result.client_facing_drafts.map((draft, index) => (
+                            <div
+                                key={`${draft.variant}-${index}`}
+                                className="rounded border border-white/10 bg-black/10 p-3 space-y-2"
+                            >
+                                <div className="text-xs text-gray-400">
+                                    Variant: {humanizeEnum(draft.variant)}
+                                    {draft.approval_id && <> · Approval #{draft.approval_id}</>}
+                                </div>
+                                <div>
+                                    <div className="text-xs font-semibold text-gray-300">Subject</div>
+                                    <div className="text-sm text-gray-100">{draft.subject}</div>
+                                </div>
+                                <div>
+                                    <div className="text-xs font-semibold text-gray-300">Body</div>
+                                    <pre className="text-xs whitespace-pre-wrap rounded bg-black/20 p-2 overflow-auto">
+                                        {draft.body}
+                                    </pre>
+                                </div>
+                            </div>
+                        ))
+                    )}
+                </div>
+            </div>
+        );
+    };
+
+    const pageStatus = loading
+        ? 'Loading Listing Alert Recommendation data...'
+        : refreshing
+            ? 'Refreshing Listing Alert Recommendation data...'
+            : null;
+
+    return (
+        <section className="space-y-4 border rounded p-4 bg-white/5">
+            <div className="flex items-start justify-between gap-4">
+                <div className="space-y-1">
+                    <h2 className="text-lg font-medium">Listing Alert Recommendation</h2>
+                    <p className="text-sm text-gray-400">
+                        Gmail-driven MLS alert intake for Manual Mode only. No Gmail API is connected
+                        yet in this phase, and manual review remains external to ChatGPT Pro / GPT-5.4 Pro.
+                    </p>
+                </div>
+                <button
+                    onClick={() => void loadData('refresh', selectedRunId)}
+                    className="px-3 py-2 text-sm rounded border border-white/10 bg-white/5 text-white hover:bg-white/10"
+                    disabled={isBusy || prepareSubmitting || reviewSubmitting || activeApprovalId !== null}
+                >
+                    {refreshing ? 'Refreshing...' : 'Refresh'}
+                </button>
+            </div>
+
+            {pageStatus && <div className="text-sm text-gray-400">{pageStatus}</div>}
+            {error && (
+                <div className="rounded border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
+                    {error}
+                </div>
+            )}
+
+            <div className="grid gap-4 xl:grid-cols-[1.1fr,0.9fr]">
+                <div className="space-y-4">
+                    <section className="space-y-3">
+                        <div>
+                            <h3 className="text-base font-medium">1. Manual Packet Preparation</h3>
+                            <p className="text-sm text-gray-400">
+                                Manual-input Gmail alert intake only. Use normalized Gmail fields to
+                                prepare a review packet Kevin can take into ChatGPT Pro manually.
+                            </p>
+                        </div>
+
+                        <div className="grid gap-3 md:grid-cols-2">
+                            <label className="space-y-1 text-sm">
+                                <div className="text-gray-300">Expected contact ID</div>
+                                <input
+                                    value={packetForm.expectedContactId}
+                                    onChange={(event) => updatePacketField('expectedContactId', event.target.value)}
+                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="Optional"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm">
+                                <div className="text-gray-300">Message ID</div>
+                                <input
+                                    value={packetForm.messageId}
+                                    onChange={(event) => updatePacketField('messageId', event.target.value)}
+                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="Required"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm">
+                                <div className="text-gray-300">Thread ID</div>
+                                <input
+                                    value={packetForm.threadId}
+                                    onChange={(event) => updatePacketField('threadId', event.target.value)}
+                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="Optional"
+                                />
+                                <div className="text-xs text-gray-500">
+                                    If blank, the frontend reuses Message ID for the normalized contract.
+                                </div>
+                            </label>
+                            <label className="space-y-1 text-sm">
+                                <div className="text-gray-300">Received at</div>
+                                <input
+                                    type="datetime-local"
+                                    value={packetForm.receivedAt}
+                                    onChange={(event) => updatePacketField('receivedAt', event.target.value)}
+                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm md:col-span-2">
+                                <div className="text-gray-300">Subject</div>
+                                <input
+                                    value={packetForm.subject}
+                                    onChange={(event) => updatePacketField('subject', event.target.value)}
+                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="Required"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm md:col-span-2">
+                                <div className="text-gray-300">From address</div>
+                                <input
+                                    value={packetForm.fromAddress}
+                                    onChange={(event) => updatePacketField('fromAddress', event.target.value)}
+                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="alerts@example.com"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm md:col-span-2">
+                                <div className="text-gray-300">To addresses</div>
+                                <textarea
+                                    value={packetForm.toAddresses}
+                                    onChange={(event) => updatePacketField('toAddresses', event.target.value)}
+                                    className="min-h-20 w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="Comma or newline separated"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm md:col-span-2">
+                                <div className="text-gray-300">Snippet</div>
+                                <textarea
+                                    value={packetForm.snippet}
+                                    onChange={(event) => updatePacketField('snippet', event.target.value)}
+                                    className="min-h-20 w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm md:col-span-2">
+                                <div className="text-gray-300">Plain text body</div>
+                                <textarea
+                                    value={packetForm.plainTextBody}
+                                    onChange={(event) => updatePacketField('plainTextBody', event.target.value)}
+                                    className="min-h-40 w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm md:col-span-2">
+                                <div className="text-gray-300">HTML body</div>
+                                <textarea
+                                    value={packetForm.htmlBody}
+                                    onChange={(event) => updatePacketField('htmlBody', event.target.value)}
+                                    className="min-h-28 w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="Optional"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm md:col-span-2">
+                                <div className="text-gray-300">Label IDs</div>
+                                <textarea
+                                    value={packetForm.labelIds}
+                                    onChange={(event) => updatePacketField('labelIds', event.target.value)}
+                                    className="min-h-20 w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="Comma or newline separated"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm md:col-span-2">
+                                <div className="text-gray-300">Operator notes</div>
+                                <textarea
+                                    value={packetForm.operatorNotes}
+                                    onChange={(event) => updatePacketField('operatorNotes', event.target.value)}
+                                    className="min-h-20 w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="Optional"
+                                />
+                            </label>
+                        </div>
+
+                        <button
+                            onClick={() => void handlePreparePacket()}
+                            className="px-4 py-2 text-sm rounded bg-sky-600 text-white hover:bg-sky-700 disabled:opacity-50"
+                            disabled={prepareSubmitting || reviewSubmitting || isBusy}
+                        >
+                            {prepareSubmitting ? 'Preparing...' : 'Prepare Manual Review Packet'}
+                        </button>
+                    </section>
+
+                    <section className="space-y-3">
+                        <div>
+                            <h3 className="text-base font-medium">2. Packet / Review Result</h3>
+                            <p className="text-sm text-gray-400">
+                                Shows the stored packet or reviewed submission for the selected run.
+                            </p>
+                        </div>
+
+                        {reportError && (
+                            <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                                {reportError}
+                            </div>
+                        )}
+
+                        {selectedRunId === null ? (
+                            <div className="text-sm text-gray-500">
+                                No runs yet. Prepare a manual packet to start this workflow.
+                            </div>
+                        ) : reportLoading && !selectedReport ? (
+                            <div className="text-sm text-gray-400">Loading run report...</div>
+                        ) : !selectedReport ? (
+                            <div className="text-sm text-gray-500">
+                                Run report is not available for the selected run.
+                            </div>
+                        ) : (
+                            <div className="space-y-3">
+                                <div className="rounded border border-white/10 bg-white/5 p-3 text-sm">
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div className="font-medium">
+                                            Run #{selectedReport.run_id} · {getRunKindLabel(selectedReport.result)}
+                                        </div>
+                                        <div className="text-xs text-gray-400">
+                                            Status: {selectedReport.status}
+                                        </div>
+                                    </div>
+                                    {selectedReport.summary && (
+                                        <div className="mt-1 text-xs text-gray-300">
+                                            {selectedReport.summary}
+                                        </div>
+                                    )}
+                                    {selectedReport.error && (
+                                        <div className="mt-2 rounded border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+                                            Error: {selectedReport.error}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {selectedReport.result && isPacketResult(selectedReport.result) && (
+                                    <div className="space-y-3">
+                                        <div
+                                            className={`rounded border px-3 py-2 text-sm ${getExecutionTone(selectedReport.result.execution_status)}`}
+                                        >
+                                            Packet execution status:{' '}
+                                            {humanizeEnum(selectedReport.result.execution_status)}
+                                            {selectedReport.result.association.blocked_reason && (
+                                                <div className="mt-1 text-xs">
+                                                    Blocked reason:{' '}
+                                                    {selectedReport.result.association.blocked_reason}
+                                                </div>
+                                            )}
+                                        </div>
+                                        {selectedReport.result.manual_review_packet ? (
+                                            renderPacketDetails(selectedReport.result.manual_review_packet)
+                                        ) : (
+                                            <div className="rounded border border-white/10 bg-white/5 p-3 text-sm text-gray-300">
+                                                This packet-prep run was stored without a manual review packet.
+                                                Blocked or ambiguous states are still preserved above.
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+                                {selectedReport.result &&
+                                    isReviewedSubmissionResult(selectedReport.result) &&
+                                    renderReviewedSubmissionDetails(selectedReport.result)}
+
+                                {!selectedReport.result && selectedReport.status === 'failed' && (
+                                    <div className="rounded border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
+                                        This reviewed submission failed validation or could not be persisted.
+                                        Inspect the audit log below for the validation-failed event trail.
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </section>
+
+                    <section className="space-y-3">
+                        <div>
+                            <h3 className="text-base font-medium">3. Manual Review Submission</h3>
+                            <p className="text-sm text-gray-400">
+                                Submit reviewed output from ChatGPT Pro / GPT-5.4 Pro back into SKC.
+                                This remains review-only and does not create Gmail drafts or send email.
+                            </p>
+                        </div>
+
+                        {reviewFormError && (
+                            <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                                {reviewFormError}
+                            </div>
+                        )}
+
+                        {!selectedReport ? (
+                            <div className="text-sm text-gray-500">
+                                Select a run before submitting reviewed output.
+                            </div>
+                        ) : !selectedPacket ? (
+                            <div className="rounded border border-white/10 bg-white/5 p-3 text-sm text-gray-300">
+                                Manual review submission is available only for packet-ready runs.
+                                Blocked packet runs and reviewed-submission runs are shown above but cannot
+                                be resubmitted from this form.
+                            </div>
+                        ) : (
+                            <div className="space-y-4 rounded border border-white/10 bg-white/5 p-4">
+                                <div className="text-xs text-gray-400">
+                                    Source packet run: #{selectedRunId} · Shortlist cap:{' '}
+                                    {selectedPacket.shortlist_cap} · Draft cap:{' '}
+                                    {selectedPacket.draft_output_cap}
+                                </div>
+
+                                <div className="space-y-3">
+                                    <div className="font-medium text-sm">Shortlisted Listings</div>
+                                    {selectedPacket.extracted_listings.length === 0 ? (
+                                        <div className="text-sm text-gray-500">
+                                            No extracted listings are available for shortlist selection.
+                                        </div>
+                                    ) : (
+                                        selectedPacket.extracted_listings.map((listing) => {
+                                            const selection = shortlistSelections[listing.listing_ref] ?? {
+                                                selected: false,
+                                                rank: '',
+                                                whySelected: '',
+                                            };
+                                            const disableUnchecked =
+                                                !selection.selected && selectedShortlistCount >= 3;
+
+                                            return (
+                                                <div
+                                                    key={listing.listing_ref}
+                                                    className="rounded border border-white/10 bg-black/10 p-3 space-y-3"
+                                                >
+                                                    <div className="flex items-start justify-between gap-3">
+                                                        <label className="flex items-start gap-3 text-sm">
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={selection.selected}
+                                                                onChange={(event) =>
+                                                                    toggleListingSelection(
+                                                                        listing.listing_ref,
+                                                                        event.target.checked,
+                                                                    )
+                                                                }
+                                                                disabled={disableUnchecked}
+                                                                className="mt-1"
+                                                            />
+                                                            <span>
+                                                                <div className="font-medium">
+                                                                    {listing.address}
+                                                                </div>
+                                                                <div className="text-xs text-gray-400">
+                                                                    Ref: {listing.listing_ref} · Price:{' '}
+                                                                    {formatCurrency(listing.price)} · Market:{' '}
+                                                                    {humanizeEnum(listing.market_type)}
+                                                                </div>
+                                                            </span>
+                                                        </label>
+                                                        <div className="text-xs text-gray-400">
+                                                            {listing.property_type || 'Unknown type'}
+                                                        </div>
+                                                    </div>
+
+                                                    {selection.selected && (
+                                                        <div className="grid gap-3 md:grid-cols-[120px,1fr]">
+                                                            <label className="space-y-1 text-sm">
+                                                                <div className="text-gray-300">Rank</div>
+                                                                <input
+                                                                    value={selection.rank}
+                                                                    onChange={(event) =>
+                                                                        updateListingSelection(
+                                                                            listing.listing_ref,
+                                                                            'rank',
+                                                                            event.target.value,
+                                                                        )
+                                                                    }
+                                                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                                                    placeholder="1"
+                                                                />
+                                                            </label>
+                                                            <label className="space-y-1 text-sm">
+                                                                <div className="text-gray-300">Why selected</div>
+                                                                <textarea
+                                                                    value={selection.whySelected}
+                                                                    onChange={(event) =>
+                                                                        updateListingSelection(
+                                                                            listing.listing_ref,
+                                                                            'whySelected',
+                                                                            event.target.value,
+                                                                        )
+                                                                    }
+                                                                    className="min-h-20 w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                                                    placeholder="Comma or newline separated"
+                                                                />
+                                                            </label>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })
+                                    )}
+                                </div>
+
+                                <div className="grid gap-3">
+                                    <label className="space-y-1 text-sm">
+                                        <div className="text-gray-300">Tradeoff notes</div>
+                                        <textarea
+                                            value={reviewForm.tradeoffNotes}
+                                            onChange={(event) => updateReviewField('tradeoffNotes', event.target.value)}
+                                            className="min-h-24 w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                            placeholder="Comma or newline separated"
+                                        />
+                                    </label>
+
+                                    <label className="space-y-1 text-sm">
+                                        <div className="text-gray-300">Recommendation reasoning</div>
+                                        <textarea
+                                            value={reviewForm.recommendationReasoning}
+                                            onChange={(event) =>
+                                                updateReviewField('recommendationReasoning', event.target.value)
+                                            }
+                                            className="min-h-28 w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                            placeholder="Required"
+                                        />
+                                    </label>
+                                </div>
+
+                                <div className="rounded border border-white/10 bg-black/10 p-3 space-y-3">
+                                    <div className="font-medium text-sm">
+                                        Optional client-facing draft (max 1)
+                                    </div>
+                                    <label className="space-y-1 text-sm">
+                                        <div className="text-gray-300">Subject</div>
+                                        <input
+                                            value={reviewForm.draftSubject}
+                                            onChange={(event) => updateReviewField('draftSubject', event.target.value)}
+                                            className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                        />
+                                    </label>
+                                    <label className="space-y-1 text-sm">
+                                        <div className="text-gray-300">Body</div>
+                                        <textarea
+                                            value={reviewForm.draftBody}
+                                            onChange={(event) => updateReviewField('draftBody', event.target.value)}
+                                            className="min-h-28 w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                        />
+                                    </label>
+                                </div>
+
+                                <label className="space-y-1 text-sm">
+                                    <div className="text-gray-300">Operator notes</div>
+                                    <textarea
+                                        value={reviewForm.operatorNotes}
+                                        onChange={(event) => updateReviewField('operatorNotes', event.target.value)}
+                                        className="min-h-20 w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                        placeholder="Comma or newline separated"
+                                    />
+                                </label>
+
+                                <button
+                                    onClick={() => void handleSubmitManualReview()}
+                                    className="px-4 py-2 text-sm rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                                    disabled={reviewSubmitting || prepareSubmitting || isBusy}
+                                >
+                                    {reviewSubmitting ? 'Submitting...' : 'Submit Manual Review'}
+                                </button>
+                            </div>
+                        )}
+                    </section>
+                </div>
+
+                <div className="space-y-4">
+                    <section className="space-y-3">
+                        <div>
+                            <h3 className="text-base font-medium">4. Latest / Recent Runs</h3>
+                            <p className="text-sm text-gray-400">
+                                Manual refresh only. Packet-prep runs and reviewed-submission runs are
+                                labeled separately.
+                            </p>
+                        </div>
+
+                        <div className="rounded border border-white/10 bg-white/5 p-3 space-y-2 text-sm">
+                            <div className="font-medium">Latest Run</div>
+                            {latest.run_id === null ? (
+                                <div className="text-sm text-gray-500">No runs yet.</div>
+                            ) : (
+                                <div className="space-y-1">
+                                    <div>
+                                        Run #{latest.run_id} · {latest.status || 'unknown status'}
+                                    </div>
+                                    {latest.result && (
+                                        <div className="text-xs text-gray-400">
+                                            {getRunKindLabel(latest.result)}
+                                            {isPacketResult(latest.result) && (
+                                                <> · {humanizeEnum(latest.result.execution_status)}</>
+                                            )}
+                                            {isReviewedSubmissionResult(latest.result) && (
+                                                <> · {humanizeEnum(latest.result.review_outcome)}</>
+                                            )}
+                                        </div>
+                                    )}
+                                    {latest.error && (
+                                        <div className="text-xs text-rose-300">Error: {latest.error}</div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
+                        {runs.length === 0 ? (
+                            <div className="text-sm text-gray-500">No recent runs yet.</div>
+                        ) : (
+                            <div className="rounded border border-white/10 bg-white/5 p-3 space-y-2">
+                                {runs.map((run) => {
+                                    const report = runReports[run.id];
+                                    const runKind = report ? getRunKindLabel(report.result) : 'Loading kind...';
+
+                                    return (
+                                        <div
+                                            key={run.id}
+                                            className={`rounded border border-white/10 p-3 text-sm ${
+                                                selectedRunId === run.id ? 'bg-white/10' : 'bg-black/10'
+                                            }`}
+                                        >
+                                            <div className="flex items-start justify-between gap-3">
+                                                <div>
+                                                    <div className="font-medium">
+                                                        Run #{run.id} · {run.status}
+                                                    </div>
+                                                    <div className="text-xs text-gray-400">
+                                                        {runKind} · Created {formatTimestamp(run.created_at)}
+                                                    </div>
+                                                    {report && isPacketResult(report.result) && (
+                                                        <div className="text-xs text-gray-400 mt-1">
+                                                            Packet state:{' '}
+                                                            {humanizeEnum(report.result.execution_status)}
+                                                        </div>
+                                                    )}
+                                                    {report && isReviewedSubmissionResult(report.result) && (
+                                                        <div className="text-xs text-gray-400 mt-1">
+                                                            Review outcome:{' '}
+                                                            {humanizeEnum(report.result.review_outcome)}
+                                                        </div>
+                                                    )}
+                                                    {run.error && (
+                                                        <div className="text-xs text-rose-300 mt-1">
+                                                            Error: {run.error}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <button
+                                                    onClick={() => setSelectedRunId(run.id)}
+                                                    className="px-2 py-1 text-xs rounded border border-white/10 bg-white/5 text-white hover:bg-white/10"
+                                                    disabled={prepareSubmitting || reviewSubmitting || activeApprovalId !== null}
+                                                >
+                                                    {selectedRunId === run.id ? 'Inspecting' : 'Inspect'}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </section>
+
+                    <section className="space-y-3">
+                        <div>
+                            <h3 className="text-base font-medium">5. Audit Log View</h3>
+                            <p className="text-sm text-gray-400">
+                                Shows packet prepared, submission received, validation failed, approval
+                                created, and completed-without-draft style events for the selected run.
+                            </p>
+                        </div>
+
+                        {selectedRun ? (
+                            <div className="text-sm text-gray-400">
+                                Inspecting run #{selectedRun.id} ({selectedRun.status})
+                            </div>
+                        ) : (
+                            <div className="text-sm text-gray-500">
+                                Select a run to inspect its audit log.
+                            </div>
+                        )}
+
+                        {auditError && (
+                            <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                                {auditError}
+                            </div>
+                        )}
+
+                        {auditLoading ? (
+                            <div className="text-sm text-gray-400">Loading audit history...</div>
+                        ) : selectedRunId === null ? null : auditLogs.length === 0 ? (
+                            <div className="text-sm text-gray-500">No audit history found for this run.</div>
+                        ) : (
+                            <div className="rounded border border-white/10 bg-white/5 p-3 space-y-3">
+                                {auditLogs.map((log) => (
+                                    <div
+                                        key={log.id}
+                                        className="border-b border-gray-700/40 pb-3 last:border-b-0"
+                                    >
+                                        <div className="flex items-center justify-between gap-3">
+                                            <div className="text-sm font-medium">
+                                                {humanizeEnum(log.action)}
+                                            </div>
+                                            <div className="text-xs text-gray-400">
+                                                {formatTimestamp(log.created_at)}
+                                            </div>
+                                        </div>
+                                        <div className="text-xs text-gray-400 mt-0.5">
+                                            Actor: {humanizeEnum(log.actor_type)}
+                                        </div>
+                                        {log.details && (
+                                            <pre className="mt-2 text-xs whitespace-pre-wrap rounded bg-black/20 p-2 overflow-auto">
+                                                {formatAuditDetails(log.details)}
+                                            </pre>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </section>
+
+                    <section className="space-y-3">
+                        <div>
+                            <h3 className="text-base font-medium">6. Approval Visibility</h3>
+                            <p className="text-sm text-gray-400">
+                                Review-only approvals for this workflow. Generic approve/reject endpoints
+                                are reused as-is.
+                            </p>
+                        </div>
+
+                        {approvalError && (
+                            <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                                {approvalError}
+                            </div>
+                        )}
+
+                        <div className="space-y-3">
+                            <div>
+                                <div className="font-medium text-sm mb-2">Pending Approvals</div>
+                                {approvals.length === 0 ? (
+                                    <div className="text-sm text-gray-500">No pending approvals.</div>
+                                ) : (
+                                    <div className="rounded border border-white/10 bg-white/5 p-3 space-y-3">
+                                        {approvals.map((approval) => {
+                                            const payload = parseApprovalPayload(approval.payload);
+                                            const isSubmitting = activeApprovalId === approval.id;
+
+                                            return (
+                                                <div
+                                                    key={approval.id}
+                                                    className="rounded border border-white/10 bg-black/10 p-3 text-sm"
+                                                >
+                                                    <div className="flex items-start justify-between gap-3">
+                                                        <div>
+                                                            <div className="font-medium">
+                                                                Approval #{approval.id} · {approval.action_type}
+                                                            </div>
+                                                            <div className="text-xs text-gray-400">
+                                                                Run #{approval.run_id} · Risk {approval.risk_level}
+                                                            </div>
+                                                            {payload.contact_id && (
+                                                                <div className="text-xs text-gray-400 mt-1">
+                                                                    Contact #{payload.contact_id}
+                                                                </div>
+                                                            )}
+                                                            {payload.review_mode && (
+                                                                <div className="text-xs text-gray-400 mt-1">
+                                                                    Review mode: {payload.review_mode}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                        <div className="flex items-center gap-2">
+                                                            <button
+                                                                onClick={() => void handleApprove(approval.id)}
+                                                                className="px-2 py-1 text-xs rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                                                                disabled={isBusy || prepareSubmitting || reviewSubmitting || activeApprovalId !== null}
+                                                            >
+                                                                {isSubmitting ? 'Working...' : 'Approve'}
+                                                            </button>
+                                                            <button
+                                                                onClick={() => void handleReject(approval.id)}
+                                                                className="px-2 py-1 text-xs rounded bg-rose-600 text-white hover:bg-rose-700 disabled:opacity-50"
+                                                                disabled={isBusy || prepareSubmitting || reviewSubmitting || activeApprovalId !== null}
+                                                            >
+                                                                Reject
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                    {payload.subject && (
+                                                        <div className="mt-3">
+                                                            <div className="text-xs font-semibold text-gray-300">
+                                                                Subject
+                                                            </div>
+                                                            <div className="text-sm text-gray-100">
+                                                                {payload.subject}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    {payload.body && (
+                                                        <div className="mt-3">
+                                                            <div className="text-xs font-semibold text-gray-300">
+                                                                Body
+                                                            </div>
+                                                            <pre className="text-xs whitespace-pre-wrap rounded bg-black/20 p-2 overflow-auto">
+                                                                {payload.body}
+                                                            </pre>
+                                                        </div>
+                                                    )}
+                                                    {payload.shortlist_addresses && payload.shortlist_addresses.length > 0 && (
+                                                        <div className="mt-2 text-xs text-gray-300">
+                                                            Shortlist: {payload.shortlist_addresses.join(' | ')}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div>
+                                <div className="font-medium text-sm mb-2">Approval History</div>
+                                {approvalHistory.length === 0 ? (
+                                    <div className="text-sm text-gray-500">No approval decisions yet.</div>
+                                ) : (
+                                    <div className="rounded border border-white/10 bg-white/5 p-3 space-y-3">
+                                        {approvalHistory.map((approval) => {
+                                            const payload = parseApprovalPayload(approval.payload);
+                                            return (
+                                                <div
+                                                    key={approval.id}
+                                                    className="rounded border border-white/10 bg-black/10 p-3 text-sm"
+                                                >
+                                                    <div className="flex items-center justify-between gap-3">
+                                                        <div className="font-medium">
+                                                            Approval #{approval.id} · {approval.status}
+                                                        </div>
+                                                        <div className="text-xs text-gray-400">
+                                                            {getApprovalDecisionMeta(approval)}
+                                                        </div>
+                                                    </div>
+                                                    <div className="text-xs text-gray-400 mt-1">
+                                                        Run #{approval.run_id} · {approval.action_type}
+                                                    </div>
+                                                    {approval.rejection_reason && (
+                                                        <div className="mt-2 text-xs text-rose-300">
+                                                            Rejection reason: {approval.rejection_reason}
+                                                        </div>
+                                                    )}
+                                                    {payload.subject && (
+                                                        <div className="mt-2 text-xs text-gray-300">
+                                                            Subject: {payload.subject}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            </div>
+        </section>
+    );
+};
+
+export default ListingAlertRecommendationPanel;

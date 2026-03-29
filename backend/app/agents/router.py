@@ -12,6 +12,7 @@ from . import (
     conversation_closer,
     daily_market_scan,
     event_strategy_review,
+    listing_alert_recommendation,
     listing_cma,
     mls_auth,
     models,
@@ -30,6 +31,14 @@ router = APIRouter()
 
 def _bad_request_from_value_error(error: ValueError) -> HTTPException:
     return HTTPException(status_code=400, detail=str(error))
+
+
+def _listing_alert_recommendation_http_error_from_value_error(
+    error: ValueError,
+) -> HTTPException:
+    if str(error) == "source_packet_run_not_found":
+        return HTTPException(status_code=404, detail="Source run not found")
+    return _bad_request_from_value_error(error)
 
 
 def _serialize_conversation_closer_result(raw_result: str | None):
@@ -87,6 +96,56 @@ def _serialize_buyer_match_result(raw_result: str | None):
         return model.dict()
     except (ValidationError, TypeError, ValueError):
         return None
+
+
+def _serialize_listing_alert_recommendation_result(raw_result: str | None):
+    if not raw_result:
+        return None
+
+    try:
+        parsed = json.loads(raw_result)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    try:
+        if "review_outcome" in parsed:
+            if hasattr(
+                agent_schemas.ListingAlertReviewedSubmissionResultResponse,
+                "model_validate",
+            ):
+                model = (
+                    agent_schemas.ListingAlertReviewedSubmissionResultResponse.model_validate(
+                        parsed
+                    )
+                )
+                return model.model_dump()
+            model = agent_schemas.ListingAlertReviewedSubmissionResultResponse.parse_obj(
+                parsed
+            )
+            return model.dict()
+
+        if "execution_status" in parsed:
+            if hasattr(
+                agent_schemas.ListingAlertManualPacketResultResponse,
+                "model_validate",
+            ):
+                model = (
+                    agent_schemas.ListingAlertManualPacketResultResponse.model_validate(
+                        parsed
+                    )
+                )
+                return model.model_dump()
+            model = agent_schemas.ListingAlertManualPacketResultResponse.parse_obj(
+                parsed
+            )
+            return model.dict()
+    except (ValidationError, TypeError, ValueError):
+        return None
+
+    return None
 
 
 def _serialize_strategy_coordination_result(raw_result: str | None):
@@ -805,6 +864,212 @@ def get_latest_buyer_match_result(db: Session = Depends(get_db)):
         "error": run.error,
         "result": _serialize_buyer_match_result(run.result),
     }
+
+
+@router.post(
+    "/listing-alert-recommendation/prepare-manual-packet",
+    response_model=agent_schemas.AgentRun,
+    summary="Prepare a Manual Review Packet for a Gmail-driven listing alert.",
+)
+def prepare_listing_alert_manual_packet(
+    request: agent_schemas.ListingAlertRunRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        normalized_request = listing_alert_recommendation.normalize_run_request(request)
+    except ValueError as error:
+        raise _listing_alert_recommendation_http_error_from_value_error(error) from error
+
+    return listing_alert_recommendation.run_listing_alert_manual_packet_once(
+        db,
+        normalized_request,
+    )
+
+
+@router.post(
+    "/listing-alert-recommendation/submit-manual-review",
+    response_model=agent_schemas.AgentRun,
+    summary="Persist a Manual Review submission for a listing alert workflow.",
+)
+def submit_listing_alert_manual_review(
+    request: agent_schemas.ListingAlertManualReviewSubmissionRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        normalized_request = (
+            listing_alert_recommendation.normalize_manual_review_submission_request(
+                request
+            )
+        )
+        return listing_alert_recommendation.submit_listing_alert_manual_review(
+            db,
+            normalized_request,
+        )
+    except ValueError as error:
+        raise _listing_alert_recommendation_http_error_from_value_error(error) from error
+
+
+@router.get(
+    "/listing-alert-recommendation/runs",
+    response_model=List[agent_schemas.AgentRun],
+    summary="List recent Listing Alert Recommendation runs.",
+)
+def list_listing_alert_recommendation_runs(
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(models.AgentTask.agent_type == "listing_alert_recommendation")
+        .order_by(models.AgentRun.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+@router.get(
+    "/listing-alert-recommendation/latest",
+    response_model=agent_schemas.ListingAlertRecommendationLatestResponse,
+    summary="Get the latest Listing Alert Recommendation run result.",
+)
+def get_latest_listing_alert_recommendation_result(db: Session = Depends(get_db)):
+    run = (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(models.AgentTask.agent_type == "listing_alert_recommendation")
+        .order_by(models.AgentRun.created_at.desc())
+        .first()
+    )
+
+    if run is None:
+        return {
+            "run_id": None,
+            "status": None,
+            "error": None,
+            "result": None,
+        }
+
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "error": run.error,
+        "result": _serialize_listing_alert_recommendation_result(run.result),
+    }
+
+
+@router.get(
+    "/listing-alert-recommendation/runs/{run_id}/report",
+    response_model=agent_schemas.ListingAlertRecommendationRunReportResponse,
+    summary="Get the stored packet/result envelope for a Listing Alert Recommendation run.",
+)
+def get_listing_alert_recommendation_run_report(
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    run = (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(
+            models.AgentRun.id == run_id,
+            models.AgentTask.agent_type == "listing_alert_recommendation",
+        )
+        .first()
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    return {
+        "run_id": run.id,
+        "task_id": run.task_id,
+        "status": run.status,
+        "summary": run.summary,
+        "error": run.error,
+        "result": _serialize_listing_alert_recommendation_result(run.result),
+    }
+
+
+@router.get(
+    "/listing-alert-recommendation/runs/{run_id}/audit-logs",
+    response_model=List[agent_schemas.AgentAuditLog],
+    summary="List audit logs for a Listing Alert Recommendation run.",
+)
+def list_listing_alert_recommendation_run_audit_logs(
+    run_id: int,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    run = (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(
+            models.AgentRun.id == run_id,
+            models.AgentTask.agent_type == "listing_alert_recommendation",
+        )
+        .first()
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    return (
+        db.query(models.AgentAuditLog)
+        .filter(models.AgentAuditLog.run_id == run.id)
+        .order_by(models.AgentAuditLog.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+
+
+@router.get(
+    "/listing-alert-recommendation/approvals",
+    response_model=List[agent_schemas.AgentApproval],
+    summary="List pending Listing Alert Recommendation approvals.",
+)
+def list_listing_alert_recommendation_pending_approvals(
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(models.AgentApproval)
+        .join(models.AgentRun, models.AgentApproval.run_id == models.AgentRun.id)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(
+            models.AgentApproval.status == "pending",
+            models.AgentRun.status == "waiting_approval",
+            models.AgentTask.agent_type == "listing_alert_recommendation",
+        )
+        .order_by(models.AgentApproval.created_at.desc())
+        .all()
+    )
+
+
+@router.get(
+    "/listing-alert-recommendation/approvals/history",
+    response_model=List[agent_schemas.AgentApproval],
+    summary="List recent resolved Listing Alert Recommendation approval decisions.",
+)
+def list_listing_alert_recommendation_approval_history(
+    limit: int = 20,
+    db: Session = Depends(get_db),
+):
+    approvals = (
+        db.query(models.AgentApproval)
+        .join(models.AgentRun, models.AgentApproval.run_id == models.AgentRun.id)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(
+            models.AgentApproval.status.in_(("approved", "rejected")),
+            models.AgentTask.agent_type == "listing_alert_recommendation",
+        )
+        .all()
+    )
+    approvals.sort(
+        key=lambda approval: (
+            approval.approved_at
+            or approval.rejected_at
+            or approval.created_at
+        ),
+        reverse=True,
+    )
+    return approvals[:limit]
 
 
 @router.post(
