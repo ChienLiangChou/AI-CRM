@@ -356,6 +356,11 @@ ListingAlertReviewOutcome = Literal[
     "waiting_approval",
     "completed_no_draft",
 ]
+ListingAlertGmailImportStatus = Literal[
+    "imported",
+    "duplicate_skipped",
+    "policy_skipped",
+]
 ListingAlertAssociationMethod = Literal[
     "expected_contact_id",
     "explicit_mapping",
@@ -404,6 +409,45 @@ class ListingAlertRunRequest(BaseModel):
     operator_notes: Optional[str] = None
     provider_strategy: Optional[dict[str, Any]] = None
     manual_reasoning_surface: Optional[str] = "chatgpt_pro_gpt_5_4"
+
+
+class ListingAlertGmailReadQueryPolicy(BaseModel):
+    allowed_sender: str
+    label_ids: list[str] = []
+    subject_keywords: list[str] = []
+    max_results: int = 10
+
+
+class ListingAlertGmailReadConfig(BaseModel):
+    access_token: str
+    gmail_user_id: str = "me"
+    query_policy: ListingAlertGmailReadQueryPolicy
+
+
+class ListingAlertGmailMessageReference(BaseModel):
+    message_id: str
+    thread_id: str
+
+
+class ListingAlertGmailImportOutcome(BaseModel):
+    status: ListingAlertGmailImportStatus
+    message_id: str
+    thread_id: Optional[str] = None
+    received_at: Optional[datetime] = None
+    subject: Optional[str] = None
+    normalized_message: Optional[ListingAlertGmailMessageInput] = None
+    existing_task_id: Optional[int] = None
+    existing_run_id: Optional[int] = None
+    imported_task_id: Optional[int] = None
+    imported_run_id: Optional[int] = None
+    reason: Optional[str] = None
+
+
+class ListingAlertGmailImportBatchResult(BaseModel):
+    gmail_user_id: str
+    query: str
+    matched_message_count: int = 0
+    outcomes: list[ListingAlertGmailImportOutcome] = []
 
 
 class ListingAlertNormalizedListing(BaseModel):
