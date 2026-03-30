@@ -214,6 +214,31 @@ const getApprovalDecisionMeta = (approval: AgentApproval) => {
     return `Created ${new Date(approval.created_at).toLocaleString()}`;
 };
 
+const getRunApproval = (
+    runId: number,
+    approvals: AgentApproval[],
+    approvalHistory: AgentApproval[],
+) => {
+    const pendingApproval = approvals.find((approval) => approval.run_id === runId);
+    if (pendingApproval) {
+        return pendingApproval;
+    }
+
+    return approvalHistory.find((approval) => approval.run_id === runId) ?? null;
+};
+
+const getRunApprovalLabel = (approval: AgentApproval | null) => {
+    if (!approval) {
+        return null;
+    }
+
+    if (approval.status === 'pending') {
+        return 'Pending';
+    }
+
+    return humanizeEnum(approval.status);
+};
+
 const findPacketReadyResult = (
     report: ListingAlertRecommendationRunReportResponse | null,
 ) => {
@@ -803,9 +828,12 @@ const ListingAlertRecommendationPanel = () => {
     };
 
     const renderReviewedSubmissionDetails = (
+        runId: number,
         result: ListingAlertReviewedSubmissionResultResponse,
     ) => {
         const hasDraft = result.client_facing_drafts.length > 0;
+        const approval = getRunApproval(runId, approvals, approvalHistory);
+        const approvalLabel = getRunApprovalLabel(approval);
 
         return (
             <div className="space-y-4">
@@ -825,6 +853,14 @@ const ListingAlertRecommendationPanel = () => {
                     {hasDraft && (
                         <div className="mt-1 text-xs text-sky-50">
                             Client-facing draft was submitted and approval was created.
+                        </div>
+                    )}
+                    {approvalLabel && (
+                        <div className="mt-1 text-xs text-gray-100">
+                            Approval status: {approvalLabel}
+                            {approval?.status === 'rejected' && approval.rejection_reason
+                                ? ` · Reason: ${approval.rejection_reason}`
+                                : ''}
                         </div>
                     )}
                 </div>
@@ -932,6 +968,8 @@ const ListingAlertRecommendationPanel = () => {
         : refreshing
             ? 'Refreshing Listing Alert Recommendation data...'
             : null;
+    const latestApproval =
+        latest.run_id !== null ? getRunApproval(latest.run_id, approvals, approvalHistory) : null;
 
     return (
         <section className="space-y-4 border rounded p-4 bg-white/5">
@@ -997,10 +1035,10 @@ const ListingAlertRecommendationPanel = () => {
                                     className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
                                     placeholder="Optional"
                                 />
-                                <div className="text-xs text-gray-500">
-                                    If blank, the frontend reuses Message ID for the normalized contract.
-                                </div>
                             </label>
+                            <div className="text-xs text-gray-500 md:col-span-2 -mt-1">
+                                If blank, the frontend reuses Message ID for the normalized contract.
+                            </div>
                             <label className="space-y-1 text-sm">
                                 <div className="text-gray-300">Received at</div>
                                 <input
@@ -1165,7 +1203,10 @@ const ListingAlertRecommendationPanel = () => {
 
                                 {selectedReport.result &&
                                     isReviewedSubmissionResult(selectedReport.result) &&
-                                    renderReviewedSubmissionDetails(selectedReport.result)}
+                                    renderReviewedSubmissionDetails(
+                                        selectedReport.run_id,
+                                        selectedReport.result,
+                                    )}
 
                                 {!selectedReport.result && selectedReport.status === 'failed' && (
                                     <div className="rounded border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
@@ -1395,7 +1436,14 @@ const ListingAlertRecommendationPanel = () => {
                                                 <> · {humanizeEnum(latest.result.execution_status)}</>
                                             )}
                                             {isReviewedSubmissionResult(latest.result) && (
-                                                <> · {humanizeEnum(latest.result.review_outcome)}</>
+                                                <>
+                                                    {' '}
+                                                    ·{' '}
+                                                    {(latestApproval
+                                                        ? `Approval ${getRunApprovalLabel(latestApproval)}`
+                                                        : null) ??
+                                                        humanizeEnum(latest.result.review_outcome)}
+                                                </>
                                             )}
                                         </div>
                                     )}
@@ -1413,6 +1461,7 @@ const ListingAlertRecommendationPanel = () => {
                                 {runs.map((run) => {
                                     const report = runReports[run.id];
                                     const runKind = report ? getRunKindLabel(report.result) : 'Loading kind...';
+                                    const runApproval = getRunApproval(run.id, approvals, approvalHistory);
 
                                     return (
                                         <div
@@ -1437,8 +1486,9 @@ const ListingAlertRecommendationPanel = () => {
                                                     )}
                                                     {report && isReviewedSubmissionResult(report.result) && (
                                                         <div className="text-xs text-gray-400 mt-1">
-                                                            Review outcome:{' '}
-                                                            {humanizeEnum(report.result.review_outcome)}
+                                                            {getRunApprovalLabel(runApproval)
+                                                                ? `Approval status: ${getRunApprovalLabel(runApproval)}`
+                                                                : `Review outcome: ${humanizeEnum(report.result.review_outcome)}`}
                                                         </div>
                                                     )}
                                                     {run.error && (
