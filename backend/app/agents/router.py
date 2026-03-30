@@ -13,6 +13,7 @@ from . import (
     daily_market_scan,
     event_strategy_review,
     listing_alert_recommendation,
+    listing_alert_recommendation_gmail,
     listing_cma,
     mls_auth,
     models,
@@ -38,6 +39,10 @@ def _listing_alert_recommendation_http_error_from_value_error(
 ) -> HTTPException:
     if str(error) == "source_packet_run_not_found":
         return HTTPException(status_code=404, detail="Source run not found")
+    if str(error) == "gmail_api_http_error_401":
+        return HTTPException(status_code=401, detail="Gmail access token rejected")
+    if str(error) == "gmail_api_http_error_403":
+        return HTTPException(status_code=403, detail="Gmail access forbidden")
     return _bad_request_from_value_error(error)
 
 
@@ -864,6 +869,56 @@ def get_latest_buyer_match_result(db: Session = Depends(get_db)):
         "error": run.error,
         "result": _serialize_buyer_match_result(run.result),
     }
+
+
+@router.post(
+    "/listing-alert-recommendation/gmail/fetch-candidates",
+    response_model=agent_schemas.ListingAlertGmailFetchCandidatesResponse,
+    summary="Fetch constrained Gmail MLS alert candidates without importing them.",
+)
+def fetch_listing_alert_gmail_candidates(
+    request: agent_schemas.ListingAlertGmailFetchCandidatesRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        normalized_request = (
+            listing_alert_recommendation_gmail.normalize_gmail_read_config(request)
+        )
+        return listing_alert_recommendation_gmail.fetch_gmail_candidates(
+            db,
+            normalized_request,
+        )
+    except ValueError as error:
+        raise _listing_alert_recommendation_http_error_from_value_error(error) from error
+
+
+@router.post(
+    "/listing-alert-recommendation/gmail/import-message",
+    response_model=agent_schemas.ListingAlertGmailImportOutcome,
+    summary="Import one constrained Gmail MLS alert message into Manual Mode packet prep.",
+)
+def import_listing_alert_gmail_message(
+    request: agent_schemas.ListingAlertGmailImportMessageRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        normalized_config = listing_alert_recommendation_gmail.normalize_gmail_read_config(
+            {
+                "access_token": request.access_token,
+                "gmail_user_id": request.gmail_user_id,
+                "query_policy": request.query_policy,
+            }
+        )
+        return listing_alert_recommendation_gmail.import_gmail_message_reference(
+            db,
+            normalized_config,
+            request.message_id,
+            expected_contact_id=request.expected_contact_id,
+            explicit_contact_mappings=request.explicit_contact_mappings,
+            operator_notes=request.operator_notes,
+        )
+    except ValueError as error:
+        raise _listing_alert_recommendation_http_error_from_value_error(error) from error
 
 
 @router.post(

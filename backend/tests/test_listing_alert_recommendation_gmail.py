@@ -6,8 +6,10 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 pywebpush_stub = types.ModuleType("pywebpush")
 pywebpush_stub.webpush = lambda *args, **kwargs: None
@@ -18,7 +20,8 @@ from app import models as crm_models
 from app.agents import listing_alert_recommendation_gmail
 from app.agents import models as agent_models
 from app.agents import schemas as agent_schemas
-from app.database import Base
+from app.database import Base, get_db
+from app.main import app
 
 
 def utcnow_naive() -> datetime:
@@ -32,8 +35,9 @@ def encode_body(value: str) -> str:
 class ListingAlertRecommendationGmailImportTests(unittest.TestCase):
     def setUp(self):
         self.engine = create_engine(
-            "sqlite:///:memory:",
+            "sqlite://",
             connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
         )
         self.SessionLocal = sessionmaker(
             autocommit=False,
@@ -42,13 +46,25 @@ class ListingAlertRecommendationGmailImportTests(unittest.TestCase):
         )
         Base.metadata.create_all(bind=self.engine)
         self.db = self.SessionLocal()
+        self.client = TestClient(app)
 
         self.stage = crm_models.PipelineStage(name="Lead", order=1)
         self.db.add(self.stage)
         self.db.commit()
         self.db.refresh(self.stage)
 
+        def override_get_db():
+            db = self.SessionLocal()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
+
     def tearDown(self):
+        self.client.close()
+        app.dependency_overrides.pop(get_db, None)
         self.db.close()
         self.engine.dispose()
 
@@ -185,6 +201,22 @@ class ListingAlertRecommendationGmailImportTests(unittest.TestCase):
             .all()
         )
         return [log.action for log in logs]
+
+    def assert_token_not_persisted(self, token: str):
+        task_payloads = [
+            task.payload or ""
+            for task in self.db.query(agent_models.AgentTask).all()
+        ]
+        run_payloads = []
+        for run in self.db.query(agent_models.AgentRun).all():
+            run_payloads.extend([run.plan or "", run.result or "", run.error or ""])
+        audit_payloads = [
+            log.details or ""
+            for log in self.db.query(agent_models.AgentAuditLog).all()
+        ]
+
+        for payload in task_payloads + run_payloads + audit_payloads:
+            self.assertNotIn(token, payload)
 
     def test_fetch_and_import_gmail_alerts_feeds_existing_manual_packet_path(self):
         contact = self.create_contact()
@@ -385,6 +417,114 @@ class ListingAlertRecommendationGmailImportTests(unittest.TestCase):
         self.assertIn("Toronto MLS Saved Search Results", message.plain_text_body)
         self.assertEqual(message.html_body, "<p>HTML body</p>")
         self.assertEqual(message.attachment_names, ["listing.pdf"])
+
+    def test_fetch_candidates_route_returns_policy_checked_candidates_without_importing(self):
+        access_token = "route-fetch-token"
+        with patch.object(
+            listing_alert_recommendation_gmail,
+            "_gmail_api_request_json",
+            side_effect=[
+                self.list_response(
+                    message_id="gmail-route-fetch-1",
+                    thread_id="gmail-route-thread-1",
+                ),
+                self.gmail_message_response(
+                    message_id="gmail-route-fetch-1",
+                    thread_id="gmail-route-thread-1",
+                ),
+            ],
+        ):
+            response = self.client.post(
+                "/api/agents/listing-alert-recommendation/gmail/fetch-candidates",
+                json={
+                    "access_token": access_token,
+                    "gmail_user_id": "me",
+                    "query_policy": {
+                        "allowed_sender": "alerts@mls.example",
+                        "label_ids": ["mls-alerts"],
+                        "subject_keywords": ["Toronto MLS Alert"],
+                        "max_results": 5,
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["matched_message_count"], 1)
+        self.assertEqual(payload["candidate_count"], 1)
+        self.assertEqual(payload["candidates"][0]["message_id"], "gmail-route-fetch-1")
+        self.assertNotIn("access_token", payload)
+        self.assertEqual(self.db.query(agent_models.AgentTask).count(), 0)
+        self.assertEqual(self.db.query(agent_models.AgentRun).count(), 0)
+        self.assert_token_not_persisted(access_token)
+
+    def test_import_message_route_imports_once_then_returns_duplicate_reference(self):
+        contact = self.create_contact()
+        self.create_interaction(contact.id)
+        access_token = "route-import-token"
+
+        with patch.object(
+            listing_alert_recommendation_gmail,
+            "_gmail_api_request_json",
+            side_effect=[
+                self.gmail_message_response(
+                    message_id="gmail-route-import-1",
+                    thread_id="gmail-route-import-thread-1",
+                ),
+            ],
+        ):
+            first_response = self.client.post(
+                "/api/agents/listing-alert-recommendation/gmail/import-message",
+                json={
+                    "access_token": access_token,
+                    "gmail_user_id": "me",
+                    "query_policy": {
+                        "allowed_sender": "alerts@mls.example",
+                        "label_ids": ["mls-alerts"],
+                        "subject_keywords": ["Toronto MLS Alert"],
+                        "max_results": 5,
+                    },
+                    "message_id": "gmail-route-import-1",
+                    "expected_contact_id": contact.id,
+                    "operator_notes": "Route import test.",
+                },
+            )
+
+        self.assertEqual(first_response.status_code, 200)
+        first_payload = first_response.json()
+        self.assertEqual(first_payload["status"], "imported")
+        self.assertIsNotNone(first_payload["imported_task_id"])
+        self.assertIsNotNone(first_payload["imported_run_id"])
+        self.assertNotIn("access_token", first_payload)
+
+        second_response = self.client.post(
+            "/api/agents/listing-alert-recommendation/gmail/import-message",
+            json={
+                "access_token": access_token,
+                "gmail_user_id": "me",
+                "query_policy": {
+                    "allowed_sender": "alerts@mls.example",
+                    "label_ids": ["mls-alerts"],
+                    "subject_keywords": ["Toronto MLS Alert"],
+                    "max_results": 5,
+                },
+                "message_id": "gmail-route-import-1",
+                "expected_contact_id": contact.id,
+            },
+        )
+
+        self.assertEqual(second_response.status_code, 200)
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["status"], "duplicate_skipped")
+        self.assertEqual(
+            second_payload["existing_task_id"],
+            first_payload["imported_task_id"],
+        )
+        self.assertEqual(
+            second_payload["existing_run_id"],
+            first_payload["imported_run_id"],
+        )
+        self.assert_token_not_persisted(access_token)
 
 
 if __name__ == "__main__":

@@ -450,6 +450,36 @@ class ListingAlertGmailImportBatchResult(BaseModel):
     outcomes: list[ListingAlertGmailImportOutcome] = []
 
 
+class ListingAlertGmailFetchCandidatesRequest(ListingAlertGmailReadConfig):
+    pass
+
+
+class ListingAlertGmailImportMessageRequest(ListingAlertGmailReadConfig):
+    message_id: str
+    expected_contact_id: Optional[int] = None
+    explicit_contact_mappings: list[ListingAlertExplicitContactMappingInput] = []
+    operator_notes: Optional[str] = None
+
+
+class ListingAlertGmailCandidateMessage(BaseModel):
+    message_id: str
+    thread_id: str
+    received_at: Optional[datetime] = None
+    subject: str
+    from_address: Optional[str] = None
+    label_ids: list[str] = []
+    existing_task_id: Optional[int] = None
+    existing_run_id: Optional[int] = None
+
+
+class ListingAlertGmailFetchCandidatesResponse(BaseModel):
+    gmail_user_id: str
+    query: str
+    matched_message_count: int = 0
+    candidate_count: int = 0
+    candidates: list[ListingAlertGmailCandidateMessage] = []
+
+
 class ListingAlertNormalizedListing(BaseModel):
     listing_ref: str
     address: str

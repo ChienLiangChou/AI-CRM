@@ -434,6 +434,88 @@ def find_existing_packet_run_by_message_id(
     return None, None
 
 
+def fetch_gmail_candidates(
+    db: Session,
+    config: Any,
+) -> agent_schemas.ListingAlertGmailFetchCandidatesResponse:
+    normalized_config = normalize_gmail_read_config(config)
+    query, message_refs = list_matching_gmail_message_references(normalized_config)
+    service.write_audit_log(
+        db,
+        actor_type="system",
+        action="listing_alert_gmail_query_executed",
+        details=_safe_json_dumps(
+            {
+                "gmail_user_id": normalized_config.gmail_user_id,
+                "query": query,
+                "label_ids": normalized_config.query_policy.label_ids,
+                "matched_message_count": len(message_refs),
+                "max_results": normalized_config.query_policy.max_results,
+            }
+        ),
+    )
+
+    candidates: list[agent_schemas.ListingAlertGmailCandidateMessage] = []
+    for message_ref in message_refs:
+        normalized_message = fetch_normalized_gmail_message(normalized_config, message_ref)
+        service.write_audit_log(
+            db,
+            actor_type="system",
+            action="listing_alert_gmail_message_fetched",
+            details=_safe_json_dumps(
+                {
+                    "message_id": normalized_message.message_id,
+                    "thread_id": normalized_message.thread_id,
+                    "subject": normalized_message.subject,
+                }
+            ),
+        )
+
+        policy_reason = _message_matches_query_policy(
+            normalized_message,
+            normalized_config.query_policy,
+        )
+        if policy_reason is not None:
+            service.write_audit_log(
+                db,
+                actor_type="system",
+                action="listing_alert_gmail_message_policy_skipped",
+                details=_safe_json_dumps(
+                    {
+                        "message_id": normalized_message.message_id,
+                        "thread_id": normalized_message.thread_id,
+                        "reason": policy_reason,
+                    }
+                ),
+            )
+            continue
+
+        existing_task, existing_run = find_existing_packet_run_by_message_id(
+            db,
+            message_id=normalized_message.message_id,
+        )
+        candidates.append(
+            agent_schemas.ListingAlertGmailCandidateMessage(
+                message_id=normalized_message.message_id,
+                thread_id=normalized_message.thread_id,
+                received_at=normalized_message.received_at,
+                subject=normalized_message.subject,
+                from_address=normalized_message.from_address,
+                label_ids=normalized_message.label_ids,
+                existing_task_id=existing_task.id if existing_task else None,
+                existing_run_id=existing_run.id if existing_run else None,
+            )
+        )
+
+    return agent_schemas.ListingAlertGmailFetchCandidatesResponse(
+        gmail_user_id=normalized_config.gmail_user_id,
+        query=query,
+        matched_message_count=len(message_refs),
+        candidate_count=len(candidates),
+        candidates=candidates,
+    )
+
+
 def import_gmail_message_reference(
     db: Session,
     config: Any,
