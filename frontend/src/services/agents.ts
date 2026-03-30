@@ -292,6 +292,66 @@ export interface ListingAlertGmailMessageInput {
     attachment_names: string[];
 }
 
+export interface ListingAlertGmailReadQueryPolicy {
+    allowed_sender: string;
+    label_ids: string[];
+    subject_keywords: string[];
+    max_results: number;
+}
+
+export interface ListingAlertGmailFetchCandidatesRequest {
+    access_token: string;
+    gmail_user_id?: string;
+    query_policy: ListingAlertGmailReadQueryPolicy;
+}
+
+export interface ListingAlertGmailImportMessageRequest {
+    access_token: string;
+    gmail_user_id?: string;
+    query_policy: ListingAlertGmailReadQueryPolicy;
+    message_id: string;
+    expected_contact_id?: number | null;
+    operator_notes?: string | null;
+}
+
+export type ListingAlertGmailImportStatus =
+    | 'imported'
+    | 'duplicate_skipped'
+    | 'policy_skipped';
+
+export interface ListingAlertGmailCandidateMessage {
+    message_id: string;
+    thread_id: string;
+    received_at?: string | null;
+    subject: string;
+    from_address?: string | null;
+    label_ids: string[];
+    existing_task_id?: number | null;
+    existing_run_id?: number | null;
+}
+
+export interface ListingAlertGmailFetchCandidatesResponse {
+    gmail_user_id: string;
+    query: string;
+    matched_message_count: number;
+    candidate_count: number;
+    candidates: ListingAlertGmailCandidateMessage[];
+}
+
+export interface ListingAlertGmailImportOutcome {
+    status: ListingAlertGmailImportStatus;
+    message_id: string;
+    thread_id?: string | null;
+    received_at?: string | null;
+    subject?: string | null;
+    normalized_message?: ListingAlertGmailMessageInput | null;
+    existing_task_id?: number | null;
+    existing_run_id?: number | null;
+    imported_task_id?: number | null;
+    imported_run_id?: number | null;
+    reason?: string | null;
+}
+
 export interface ListingAlertRunRequest {
     execution_mode?: ListingAlertExecutionMode;
     gmail_alert: ListingAlertGmailMessageInput;
@@ -1367,6 +1427,85 @@ const normalizeListingAlertMessage = (
             typeof value?.plain_text_body === 'string' ? value.plain_text_body : null,
         html_body: typeof value?.html_body === 'string' ? value.html_body : null,
         attachment_names: ensureArray<string>(value?.attachment_names),
+    };
+};
+
+const normalizeListingAlertGmailQueryPolicy = (
+    value: Partial<ListingAlertGmailReadQueryPolicy> | null | undefined,
+): ListingAlertGmailReadQueryPolicy => {
+    return {
+        allowed_sender:
+            typeof value?.allowed_sender === 'string' ? value.allowed_sender : '',
+        label_ids: ensureArray<string>(value?.label_ids),
+        subject_keywords: ensureArray<string>(value?.subject_keywords),
+        max_results:
+            typeof value?.max_results === 'number' && Number.isFinite(value.max_results)
+                ? value.max_results
+                : 10,
+    };
+};
+
+const normalizeListingAlertGmailCandidateMessage = (
+    value: Partial<ListingAlertGmailCandidateMessage> | null | undefined,
+): ListingAlertGmailCandidateMessage => {
+    return {
+        message_id: typeof value?.message_id === 'string' ? value.message_id : '',
+        thread_id: typeof value?.thread_id === 'string' ? value.thread_id : '',
+        received_at: typeof value?.received_at === 'string' ? value.received_at : null,
+        subject: typeof value?.subject === 'string' ? value.subject : '',
+        from_address:
+            typeof value?.from_address === 'string' ? value.from_address : null,
+        label_ids: ensureArray<string>(value?.label_ids),
+        existing_task_id:
+            typeof value?.existing_task_id === 'number' ? value.existing_task_id : null,
+        existing_run_id:
+            typeof value?.existing_run_id === 'number' ? value.existing_run_id : null,
+    };
+};
+
+const normalizeListingAlertGmailFetchCandidatesResponse = (
+    value: Partial<ListingAlertGmailFetchCandidatesResponse> | null | undefined,
+): ListingAlertGmailFetchCandidatesResponse => {
+    return {
+        gmail_user_id:
+            typeof value?.gmail_user_id === 'string' ? value.gmail_user_id : 'me',
+        query: typeof value?.query === 'string' ? value.query : '',
+        matched_message_count:
+            typeof value?.matched_message_count === 'number' ? value.matched_message_count : 0,
+        candidate_count:
+            typeof value?.candidate_count === 'number' ? value.candidate_count : 0,
+        candidates: ensureArray<Partial<ListingAlertGmailCandidateMessage>>(
+            value?.candidates,
+        ).map(normalizeListingAlertGmailCandidateMessage),
+    };
+};
+
+const normalizeListingAlertGmailImportOutcome = (
+    value: Partial<ListingAlertGmailImportOutcome> | null | undefined,
+): ListingAlertGmailImportOutcome => {
+    return {
+        status:
+            value?.status === 'imported' ||
+            value?.status === 'duplicate_skipped' ||
+            value?.status === 'policy_skipped'
+                ? value.status
+                : 'policy_skipped',
+        message_id: typeof value?.message_id === 'string' ? value.message_id : '',
+        thread_id: typeof value?.thread_id === 'string' ? value.thread_id : null,
+        received_at: typeof value?.received_at === 'string' ? value.received_at : null,
+        subject: typeof value?.subject === 'string' ? value.subject : null,
+        normalized_message: value?.normalized_message
+            ? normalizeListingAlertMessage(value.normalized_message)
+            : null,
+        existing_task_id:
+            typeof value?.existing_task_id === 'number' ? value.existing_task_id : null,
+        existing_run_id:
+            typeof value?.existing_run_id === 'number' ? value.existing_run_id : null,
+        imported_task_id:
+            typeof value?.imported_task_id === 'number' ? value.imported_task_id : null,
+        imported_run_id:
+            typeof value?.imported_run_id === 'number' ? value.imported_run_id : null,
+        reason: typeof value?.reason === 'string' ? value.reason : null,
     };
 };
 
@@ -2849,6 +2988,39 @@ export const agentsService = {
             payload,
         );
         return res.data;
+    },
+
+    fetchListingAlertGmailCandidates: async (
+        payload: ListingAlertGmailFetchCandidatesRequest,
+    ): Promise<ListingAlertGmailFetchCandidatesResponse> => {
+        const normalizedPayload: ListingAlertGmailFetchCandidatesRequest = {
+            access_token: payload.access_token,
+            gmail_user_id: payload.gmail_user_id || 'me',
+            query_policy: normalizeListingAlertGmailQueryPolicy(payload.query_policy),
+        };
+        const res = await api.post<ListingAlertGmailFetchCandidatesResponse>(
+            '/agents/listing-alert-recommendation/gmail/fetch-candidates',
+            normalizedPayload,
+        );
+        return normalizeListingAlertGmailFetchCandidatesResponse(res.data);
+    },
+
+    importListingAlertGmailMessage: async (
+        payload: ListingAlertGmailImportMessageRequest,
+    ): Promise<ListingAlertGmailImportOutcome> => {
+        const normalizedPayload: ListingAlertGmailImportMessageRequest = {
+            access_token: payload.access_token,
+            gmail_user_id: payload.gmail_user_id || 'me',
+            query_policy: normalizeListingAlertGmailQueryPolicy(payload.query_policy),
+            message_id: payload.message_id,
+            expected_contact_id: payload.expected_contact_id ?? null,
+            operator_notes: payload.operator_notes ?? null,
+        };
+        const res = await api.post<ListingAlertGmailImportOutcome>(
+            '/agents/listing-alert-recommendation/gmail/import-message',
+            normalizedPayload,
+        );
+        return normalizeListingAlertGmailImportOutcome(res.data);
     },
 
     submitListingAlertManualReview: async (

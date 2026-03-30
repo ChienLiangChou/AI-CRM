@@ -6,6 +6,9 @@ import type {
     AgentAuditLog,
     AgentRun,
     ListingAlertClientAssociationResponse,
+    ListingAlertGmailCandidateMessage,
+    ListingAlertGmailFetchCandidatesResponse,
+    ListingAlertGmailImportOutcome,
     ListingAlertManualPacketResultResponse,
     ListingAlertManualReviewPacket,
     ListingAlertManualReviewSubmissionRequest,
@@ -34,6 +37,17 @@ type PacketFormState = {
     plainTextBody: string;
     htmlBody: string;
     labelIds: string;
+    operatorNotes: string;
+};
+
+type GmailFetchFormState = {
+    accessToken: string;
+    gmailUserId: string;
+    allowedSender: string;
+    labelIds: string;
+    subjectKeywords: string;
+    maxResults: string;
+    expectedContactId: string;
     operatorNotes: string;
 };
 
@@ -75,6 +89,17 @@ const EMPTY_PACKET_FORM: PacketFormState = {
     plainTextBody: '',
     htmlBody: '',
     labelIds: '',
+    operatorNotes: '',
+};
+
+const EMPTY_GMAIL_FETCH_FORM: GmailFetchFormState = {
+    accessToken: '',
+    gmailUserId: 'me',
+    allowedSender: '',
+    labelIds: '',
+    subjectKeywords: '',
+    maxResults: '5',
+    expectedContactId: '',
     operatorNotes: '',
 };
 
@@ -239,6 +264,16 @@ const getRunApprovalLabel = (approval: AgentApproval | null) => {
     return humanizeEnum(approval.status);
 };
 
+const getGmailImportOutcomeTone = (status?: ListingAlertGmailImportOutcome['status'] | null) => {
+    if (status === 'imported') {
+        return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100';
+    }
+    if (status === 'duplicate_skipped') {
+        return 'border-amber-500/30 bg-amber-500/10 text-amber-100';
+    }
+    return 'border-rose-500/30 bg-rose-500/10 text-rose-100';
+};
+
 const findPacketReadyResult = (
     report: ListingAlertRecommendationRunReportResponse | null,
 ) => {
@@ -274,11 +309,22 @@ const renderContextValue = (value: unknown) => {
 };
 
 const ListingAlertRecommendationPanel = () => {
+    const [gmailFetchForm, setGmailFetchForm] = useState<GmailFetchFormState>(
+        EMPTY_GMAIL_FETCH_FORM,
+    );
     const [packetForm, setPacketForm] = useState<PacketFormState>(EMPTY_PACKET_FORM);
     const [reviewForm, setReviewForm] = useState<ReviewFormState>(EMPTY_REVIEW_FORM);
     const [shortlistSelections, setShortlistSelections] = useState<
         Record<string, ShortlistSelectionState>
     >({});
+
+    const [gmailCandidatesResult, setGmailCandidatesResult] =
+        useState<ListingAlertGmailFetchCandidatesResponse | null>(null);
+    const [selectedCandidateMessageId, setSelectedCandidateMessageId] = useState<string | null>(
+        null,
+    );
+    const [gmailImportOutcome, setGmailImportOutcome] =
+        useState<ListingAlertGmailImportOutcome | null>(null);
 
     const [runs, setRuns] = useState<AgentRun[]>([]);
     const [runReports, setRunReports] = useState<Record<number, ListingAlertRecommendationRunReportResponse>>(
@@ -292,6 +338,8 @@ const ListingAlertRecommendationPanel = () => {
 
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
+    const [gmailFetching, setGmailFetching] = useState(false);
+    const [gmailImporting, setGmailImporting] = useState(false);
     const [prepareSubmitting, setPrepareSubmitting] = useState(false);
     const [reviewSubmitting, setReviewSubmitting] = useState(false);
     const [reportLoading, setReportLoading] = useState(false);
@@ -299,6 +347,7 @@ const ListingAlertRecommendationPanel = () => {
     const [activeApprovalId, setActiveApprovalId] = useState<number | null>(null);
 
     const [error, setError] = useState<string | null>(null);
+    const [gmailError, setGmailError] = useState<string | null>(null);
     const [reportError, setReportError] = useState<string | null>(null);
     const [auditError, setAuditError] = useState<string | null>(null);
     const [approvalError, setApprovalError] = useState<string | null>(null);
@@ -308,6 +357,10 @@ const ListingAlertRecommendationPanel = () => {
     const selectedReport = selectedRunId !== null ? runReports[selectedRunId] ?? null : null;
     const selectedPacketResult = findPacketReadyResult(selectedReport);
     const selectedPacket = selectedPacketResult?.manual_review_packet ?? null;
+    const selectedCandidate =
+        gmailCandidatesResult?.candidates.find(
+            (candidate) => candidate.message_id === selectedCandidateMessageId,
+        ) ?? null;
     const selectedShortlistCount = Object.values(shortlistSelections).filter(
         (item) => item.selected,
     ).length;
@@ -453,11 +506,50 @@ const ListingAlertRecommendationPanel = () => {
         }));
     };
 
+    const updateGmailFetchField = (key: keyof GmailFetchFormState, value: string) => {
+        setGmailFetchForm((current) => ({
+            ...current,
+            [key]: value,
+        }));
+    };
+
     const updateReviewField = (key: keyof ReviewFormState, value: string) => {
         setReviewForm((current) => ({
             ...current,
             [key]: value,
         }));
+    };
+
+    const syncPacketFormFromImportedMessage = (
+        outcome: ListingAlertGmailImportOutcome,
+        candidate?: ListingAlertGmailCandidateMessage | null,
+    ) => {
+        const message = outcome.normalized_message;
+        if (!message) {
+            return;
+        }
+
+        setPacketForm({
+            expectedContactId: gmailFetchForm.expectedContactId.trim(),
+            messageId: message.message_id,
+            threadId: message.thread_id,
+            receivedAt: message.received_at
+                ? new Date(message.received_at).toISOString().slice(0, 16)
+                : '',
+            subject: message.subject,
+            fromAddress: message.from_address || '',
+            toAddresses: message.to_addresses.join('\n'),
+            snippet: message.snippet || '',
+            plainTextBody: message.plain_text_body || '',
+            htmlBody: message.html_body || '',
+            labelIds: message.label_ids.join('\n'),
+            operatorNotes:
+                gmailFetchForm.operatorNotes.trim() ||
+                packetForm.operatorNotes ||
+                (candidate?.existing_run_id
+                    ? `Duplicate Gmail import reference for run #${candidate.existing_run_id}.`
+                    : 'Imported from Gmail read-only intake.'),
+        });
     };
 
     const toggleListingSelection = (listingRef: string, selected: boolean) => {
@@ -506,6 +598,117 @@ const ListingAlertRecommendationPanel = () => {
                 [field]: value,
             },
         }));
+    };
+
+    const handleFetchGmailCandidates = async () => {
+        if (!gmailFetchForm.accessToken.trim()) {
+            setGmailError('Temporary Gmail access token is required for read-only fetch.');
+            return;
+        }
+
+        if (!gmailFetchForm.allowedSender.trim()) {
+            setGmailError('Allowed sender is required for constrained Gmail fetch.');
+            return;
+        }
+
+        const maxResults = Number(gmailFetchForm.maxResults.trim() || '5');
+        if (!Number.isFinite(maxResults) || maxResults <= 0) {
+            setGmailError('Max results must be a positive number.');
+            return;
+        }
+
+        setGmailFetching(true);
+        setGmailError(null);
+        setGmailImportOutcome(null);
+
+        try {
+            const result = await agentsService.fetchListingAlertGmailCandidates({
+                access_token: gmailFetchForm.accessToken.trim(),
+                gmail_user_id: gmailFetchForm.gmailUserId.trim() || 'me',
+                query_policy: {
+                    allowed_sender: gmailFetchForm.allowedSender.trim(),
+                    label_ids: splitList(gmailFetchForm.labelIds),
+                    subject_keywords: splitList(gmailFetchForm.subjectKeywords),
+                    max_results: maxResults,
+                },
+            });
+
+            setGmailCandidatesResult(result);
+            setSelectedCandidateMessageId(result.candidates[0]?.message_id ?? null);
+        } catch (fetchError) {
+            setGmailCandidatesResult(null);
+            setSelectedCandidateMessageId(null);
+            setGmailError(
+                getErrorMessage(fetchError, 'Failed to fetch constrained Gmail candidates.'),
+            );
+        } finally {
+            setGmailFetching(false);
+        }
+    };
+
+    const handleImportGmailMessage = async () => {
+        if (!selectedCandidateMessageId) {
+            setGmailError('Select one Gmail candidate message before importing.');
+            return;
+        }
+
+        if (!gmailFetchForm.accessToken.trim()) {
+            setGmailError('Temporary Gmail access token is required for import.');
+            return;
+        }
+
+        const expectedContactId = gmailFetchForm.expectedContactId.trim();
+        if (expectedContactId && !Number.isFinite(Number(expectedContactId))) {
+            setGmailError('Expected contact ID must be a valid number when provided.');
+            return;
+        }
+
+        const maxResults = Number(gmailFetchForm.maxResults.trim() || '5');
+        if (!Number.isFinite(maxResults) || maxResults <= 0) {
+            setGmailError('Max results must be a positive number.');
+            return;
+        }
+
+        const selectedCandidate =
+            gmailCandidatesResult?.candidates.find(
+                (candidate) => candidate.message_id === selectedCandidateMessageId,
+            ) ?? null;
+
+        setGmailImporting(true);
+        setGmailError(null);
+
+        try {
+            const outcome = await agentsService.importListingAlertGmailMessage({
+                access_token: gmailFetchForm.accessToken.trim(),
+                gmail_user_id: gmailFetchForm.gmailUserId.trim() || 'me',
+                query_policy: {
+                    allowed_sender: gmailFetchForm.allowedSender.trim(),
+                    label_ids: splitList(gmailFetchForm.labelIds),
+                    subject_keywords: splitList(gmailFetchForm.subjectKeywords),
+                    max_results: maxResults,
+                },
+                message_id: selectedCandidateMessageId,
+                expected_contact_id: expectedContactId ? Number(expectedContactId) : null,
+                operator_notes: gmailFetchForm.operatorNotes.trim() || null,
+            });
+
+            setGmailImportOutcome(outcome);
+            syncPacketFormFromImportedMessage(outcome, selectedCandidate);
+
+            if (outcome.status === 'imported' && outcome.imported_run_id) {
+                await loadData('refresh', outcome.imported_run_id);
+                return;
+            }
+
+            if (outcome.status === 'duplicate_skipped' && outcome.existing_run_id) {
+                await loadData('refresh', outcome.existing_run_id);
+            }
+        } catch (importError) {
+            setGmailImportOutcome(null);
+            setGmailError(getErrorMessage(importError, 'Failed to import Gmail message.'));
+        } finally {
+            setGmailImporting(false);
+        }
     };
 
     const handlePreparePacket = async () => {
@@ -742,7 +945,8 @@ const ListingAlertRecommendationPanel = () => {
                     <div className="rounded border border-white/10 bg-white/5 p-3 space-y-2">
                         <div className="font-medium text-sm">Prompt / Draft Constraints</div>
                         <div className="text-xs text-gray-400">
-                            Gmail-driven MLS alert intake only. No Gmail API is connected in this phase.
+                            Gmail-driven MLS alert intake only. Gmail access here is read-only and
+                            still feeds the same Manual Mode packet workflow.
                         </div>
                         <div>
                             <div className="text-xs font-semibold text-gray-300">Draft constraints</div>
@@ -977,8 +1181,9 @@ const ListingAlertRecommendationPanel = () => {
                 <div className="space-y-1">
                     <h2 className="text-lg font-medium">Listing Alert Recommendation</h2>
                     <p className="text-sm text-gray-400">
-                        Gmail-driven MLS alert intake for Manual Mode only. No Gmail API is connected
-                        yet in this phase, and manual review remains external to ChatGPT Pro / GPT-5.4 Pro.
+                        Gmail-driven MLS alert intake for Manual Mode only. Gmail access in this panel is
+                        read-only, token-based, and temporary; manual review still remains external to
+                        ChatGPT Pro / GPT-5.4 Pro.
                     </p>
                 </div>
                 <button
@@ -1001,10 +1206,286 @@ const ListingAlertRecommendationPanel = () => {
                 <div className="space-y-4">
                     <section className="space-y-3">
                         <div>
-                            <h3 className="text-base font-medium">1. Manual Packet Preparation</h3>
+                            <h3 className="text-base font-medium">1. Gmail Intake</h3>
                             <p className="text-sm text-gray-400">
-                                Manual-input Gmail alert intake only. Use normalized Gmail fields to
-                                prepare a review packet Kevin can take into ChatGPT Pro manually.
+                                Gmail READ only. Paste a temporary Gmail access token, fetch constrained
+                                MLS alert candidates, then import one message into the existing Manual Mode
+                                packet-prep workflow. The token stays in component memory only and is not stored.
+                            </p>
+                        </div>
+
+                        <div className="grid gap-3 md:grid-cols-2">
+                            <label className="space-y-1 text-sm">
+                                <div className="text-gray-300">Temporary access token</div>
+                                <input
+                                    type="password"
+                                    value={gmailFetchForm.accessToken}
+                                    onChange={(event) => updateGmailFetchField('accessToken', event.target.value)}
+                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="Request-scoped only"
+                                    autoComplete="off"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm">
+                                <div className="text-gray-300">Gmail user ID</div>
+                                <input
+                                    value={gmailFetchForm.gmailUserId}
+                                    onChange={(event) => updateGmailFetchField('gmailUserId', event.target.value)}
+                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="me"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm md:col-span-2">
+                                <div className="text-gray-300">Allowed sender</div>
+                                <input
+                                    value={gmailFetchForm.allowedSender}
+                                    onChange={(event) => updateGmailFetchField('allowedSender', event.target.value)}
+                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="alerts@mls.example"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm">
+                                <div className="text-gray-300">Label IDs</div>
+                                <textarea
+                                    value={gmailFetchForm.labelIds}
+                                    onChange={(event) => updateGmailFetchField('labelIds', event.target.value)}
+                                    className="min-h-20 w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="Comma or newline separated"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm">
+                                <div className="text-gray-300">Subject keywords</div>
+                                <textarea
+                                    value={gmailFetchForm.subjectKeywords}
+                                    onChange={(event) => updateGmailFetchField('subjectKeywords', event.target.value)}
+                                    className="min-h-20 w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="Comma or newline separated"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm">
+                                <div className="text-gray-300">Max results</div>
+                                <input
+                                    value={gmailFetchForm.maxResults}
+                                    onChange={(event) => updateGmailFetchField('maxResults', event.target.value)}
+                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="5"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm">
+                                <div className="text-gray-300">Expected contact ID</div>
+                                <input
+                                    value={gmailFetchForm.expectedContactId}
+                                    onChange={(event) => updateGmailFetchField('expectedContactId', event.target.value)}
+                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="Applied at import only"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm md:col-span-2">
+                                <div className="text-gray-300">Operator notes</div>
+                                <textarea
+                                    value={gmailFetchForm.operatorNotes}
+                                    onChange={(event) => updateGmailFetchField('operatorNotes', event.target.value)}
+                                    className="min-h-20 w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="Applied at import only"
+                                />
+                            </label>
+                        </div>
+
+                        <div className="rounded border border-white/10 bg-black/10 p-3 text-xs text-gray-300 space-y-1">
+                            <div>Manual fetch only. No polling, no background refresh, no hidden retries.</div>
+                            <div>Token is never stored in localStorage, sessionStorage, URL params, runs, tasks, or audit logs.</div>
+                        </div>
+
+                        {gmailError && (
+                            <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                                {gmailError}
+                            </div>
+                        )}
+
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={() => void handleFetchGmailCandidates()}
+                                className="px-4 py-2 text-sm rounded bg-sky-600 text-white hover:bg-sky-700 disabled:opacity-50"
+                                disabled={gmailFetching || gmailImporting || prepareSubmitting || reviewSubmitting || isBusy}
+                            >
+                                {gmailFetching ? 'Fetching...' : 'Fetch Gmail Candidates'}
+                            </button>
+                            {gmailCandidatesResult && (
+                                <div className="text-xs text-gray-400">
+                                    Query matched {gmailCandidatesResult.matched_message_count} message(s) · kept{' '}
+                                    {gmailCandidatesResult.candidate_count} candidate(s)
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="rounded border border-white/10 bg-white/5 p-3 space-y-3">
+                            <div>
+                                <div className="font-medium text-sm">Candidate Message List</div>
+                                <div className="text-xs text-gray-400">
+                                    Fetch first, then select one candidate to import into the existing packet-prep workflow.
+                                </div>
+                                {gmailCandidatesResult?.query && (
+                                    <div className="mt-2 text-xs text-gray-500 break-all">
+                                        Constrained query: {gmailCandidatesResult.query}
+                                    </div>
+                                )}
+                            </div>
+
+                            {!gmailCandidatesResult ? (
+                                <div className="text-sm text-gray-500">
+                                    No Gmail candidates fetched yet.
+                                </div>
+                            ) : gmailCandidatesResult.candidates.length === 0 ? (
+                                <div className="text-sm text-gray-500">
+                                    No candidate messages passed the constrained Gmail policy.
+                                </div>
+                            ) : (
+                                <div className="space-y-3">
+                                    {gmailCandidatesResult.candidates.map((candidate) => {
+                                        const isSelected =
+                                            selectedCandidateMessageId === candidate.message_id;
+                                        const isExisting = candidate.existing_run_id !== null;
+
+                                        return (
+                                            <label
+                                                key={candidate.message_id}
+                                                className={`block rounded border p-3 text-sm cursor-pointer ${
+                                                    isSelected
+                                                        ? 'border-sky-500/40 bg-sky-500/10'
+                                                        : 'border-white/10 bg-black/10'
+                                                }`}
+                                            >
+                                                <div className="flex items-start justify-between gap-3">
+                                                    <div className="flex items-start gap-3">
+                                                        <input
+                                                            type="radio"
+                                                            name="gmail-candidate"
+                                                            checked={isSelected}
+                                                            onChange={() =>
+                                                                setSelectedCandidateMessageId(
+                                                                    candidate.message_id,
+                                                                )
+                                                            }
+                                                            className="mt-1"
+                                                        />
+                                                        <div className="space-y-1">
+                                                            <div className="font-medium">
+                                                                {candidate.subject || 'Untitled message'}
+                                                            </div>
+                                                            <div className="text-xs text-gray-400">
+                                                                Message: {candidate.message_id}
+                                                            </div>
+                                                            <div className="text-xs text-gray-400">
+                                                                Thread: {candidate.thread_id}
+                                                            </div>
+                                                            <div className="text-xs text-gray-400">
+                                                                Received: {formatTimestamp(candidate.received_at)}
+                                                            </div>
+                                                            <div className="text-xs text-gray-400">
+                                                                From: {candidate.from_address || 'n/a'}
+                                                            </div>
+                                                            <div className="text-xs text-gray-400">
+                                                                Labels:{' '}
+                                                                {candidate.label_ids.length > 0
+                                                                    ? candidate.label_ids.join(' | ')
+                                                                    : 'none'}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="text-right text-xs">
+                                                        <div
+                                                            className={`rounded px-2 py-1 ${
+                                                                isExisting
+                                                                    ? 'bg-amber-500/10 text-amber-100 border border-amber-500/30'
+                                                                    : 'bg-emerald-500/10 text-emerald-100 border border-emerald-500/30'
+                                                            }`}
+                                                        >
+                                                            {isExisting ? 'Already imported' : 'New candidate'}
+                                                        </div>
+                                                        {candidate.existing_task_id && (
+                                                            <div className="mt-2 text-gray-400">
+                                                                Task #{candidate.existing_task_id}
+                                                            </div>
+                                                        )}
+                                                        {candidate.existing_run_id && (
+                                                            <div className="text-gray-400">
+                                                                Run #{candidate.existing_run_id}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            </label>
+                                        );
+                                    })}
+
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <button
+                                            onClick={() => void handleImportGmailMessage()}
+                                            className="px-4 py-2 text-sm rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                                            disabled={
+                                                !selectedCandidateMessageId ||
+                                                gmailImporting ||
+                                                gmailFetching ||
+                                                prepareSubmitting ||
+                                                reviewSubmitting ||
+                                                isBusy
+                                            }
+                                        >
+                                            {gmailImporting ? 'Importing...' : 'Import Selected Message'}
+                                        </button>
+                                        {selectedCandidate?.existing_run_id && (
+                                            <button
+                                                onClick={() => setSelectedRunId(selectedCandidate.existing_run_id ?? null)}
+                                                className="px-3 py-2 text-sm rounded border border-white/10 bg-white/5 text-white hover:bg-white/10"
+                                                disabled={gmailImporting || gmailFetching}
+                                            >
+                                                Inspect Existing Run #{selectedCandidate.existing_run_id}
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {gmailImportOutcome && (
+                            <div
+                                className={`rounded border px-3 py-2 text-sm ${getGmailImportOutcomeTone(
+                                    gmailImportOutcome.status,
+                                )}`}
+                            >
+                                Import outcome: {humanizeEnum(gmailImportOutcome.status)}
+                                <div className="mt-1 text-xs">
+                                    Message {gmailImportOutcome.message_id}
+                                    {gmailImportOutcome.subject ? ` · ${gmailImportOutcome.subject}` : ''}
+                                </div>
+                                {gmailImportOutcome.reason && (
+                                    <div className="mt-1 text-xs">
+                                        Reason: {gmailImportOutcome.reason}
+                                    </div>
+                                )}
+                                {gmailImportOutcome.imported_task_id && (
+                                    <div className="mt-1 text-xs">
+                                        Imported task #{gmailImportOutcome.imported_task_id} · run #
+                                        {gmailImportOutcome.imported_run_id}
+                                    </div>
+                                )}
+                                {gmailImportOutcome.existing_task_id && (
+                                    <div className="mt-1 text-xs">
+                                        Existing task #{gmailImportOutcome.existing_task_id} · run #
+                                        {gmailImportOutcome.existing_run_id}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </section>
+
+                    <section className="space-y-3">
+                        <div>
+                            <h3 className="text-base font-medium">2. Manual Packet Preparation</h3>
+                            <p className="text-sm text-gray-400">
+                                Manual-input fallback. Use normalized Gmail fields directly when you do not
+                                want to fetch/import through Gmail API read access.
                             </p>
                         </div>
 
@@ -1123,7 +1604,7 @@ const ListingAlertRecommendationPanel = () => {
                         <button
                             onClick={() => void handlePreparePacket()}
                             className="px-4 py-2 text-sm rounded bg-sky-600 text-white hover:bg-sky-700 disabled:opacity-50"
-                            disabled={prepareSubmitting || reviewSubmitting || isBusy}
+                            disabled={prepareSubmitting || reviewSubmitting || gmailFetching || gmailImporting || isBusy}
                         >
                             {prepareSubmitting ? 'Preparing...' : 'Prepare Manual Review Packet'}
                         </button>
@@ -1131,7 +1612,7 @@ const ListingAlertRecommendationPanel = () => {
 
                     <section className="space-y-3">
                         <div>
-                            <h3 className="text-base font-medium">2. Packet / Review Result</h3>
+                            <h3 className="text-base font-medium">3. Packet / Review Result</h3>
                             <p className="text-sm text-gray-400">
                                 Shows the stored packet or reviewed submission for the selected run.
                             </p>
@@ -1220,7 +1701,7 @@ const ListingAlertRecommendationPanel = () => {
 
                     <section className="space-y-3">
                         <div>
-                            <h3 className="text-base font-medium">3. Manual Review Submission</h3>
+                            <h3 className="text-base font-medium">4. Manual Review Submission</h3>
                             <p className="text-sm text-gray-400">
                                 Submit reviewed output from ChatGPT Pro / GPT-5.4 Pro back into SKC.
                                 This remains review-only and does not create Gmail drafts or send email.
@@ -1413,7 +1894,7 @@ const ListingAlertRecommendationPanel = () => {
                 <div className="space-y-4">
                     <section className="space-y-3">
                         <div>
-                            <h3 className="text-base font-medium">4. Latest / Recent Runs</h3>
+                            <h3 className="text-base font-medium">5. Latest / Recent Runs</h3>
                             <p className="text-sm text-gray-400">
                                 Manual refresh only. Packet-prep runs and reviewed-submission runs are
                                 labeled separately.
@@ -1514,7 +1995,7 @@ const ListingAlertRecommendationPanel = () => {
 
                     <section className="space-y-3">
                         <div>
-                            <h3 className="text-base font-medium">5. Audit Log View</h3>
+                            <h3 className="text-base font-medium">6. Audit Log View</h3>
                             <p className="text-sm text-gray-400">
                                 Shows packet prepared, submission received, validation failed, approval
                                 created, and completed-without-draft style events for the selected run.
@@ -1572,7 +2053,7 @@ const ListingAlertRecommendationPanel = () => {
 
                     <section className="space-y-3">
                         <div>
-                            <h3 className="text-base font-medium">6. Approval Visibility</h3>
+                            <h3 className="text-base font-medium">7. Approval Visibility</h3>
                             <p className="text-sm text-gray-400">
                                 Review-only approvals for this workflow. Generic approve/reject endpoints
                                 are reused as-is.
