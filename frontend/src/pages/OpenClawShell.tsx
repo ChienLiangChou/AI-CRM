@@ -588,6 +588,9 @@ const OpenClawShell = () => {
                         Company inbox for SKC Agent OS. This prototype consumes the approved control-room
                         snapshot and read-only drill-down routes only.
                     </p>
+                    <p>
+                        OpenClaw remains an internal prototype surface and is not part of the approved v1 Manual Mode deliverable.
+                    </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                     <Link to="/agents/workbench" className="btn btn-ghost">

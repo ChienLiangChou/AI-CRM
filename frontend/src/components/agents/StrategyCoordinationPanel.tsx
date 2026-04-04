@@ -411,7 +411,7 @@ const StrategyCoordinationPanel = () => {
                 <div>
                     <h2 className="text-xl font-semibold">Strategy Coordination</h2>
                     <p className="text-sm text-gray-400">
-                        Internal-only strategy reporting layer for manual event intake. Non-executable, no approvals, no hidden automation.
+                        Internal-only strategy reporting layer for manual event intake. Non-executable, no approvals, no hidden automation. Not part of the approved v1 Manual Mode deliverable.
                     </p>
                 </div>
                 <button

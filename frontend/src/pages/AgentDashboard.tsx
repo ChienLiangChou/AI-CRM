@@ -220,7 +220,7 @@ const AgentDashboard = () => {
                 <div>
                     <h1 className="text-xl font-semibold">Agent Dashboard</h1>
                     <p className="text-sm text-gray-400">
-                        Manual review surfaces for the current MVP agents. No sending or hidden automation.
+                        Approved v1 Manual Mode surfaces plus explicitly labeled internal and next-phase modules. No sending or hidden automation.
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -248,8 +248,13 @@ const AgentDashboard = () => {
             <section className="space-y-2">
                 <h2 className="text-lg font-medium">MVP Status</h2>
                 <div className="border rounded p-3 bg-white/5 text-sm space-y-1">
-                    <div>Scope: Follow-up Agent v1 baseline + Client Conversation Closer v1 baseline + Listing / CMA v1 panel</div>
-                    <div>Review model: approval-only, no email sending, no push sending</div>
+                    <div>
+                        Approved v1 Manual Mode deliverable: Follow-up Agent, Client Conversation Closer, Listing / CMA, Buyer Match, Listing Alert Recommendation, Transaction Paperwork, and Operations / Compliance.
+                    </div>
+                    <div>
+                        Explicitly not counted in this deliverable: Strategy Coordination, Event Strategy Review, Daily Market Scan, Authenticated MLS Access, and the OpenClaw prototype shell.
+                    </div>
+                    <div>Review model: review-only, no auto-send, no hidden automation.</div>
                     {latestRun ? (
                         <div className="text-gray-300">
                             Latest run #{latestRun.id} is <span className="font-medium">{latestRun.status}</span>
@@ -507,12 +512,27 @@ const AgentDashboard = () => {
                 )}
             </section>
 
+            <section className="space-y-2">
+                <h2 className="text-lg font-medium">Approved v1 Manual Mode Deliverable</h2>
+                <div className="rounded border border-emerald-500/20 bg-emerald-500/5 p-3 text-sm text-gray-300">
+                    These operator-facing panels are part of the accepted v1 Manual Mode deliverable. They remain review-only and do not send automatically.
+                </div>
+            </section>
+
             <ConversationCloserPanel />
             <ListingCmaPanel />
             <BuyerMatchPanel />
             <ListingAlertRecommendationPanel />
             <TransactionPaperworkPanel />
             <OperationsCompliancePanel />
+
+            <section className="space-y-2">
+                <h2 className="text-lg font-medium">Experimental / Internal / Next-Phase Surfaces</h2>
+                <div className="rounded border border-amber-500/20 bg-amber-500/5 p-3 text-sm text-amber-100">
+                    The panels below remain visible for internal testing only. They are not part of the approved v1 Manual Mode deliverable and should not be counted as complete.
+                </div>
+            </section>
+
             <StrategyCoordinationPanel />
             <EventStrategyReviewPanel />
             <DailyMarketScanPanel />

@@ -813,6 +813,13 @@ const DailyMarketScanPanel = () => {
                             '此面板目前不執行真實提供者擷取、瀏覽器自動化、CRM 回寫或 TRREB 整合。',
                         )}
                     </div>
+                    <div className="text-xs text-amber-200">
+                        {localizeText(
+                            outputLanguagePreference,
+                            'This panel remains experimental / next-phase and is not part of the approved v1 Manual Mode deliverable.',
+                            '此面板仍屬於實驗性 / 下一階段範圍，不屬於已批准的 v1 Manual Mode deliverable。',
+                        )}
+                    </div>
                 </div>
                 <button
                     onClick={() => void loadData('refresh')}

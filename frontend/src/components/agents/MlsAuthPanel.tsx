@@ -232,6 +232,9 @@ const MlsAuthPanel = () => {
                     <div className="text-xs text-gray-400">
                         Stable credentials, OTP handling, and real session automation are intentionally not wired in at this step.
                     </div>
+                    <div className="text-xs text-amber-200">
+                        This panel remains internal / next-phase and is not part of the approved v1 Manual Mode deliverable.
+                    </div>
                 </div>
                 <div className="flex items-center gap-2">
                     <button

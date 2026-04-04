@@ -970,6 +970,9 @@ const EventStrategyReviewPanel = () => {
                     <p className="text-sm text-gray-400">
                         Internal event-driven strategy review only. Manual trigger, manual refresh, controlled curated-query retrieval only, no auto-send, no publishing.
                     </p>
+                    <p className="text-xs text-amber-200 mt-1">
+                        Perspective blocks still include placeholder-only sections and later packaging modes remain planned later. This panel stays experimental / next-phase and is not part of the approved v1 Manual Mode deliverable.
+                    </p>
                 </div>
                 <button
                     onClick={() => void loadData()}
