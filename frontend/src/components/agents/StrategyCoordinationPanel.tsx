@@ -1,6 +1,6 @@
-import axios from 'axios';
 import { useEffect, useState } from 'react';
 import { agentsService } from '../../services/agents';
+import { getApiErrorMessage } from '../../services/httpErrors';
 import type {
     AgentAuditLog,
     AgentRun,
@@ -14,16 +14,6 @@ const EMPTY_LATEST: StrategyCoordinationLatestResponse = {
     status: null,
     error: null,
     result: null,
-};
-
-const getErrorMessage = (error: unknown, fallback: string) => {
-    if (axios.isAxiosError(error)) {
-        const detail = error.response?.data?.detail;
-        if (typeof detail === 'string' && detail.trim()) {
-            return detail;
-        }
-    }
-    return fallback;
 };
 
 const parseJsonText = (value?: string) => {
@@ -299,7 +289,7 @@ const StrategyCoordinationPanel = () => {
             } else {
                 setSelectedReport(null);
                 setReportError(
-                    getErrorMessage(
+                    getApiErrorMessage(
                         reportResult.reason,
                         'Structured report is unavailable for this run.',
                     ),
@@ -311,7 +301,7 @@ const StrategyCoordinationPanel = () => {
             } else {
                 setAuditLogs([]);
                 setAuditError(
-                    getErrorMessage(
+                    getApiErrorMessage(
                         auditResult.reason,
                         'Audit history is unavailable for this run.',
                     ),
@@ -353,7 +343,7 @@ const StrategyCoordinationPanel = () => {
                 setAuditError(null);
             }
         } catch (loadError) {
-            setError(getErrorMessage(loadError, 'Failed to load Strategy Coordination data.'));
+            setError(getApiErrorMessage(loadError, 'Failed to load Strategy Coordination data.'));
         } finally {
             if (mode === 'initial') {
                 setLoading(false);
@@ -396,7 +386,7 @@ const StrategyCoordinationPanel = () => {
             setSelectedRunId(run.id);
             await loadData();
         } catch (triggerError) {
-            setError(getErrorMessage(triggerError, 'Failed to run Strategy Coordination.'));
+            setError(getApiErrorMessage(triggerError, 'Failed to run Strategy Coordination.'));
         } finally {
             setTriggering(false);
         }

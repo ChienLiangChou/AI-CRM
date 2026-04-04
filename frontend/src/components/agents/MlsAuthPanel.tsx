@@ -1,6 +1,6 @@
-import axios from 'axios';
 import { useEffect, useState } from 'react';
 import { agentsService } from '../../services/agents';
+import { getApiErrorMessage } from '../../services/httpErrors';
 import type {
     AgentAuditLog,
     MlsAuthHistoryResponse,
@@ -29,16 +29,6 @@ const EMPTY_STATUS: MlsAuthStatusResponse = {
 const EMPTY_HISTORY: MlsAuthHistoryResponse = {
     current_status: EMPTY_STATUS,
     attempts: [],
-};
-
-const getErrorMessage = (error: unknown, fallback: string) => {
-    if (axios.isAxiosError(error)) {
-        const detail = error.response?.data?.detail;
-        if (typeof detail === 'string' && detail.trim()) {
-            return detail;
-        }
-    }
-    return fallback;
 };
 
 const parseJsonText = (value?: string) => {
@@ -139,21 +129,29 @@ const MlsAuthPanel = () => {
             setStatus(statusResult.value);
         } else {
             setStatus(EMPTY_STATUS);
-            setError(getErrorMessage(statusResult.reason, 'Failed to load MLS auth status.'));
+            setError(getApiErrorMessage(statusResult.reason, 'Failed to load MLS auth status.'));
         }
 
         if (historyResult.status === 'fulfilled') {
             setHistory(historyResult.value);
         } else {
             setHistory(EMPTY_HISTORY);
-            setError((current) => current ?? getErrorMessage(historyResult.reason, 'Failed to load MLS auth history.'));
+            setError(
+                (current) =>
+                    current ??
+                    getApiErrorMessage(historyResult.reason, 'Failed to load MLS auth history.'),
+            );
         }
 
         if (auditResult.status === 'fulfilled') {
             setAuditLogs(auditResult.value);
         } else {
             setAuditLogs([]);
-            setError((current) => current ?? getErrorMessage(auditResult.reason, 'Failed to load MLS auth audit logs.'));
+            setError(
+                (current) =>
+                    current ??
+                    getApiErrorMessage(auditResult.reason, 'Failed to load MLS auth audit logs.'),
+            );
         }
 
         if (mode === 'initial') {
@@ -182,7 +180,7 @@ const MlsAuthPanel = () => {
                     : 'MLS auth attempt state created. Browser/runtime login is not wired in yet.',
             );
         } catch (startError) {
-            setError(getErrorMessage(startError, 'Failed to start MLS auth attempt.'));
+            setError(getApiErrorMessage(startError, 'Failed to start MLS auth attempt.'));
         } finally {
             setStarting(false);
             await loadData('refresh');
@@ -215,7 +213,7 @@ const MlsAuthPanel = () => {
                     : 'OTP was not accepted because the active attempt has already timed out.',
             );
         } catch (submitError) {
-            setError(getErrorMessage(submitError, 'Failed to submit OTP for the MLS auth attempt.'));
+            setError(getApiErrorMessage(submitError, 'Failed to submit OTP for the MLS auth attempt.'));
         } finally {
             setOtpCode('');
             setSubmittingOtp(false);

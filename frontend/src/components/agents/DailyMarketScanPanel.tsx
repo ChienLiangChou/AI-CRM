@@ -1,6 +1,6 @@
-import axios from 'axios';
 import { useEffect, useState } from 'react';
 import { agentsService } from '../../services/agents';
+import { getApiErrorMessage } from '../../services/httpErrors';
 import type {
     AgentAuditLog,
     AgentRun,
@@ -22,16 +22,6 @@ type OutputLanguagePreference = 'english' | 'traditional_chinese' | 'both';
 
 const LANGUAGE_PREFERENCE_STORAGE_KEY = 'daily-market-scan:output-language-preference';
 const RUN_LANGUAGE_PREFERENCES_STORAGE_KEY = 'daily-market-scan:run-language-preferences';
-
-const getErrorMessage = (error: unknown, fallback: string) => {
-    if (axios.isAxiosError(error)) {
-        const detail = error.response?.data?.detail;
-        if (typeof detail === 'string' && detail.trim()) {
-            return detail;
-        }
-    }
-    return fallback;
-};
 
 const parseJsonText = (value?: string) => {
     if (!value) {
@@ -673,7 +663,7 @@ const DailyMarketScanPanel = () => {
             } else {
                 setSelectedReport(null);
                 setReportError(
-                    getErrorMessage(
+                    getApiErrorMessage(
                         reportResult.reason,
                         'Structured Daily Market Scan report is unavailable for this run.',
                     ),
@@ -685,7 +675,7 @@ const DailyMarketScanPanel = () => {
             } else {
                 setAuditLogs([]);
                 setAuditError(
-                    getErrorMessage(
+                    getApiErrorMessage(
                         auditResult.reason,
                         'Audit history is unavailable for this Daily Market Scan run.',
                     ),
@@ -727,7 +717,7 @@ const DailyMarketScanPanel = () => {
                 setAuditError(null);
             }
         } catch (loadError) {
-            setError(getErrorMessage(loadError, 'Failed to load Daily Market Scan data.'));
+            setError(getApiErrorMessage(loadError, 'Failed to load Daily Market Scan data.'));
         } finally {
             if (mode === 'initial') {
                 setLoading(false);
@@ -786,7 +776,7 @@ const DailyMarketScanPanel = () => {
             setSelectedRunId(run.id);
             await loadData('refresh');
         } catch (triggerError) {
-            setError(getErrorMessage(triggerError, 'Failed to run Daily Market Scan.'));
+            setError(getApiErrorMessage(triggerError, 'Failed to run Daily Market Scan.'));
         } finally {
             setTriggering(false);
         }

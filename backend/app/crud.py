@@ -7,8 +7,15 @@ import os
 import logging
 from datetime import datetime, timedelta
 import google.generativeai as genai
-from pywebpush import webpush, WebPushException
 from dotenv import load_dotenv
+
+try:
+    from pywebpush import webpush, WebPushException
+except ModuleNotFoundError:  # pragma: no cover - runtime bootstrap protection
+    webpush = None
+
+    class WebPushException(Exception):
+        pass
 
 logger = logging.getLogger(__name__)
 
@@ -974,6 +981,10 @@ def remove_push_subscription(db: Session, endpoint: str):
 
 
 def _send_push(subscription_row: models.PushSubscription, payload: dict):
+    if webpush is None:
+        logger.warning("pywebpush not installed, skipping push")
+        return False
+
     vapid_private = os.getenv("VAPID_PRIVATE_KEY")
     vapid_claims_email = os.getenv("VAPID_CLAIMS_EMAIL", "mailto:admin@example.com")
     if not vapid_private:

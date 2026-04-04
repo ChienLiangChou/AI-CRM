@@ -1,8 +1,8 @@
-import axios from 'axios';
 import { useEffect, useState } from 'react';
 import { crmService } from '../../services/api';
 import type { Contact } from '../../services/api';
 import { agentsService } from '../../services/agents';
+import { getApiErrorMessage } from '../../services/httpErrors';
 import type {
     AgentApproval,
     AgentAuditLog,
@@ -46,16 +46,6 @@ const parseApprovalPayload = (payload?: string): ConversationApprovalPayload => 
     }
 
     return parsed as ConversationApprovalPayload;
-};
-
-const getErrorMessage = (error: unknown, fallback: string) => {
-    if (axios.isAxiosError(error)) {
-        const detail = error.response?.data?.detail;
-        if (typeof detail === 'string' && detail.trim()) {
-            return detail;
-        }
-    }
-    return fallback;
 };
 
 const formatAuditDetails = (value?: string) => {
@@ -112,7 +102,7 @@ const ConversationCloserPanel = () => {
             setAuditLogs(logs);
         } catch (loadError) {
             setAuditLogs([]);
-            setAuditError(getErrorMessage(loadError, 'Audit history is unavailable for this run.'));
+            setAuditError(getApiErrorMessage(loadError, 'Audit history is unavailable for this run.'));
         } finally {
             setAuditLoading(false);
         }
@@ -150,11 +140,11 @@ const ConversationCloserPanel = () => {
             } catch (historyError) {
                 setRecentDecisions([]);
                 setDecisionError(
-                    getErrorMessage(historyError, 'Recent approval history is unavailable.'),
+                    getApiErrorMessage(historyError, 'Recent approval history is unavailable.'),
                 );
             }
         } catch (loadError) {
-            setError(getErrorMessage(loadError, 'Failed to load Client Conversation Closer data.'));
+            setError(getApiErrorMessage(loadError, 'Failed to load Client Conversation Closer data.'));
         } finally {
             if (mode === 'initial') {
                 setLoading(false);
@@ -200,7 +190,7 @@ const ConversationCloserPanel = () => {
             setSelectedRunId(run.id);
             await loadData();
         } catch (triggerError) {
-            setError(getErrorMessage(triggerError, 'Failed to run Client Conversation Closer.'));
+            setError(getApiErrorMessage(triggerError, 'Failed to run Client Conversation Closer.'));
         } finally {
             setTriggering(false);
         }
@@ -213,7 +203,7 @@ const ConversationCloserPanel = () => {
             await agentsService.approve(approvalId);
             await loadData();
         } catch (approveError) {
-            setError(getErrorMessage(approveError, 'Failed to approve action.'));
+            setError(getApiErrorMessage(approveError, 'Failed to approve action.'));
         } finally {
             setActiveApprovalId(null);
         }
@@ -231,7 +221,7 @@ const ConversationCloserPanel = () => {
             await agentsService.reject(approvalId, promptValue);
             await loadData();
         } catch (rejectError) {
-            setError(getErrorMessage(rejectError, 'Failed to reject action.'));
+            setError(getApiErrorMessage(rejectError, 'Failed to reject action.'));
         } finally {
             setActiveApprovalId(null);
         }

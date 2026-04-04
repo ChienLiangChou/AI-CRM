@@ -1,6 +1,6 @@
-import axios from 'axios';
 import { useEffect, useState } from 'react';
 import { agentsService } from '../services/agents';
+import { getApiErrorMessage } from '../services/httpErrors';
 import ConversationCloserPanel from '../components/agents/ConversationCloserPanel';
 import ListingCmaPanel from '../components/agents/ListingCmaPanel';
 import OperationsCompliancePanel from '../components/agents/OperationsCompliancePanel';
@@ -10,6 +10,7 @@ import MlsAuthPanel from '../components/agents/MlsAuthPanel';
 import DailyMarketScanPanel from '../components/agents/DailyMarketScanPanel';
 import EventStrategyReviewPanel from '../components/agents/EventStrategyReviewPanel';
 import ListingAlertRecommendationPanel from '../components/agents/ListingAlertRecommendationPanel';
+import TransactionPaperworkPanel from '../components/agents/TransactionPaperworkPanel';
 import type {
     AgentRun,
     AgentApproval,
@@ -51,16 +52,6 @@ const parseApprovalPayload = (payload?: string): ApprovalPayload => {
     return parsed as ApprovalPayload;
 };
 
-const getErrorMessage = (error: unknown, fallback: string) => {
-    if (axios.isAxiosError(error)) {
-        const detail = error.response?.data?.detail;
-        if (typeof detail === 'string' && detail.trim()) {
-            return detail;
-        }
-    }
-    return fallback;
-};
-
 const AgentDashboard = () => {
     const [runs, setRuns] = useState<AgentRun[]>([]);
     const [approvals, setApprovals] = useState<AgentApproval[]>([]);
@@ -85,7 +76,7 @@ const AgentDashboard = () => {
             setAuditLogs(logs);
         } catch (e) {
             setAuditLogs([]);
-            setAuditError(getErrorMessage(e, 'Audit history is unavailable for this run.'));
+            setAuditError(getApiErrorMessage(e, 'Audit history is unavailable for this run.'));
         } finally {
             setAuditLoading(false);
         }
@@ -119,11 +110,14 @@ const AgentDashboard = () => {
             } catch (decisionLoadError) {
                 setRecentDecisions([]);
                 setDecisionError(
-                    getErrorMessage(decisionLoadError, 'Recent approval history is unavailable.'),
+                    getApiErrorMessage(
+                        decisionLoadError,
+                        'Recent approval history is unavailable.',
+                    ),
                 );
             }
         } catch (e) {
-            setError(getErrorMessage(e, 'Failed to load follow-up agent data.'));
+            setError(getApiErrorMessage(e, 'Failed to load follow-up agent data.'));
         } finally {
             if (mode === 'initial') {
                 setLoading(false);
@@ -155,7 +149,7 @@ const AgentDashboard = () => {
             await agentsService.triggerFollowUpRunOnce();
             await loadData();
         } catch (e) {
-            setError(getErrorMessage(e, 'Failed to trigger follow-up run.'));
+            setError(getApiErrorMessage(e, 'Failed to trigger follow-up run.'));
         } finally {
             setTriggering(false);
         }
@@ -168,7 +162,7 @@ const AgentDashboard = () => {
             await agentsService.approve(id);
             await loadData();
         } catch (e) {
-            setError(getErrorMessage(e, 'Failed to approve action.'));
+            setError(getApiErrorMessage(e, 'Failed to approve action.'));
         } finally {
             setActiveApprovalId(null);
         }
@@ -187,7 +181,7 @@ const AgentDashboard = () => {
             await agentsService.reject(id, reason);
             await loadData();
         } catch (e) {
-            setError(getErrorMessage(e, 'Failed to reject action.'));
+            setError(getApiErrorMessage(e, 'Failed to reject action.'));
         } finally {
             setActiveApprovalId(null);
         }
@@ -517,6 +511,7 @@ const AgentDashboard = () => {
             <ListingCmaPanel />
             <BuyerMatchPanel />
             <ListingAlertRecommendationPanel />
+            <TransactionPaperworkPanel />
             <OperationsCompliancePanel />
             <StrategyCoordinationPanel />
             <EventStrategyReviewPanel />

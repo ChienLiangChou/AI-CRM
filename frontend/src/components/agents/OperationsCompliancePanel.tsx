@@ -1,6 +1,6 @@
-import axios from 'axios';
 import { useEffect, useState } from 'react';
 import { agentsService } from '../../services/agents';
+import { getApiErrorMessage } from '../../services/httpErrors';
 import type {
     AgentOpsApprovalItem,
     AgentOpsOverviewAgentItem,
@@ -22,16 +22,6 @@ const EMPTY_OVERVIEW: AgentOpsOverviewResponse = {
         no_send: true,
         tracked_agent_types: [],
     },
-};
-
-const getErrorMessage = (error: unknown, fallback: string) => {
-    if (axios.isAxiosError(error)) {
-        const detail = error.response?.data?.detail;
-        if (typeof detail === 'string' && detail.trim()) {
-            return detail;
-        }
-    }
-    return fallback;
 };
 
 const formatAgentType = (agentType: string) => {
@@ -117,7 +107,7 @@ const OperationsCompliancePanel = () => {
             setAuditPayload(payload);
         } catch (loadError) {
             setAuditPayload(null);
-            setAuditError(getErrorMessage(loadError, 'Audit inspection is unavailable for this run.'));
+            setAuditError(getApiErrorMessage(loadError, 'Audit inspection is unavailable for this run.'));
         } finally {
             setAuditLoading(false);
         }
@@ -164,7 +154,7 @@ const OperationsCompliancePanel = () => {
                 setAuditError(null);
             }
         } catch (loadError) {
-            setError(getErrorMessage(loadError, 'Failed to load operations visibility data.'));
+            setError(getApiErrorMessage(loadError, 'Failed to load operations visibility data.'));
         } finally {
             if (mode === 'initial') {
                 setLoading(false);
@@ -190,7 +180,7 @@ const OperationsCompliancePanel = () => {
             await agentsService.approve(approvalId);
             await refreshAll();
         } catch (approveError) {
-            setError(getErrorMessage(approveError, 'Failed to approve action.'));
+            setError(getApiErrorMessage(approveError, 'Failed to approve action.'));
         } finally {
             setActiveApprovalId(null);
         }
@@ -208,7 +198,7 @@ const OperationsCompliancePanel = () => {
             await agentsService.reject(approvalId, promptValue);
             await refreshAll();
         } catch (rejectError) {
-            setError(getErrorMessage(rejectError, 'Failed to reject action.'));
+            setError(getApiErrorMessage(rejectError, 'Failed to reject action.'));
         } finally {
             setActiveApprovalId(null);
         }

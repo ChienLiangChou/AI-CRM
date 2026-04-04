@@ -1,6 +1,6 @@
-import axios from 'axios';
 import { useEffect, useState } from 'react';
 import { agentsService } from '../../services/agents';
+import { getApiErrorMessage } from '../../services/httpErrors';
 import type {
     AgentApproval,
     AgentAuditLog,
@@ -140,15 +140,7 @@ const formatAuditDetails = (value?: string) => {
     return value ?? '';
 };
 
-const getErrorMessage = (error: unknown, fallback: string) => {
-    if (axios.isAxiosError(error)) {
-        const detail = error.response?.data?.detail;
-        if (typeof detail === 'string' && detail.trim()) {
-            return detail;
-        }
-    }
-    return fallback;
-};
+const getErrorMessage = getApiErrorMessage;
 
 const splitList = (value: string) =>
     value
@@ -272,6 +264,19 @@ const getGmailImportOutcomeTone = (status?: ListingAlertGmailImportOutcome['stat
         return 'border-amber-500/30 bg-amber-500/10 text-amber-100';
     }
     return 'border-rose-500/30 bg-rose-500/10 text-rose-100';
+};
+
+const getGmailImportOutcomeFollowupText = (outcome: ListingAlertGmailImportOutcome) => {
+    if (outcome.status === 'imported' && outcome.imported_run_id) {
+        return `Run #${outcome.imported_run_id} is loaded below. Continue in Packet / Review Result and the existing Manual Review sections.`;
+    }
+    if (outcome.status === 'duplicate_skipped' && outcome.existing_run_id) {
+        return `Existing run #${outcome.existing_run_id} is loaded below. Continue in Packet / Review Result, Audit Log View, and Approval Visibility.`;
+    }
+    if (outcome.status === 'policy_skipped') {
+        return 'No run was created. The existing packet-prep and review state below was left unchanged.';
+    }
+    return null;
 };
 
 const findPacketReadyResult = (
@@ -636,8 +641,6 @@ const ListingAlertRecommendationPanel = () => {
             setGmailCandidatesResult(result);
             setSelectedCandidateMessageId(result.candidates[0]?.message_id ?? null);
         } catch (fetchError) {
-            setGmailCandidatesResult(null);
-            setSelectedCandidateMessageId(null);
             setGmailError(
                 getErrorMessage(fetchError, 'Failed to fetch constrained Gmail candidates.'),
             );
@@ -694,6 +697,10 @@ const ListingAlertRecommendationPanel = () => {
 
             setGmailImportOutcome(outcome);
             syncPacketFormFromImportedMessage(outcome, selectedCandidate);
+            setGmailFetchForm((current) => ({
+                ...current,
+                accessToken: '',
+            }));
 
             if (outcome.status === 'imported' && outcome.imported_run_id) {
                 await loadData('refresh', outcome.imported_run_id);
@@ -1293,7 +1300,12 @@ const ListingAlertRecommendationPanel = () => {
 
                         <div className="rounded border border-white/10 bg-black/10 p-3 text-xs text-gray-300 space-y-1">
                             <div>Manual fetch only. No polling, no background refresh, no hidden retries.</div>
-                            <div>Token is never stored in localStorage, sessionStorage, URL params, runs, tasks, or audit logs.</div>
+                            <div>
+                                Token is never stored in localStorage, sessionStorage, URL params, runs, tasks, or audit logs.
+                            </div>
+                            <div>
+                                Token stays in component memory only long enough to support fetch, candidate selection, and import. After an import response, the panel clears it.
+                            </div>
                         </div>
 
                         {gmailError && (
@@ -1474,6 +1486,14 @@ const ListingAlertRecommendationPanel = () => {
                                     <div className="mt-1 text-xs">
                                         Existing task #{gmailImportOutcome.existing_task_id} · run #
                                         {gmailImportOutcome.existing_run_id}
+                                    </div>
+                                )}
+                                <div className="mt-1 text-xs">
+                                    Temporary access token cleared after this import response.
+                                </div>
+                                {getGmailImportOutcomeFollowupText(gmailImportOutcome) && (
+                                    <div className="mt-1 text-xs">
+                                        {getGmailImportOutcomeFollowupText(gmailImportOutcome)}
                                     </div>
                                 )}
                             </div>

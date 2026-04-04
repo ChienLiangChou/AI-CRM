@@ -1,6 +1,6 @@
-import axios from 'axios';
 import { useEffect, useState } from 'react';
 import { agentsService } from '../../services/agents';
+import { getApiErrorMessage } from '../../services/httpErrors';
 import type {
     AgentAuditLog,
     AgentRun,
@@ -40,16 +40,6 @@ const OUTPUT_MODE_LABELS: Record<EventStrategyReviewOutputMode, string> = {
     social_post_draft_pack: 'Social post draft pack',
     email_newsletter_draft_pack: 'Email/newsletter draft pack',
     client_summary_draft_pack: 'Client summary draft pack',
-};
-
-const getErrorMessage = (error: unknown, fallback: string) => {
-    if (axios.isAxiosError(error)) {
-        const detail = error.response?.data?.detail;
-        if (typeof detail === 'string' && detail.trim()) {
-            return detail;
-        }
-    }
-    return fallback;
 };
 
 const parseJsonText = (value?: string) => {
@@ -739,7 +729,7 @@ const EventStrategyReviewPanel = () => {
             } else {
                 setSelectedReport(null);
                 setReportError(
-                    getErrorMessage(
+                    getApiErrorMessage(
                         reportResult.reason,
                         'Structured event strategy report is unavailable for this run.',
                     ),
@@ -751,7 +741,7 @@ const EventStrategyReviewPanel = () => {
             } else {
                 setAuditLogs([]);
                 setAuditError(
-                    getErrorMessage(
+                    getApiErrorMessage(
                         auditResult.reason,
                         'Audit history is unavailable for this run.',
                     ),
@@ -763,7 +753,7 @@ const EventStrategyReviewPanel = () => {
             } else {
                 setPackageLatest(EMPTY_PACKAGE_LATEST(runId));
                 setPackageError(
-                    getErrorMessage(
+                    getApiErrorMessage(
                         packageResult.reason,
                         'Package status is unavailable for this run.',
                     ),
@@ -799,7 +789,7 @@ const EventStrategyReviewPanel = () => {
             setSelectedRunId(preferredRunId);
         } catch (loadError) {
             setError(
-                getErrorMessage(
+                getApiErrorMessage(
                     loadError,
                     'Failed to load Event Strategy Review data.',
                 ),
@@ -901,11 +891,7 @@ const EventStrategyReviewPanel = () => {
             await agentsService.triggerEventStrategyReviewRunOnce(payload);
             await loadData();
         } catch (runError) {
-            setError(
-                runError instanceof Error
-                    ? runError.message
-                    : getErrorMessage(runError, 'Failed to run Event Strategy Review.'),
-            );
+            setError(getApiErrorMessage(runError, 'Failed to run Event Strategy Review.'));
         } finally {
             setTriggering(false);
         }
@@ -928,7 +914,7 @@ const EventStrategyReviewPanel = () => {
             setPackageLatest(nextPackage);
         } catch (packageTriggerError) {
             setPackageError(
-                getErrorMessage(
+                getApiErrorMessage(
                     packageTriggerError,
                     'Failed to create Event Strategy Review package.',
                 ),

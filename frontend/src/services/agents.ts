@@ -481,6 +481,206 @@ export interface ListingAlertRecommendationRunReportResponse {
     result: ListingAlertRecommendationStoredResult | null;
 }
 
+export type TransactionPaperworkSourceDocType =
+    | 'aps'
+    | 'agreement_to_lease'
+    | 'transaction_related_document';
+export type TransactionPaperworkConfirmationState =
+    | 'not_required'
+    | 'required'
+    | 'confirmed';
+export type TransactionPaperworkQuestionReason =
+    | 'commission_confirmation_required'
+    | 'split_confirmation_required'
+    | 'referral_fee_confirmation_required'
+    | 'marketing_fee_confirmation_required'
+    | 'missing_field'
+    | 'low_confidence_field'
+    | 'conflicting_field';
+export type TransactionPaperworkMappedFieldValueSource =
+    | 'auto_extracted'
+    | 'kevin_confirmed'
+    | 'unresolved';
+export type TransactionPaperworkPdfLoadStatus = 'loaded' | 'blocked';
+export type TransactionPaperworkRenderStatus = 'rendered' | 'blocked';
+export type TransactionPaperworkTemplateFillMode =
+    | 'fill_pdf_fields'
+    | 'overlay_coordinates';
+
+export interface TransactionPaperworkEvidenceReference {
+    source_doc_type: TransactionPaperworkSourceDocType;
+    source_page: number;
+    evidence_anchor?: string | null;
+    evidence_snippet?: string | null;
+    document_label?: string | null;
+}
+
+export interface TransactionPaperworkSourceDocumentIntake {
+    document_label: string;
+    file_name?: string | null;
+    source_doc_type: TransactionPaperworkSourceDocType;
+    supported: boolean;
+    confidence: number;
+    classification_basis?: string | null;
+    notes: string[];
+}
+
+export interface TransactionPaperworkIntakeIssue {
+    document_label: string;
+    issue_code: string;
+    detail: string;
+}
+
+export interface TransactionPaperworkCanonicalDealFact {
+    field_key: string;
+    section_key: string;
+    label: string;
+    value?: string | null;
+    source_doc_type?: TransactionPaperworkSourceDocType | null;
+    confidence: number;
+    confirmation_state: TransactionPaperworkConfirmationState;
+    requires_kevin_confirmation: boolean;
+    evidence: TransactionPaperworkEvidenceReference[];
+    notes: string[];
+}
+
+export interface TransactionPaperworkCanonicalDealFacts {
+    facts: TransactionPaperworkCanonicalDealFact[];
+    unresolved_field_keys: string[];
+    operator_notes: string[];
+}
+
+export interface TransactionPaperworkQuestionItem {
+    field_key: string;
+    prompt: string;
+    reason: TransactionPaperworkQuestionReason;
+    required: boolean;
+    suggested_value?: string | null;
+    confidence?: number | null;
+    evidence: TransactionPaperworkEvidenceReference[];
+}
+
+export interface TransactionPaperworkQuestionPacket {
+    questions: TransactionPaperworkQuestionItem[];
+    blocking_field_keys: string[];
+    operator_notes: string[];
+}
+
+export interface TransactionPaperworkKevinAnswer {
+    field_key: string;
+    value: string;
+    notes: string[];
+}
+
+export interface TransactionPaperworkKevinAnswerPacket {
+    answers: TransactionPaperworkKevinAnswer[];
+}
+
+export interface TransactionPaperworkPdfSourceInput {
+    file_path: string;
+    document_label?: string;
+}
+
+export interface TransactionPaperworkPdfSourceResult {
+    document_label: string;
+    file_path: string;
+    file_name: string;
+    load_status: TransactionPaperworkPdfLoadStatus;
+    extraction_method: string;
+    page_count: number;
+    extracted_text_present: boolean;
+    notes: string[];
+}
+
+export interface TransactionPaperworkFieldTraceability {
+    template_field_key: string;
+    final_value?: string | null;
+    source_doc_type?: TransactionPaperworkSourceDocType | null;
+    source_page?: number | null;
+    evidence_anchor?: string | null;
+    evidence_snippet?: string | null;
+    confidence: number;
+    transform_used?: string | null;
+    confirmed_by_kevin: boolean;
+}
+
+export interface TransactionPaperworkMappedField {
+    template_field_key: string;
+    label: string;
+    section_key: string;
+    final_value?: string | null;
+    value_source_category: TransactionPaperworkMappedFieldValueSource;
+    confidence: number;
+    confirmation_state: TransactionPaperworkConfirmationState;
+    requires_kevin_confirmation: boolean;
+    evidence: TransactionPaperworkEvidenceReference[];
+    traceability: TransactionPaperworkFieldTraceability;
+    notes: string[];
+}
+
+export interface TransactionPaperworkReviewPackage {
+    template_id: string;
+    template_version: string;
+    mapped_fields: Record<string, TransactionPaperworkMappedField>;
+    unresolved_field_keys: string[];
+    blocking_unresolved_field_keys: string[];
+    review_ready: boolean;
+    operator_notes: string[];
+}
+
+export interface TransactionPaperworkRenderedArtifactMetadata {
+    output_pdf_path: string;
+    file_size_bytes: number;
+    checksum_sha256: string;
+    page_count: number;
+}
+
+export interface TransactionPaperworkRenderResult {
+    template_id: string;
+    template_version: string;
+    fill_mode: TransactionPaperworkTemplateFillMode;
+    output_status: TransactionPaperworkRenderStatus;
+    artifact?: TransactionPaperworkRenderedArtifactMetadata | null;
+    rendered_field_count: number;
+    skipped_unresolved_field_count: number;
+    unresolved_blocking_field_keys: string[];
+    rendered_field_keys: string[];
+    traceability_by_field_key: Record<string, TransactionPaperworkFieldTraceability>;
+    operator_notes: string[];
+}
+
+export interface TransactionPaperworkPreparationResult {
+    source_documents: TransactionPaperworkSourceDocumentIntake[];
+    canonical_deal_facts: TransactionPaperworkCanonicalDealFacts;
+    question_packet: TransactionPaperworkQuestionPacket;
+    intake_issues: TransactionPaperworkIntakeIssue[];
+    operator_notes: string[];
+}
+
+export interface TransactionPaperworkOrchestrationResult {
+    pdf_sources: TransactionPaperworkPdfSourceResult[];
+    preparation_result: TransactionPaperworkPreparationResult;
+    review_package: TransactionPaperworkReviewPackage;
+    render_result: TransactionPaperworkRenderResult;
+    output_status: TransactionPaperworkRenderStatus;
+    operator_notes: string[];
+}
+
+export interface TransactionPaperworkRunRequest {
+    source_pdfs: TransactionPaperworkPdfSourceInput[];
+    kevin_answer_packet?: TransactionPaperworkKevinAnswerPacket;
+    template_id?: string;
+    template_version?: string;
+    requested_fill_mode?: TransactionPaperworkTemplateFillMode;
+}
+
+export interface TransactionPaperworkLatestResponse {
+    run_id: number | null;
+    status: string | null;
+    error: string | null;
+    result: TransactionPaperworkOrchestrationResult | null;
+}
+
 export type MlsAuthProviderKey = 'stratus_authenticated';
 export type MlsAuthState =
     | 'available'
@@ -1737,6 +1937,346 @@ const normalizeListingAlertRunReport = (
     };
 };
 
+const normalizeTransactionPaperworkEvidenceReference = (
+    value: Partial<TransactionPaperworkEvidenceReference> | null | undefined,
+): TransactionPaperworkEvidenceReference => {
+    return {
+        source_doc_type:
+            value?.source_doc_type === 'aps' ||
+            value?.source_doc_type === 'agreement_to_lease'
+                ? value.source_doc_type
+                : 'transaction_related_document',
+        source_page: typeof value?.source_page === 'number' ? value.source_page : 0,
+        evidence_anchor:
+            typeof value?.evidence_anchor === 'string' ? value.evidence_anchor : null,
+        evidence_snippet:
+            typeof value?.evidence_snippet === 'string' ? value.evidence_snippet : null,
+        document_label:
+            typeof value?.document_label === 'string' ? value.document_label : null,
+    };
+};
+
+const normalizeTransactionPaperworkSourceDocumentIntake = (
+    value: Partial<TransactionPaperworkSourceDocumentIntake> | null | undefined,
+): TransactionPaperworkSourceDocumentIntake => {
+    return {
+        document_label:
+            typeof value?.document_label === 'string' ? value.document_label : 'Document',
+        file_name: typeof value?.file_name === 'string' ? value.file_name : null,
+        source_doc_type:
+            value?.source_doc_type === 'aps' ||
+            value?.source_doc_type === 'agreement_to_lease'
+                ? value.source_doc_type
+                : 'transaction_related_document',
+        supported: value?.supported === true,
+        confidence: typeof value?.confidence === 'number' ? value.confidence : 0,
+        classification_basis:
+            typeof value?.classification_basis === 'string'
+                ? value.classification_basis
+                : null,
+        notes: ensureArray<string>(value?.notes),
+    };
+};
+
+const normalizeTransactionPaperworkIntakeIssue = (
+    value: Partial<TransactionPaperworkIntakeIssue> | null | undefined,
+): TransactionPaperworkIntakeIssue => {
+    return {
+        document_label:
+            typeof value?.document_label === 'string' ? value.document_label : 'Document',
+        issue_code: typeof value?.issue_code === 'string' ? value.issue_code : 'unknown_issue',
+        detail: typeof value?.detail === 'string' ? value.detail : '',
+    };
+};
+
+const normalizeTransactionPaperworkCanonicalDealFact = (
+    value: Partial<TransactionPaperworkCanonicalDealFact> | null | undefined,
+): TransactionPaperworkCanonicalDealFact => {
+    return {
+        field_key: typeof value?.field_key === 'string' ? value.field_key : '',
+        section_key: typeof value?.section_key === 'string' ? value.section_key : '',
+        label: typeof value?.label === 'string' ? value.label : '',
+        value: typeof value?.value === 'string' ? value.value : null,
+        source_doc_type:
+            value?.source_doc_type === 'aps' ||
+            value?.source_doc_type === 'agreement_to_lease'
+                ? value.source_doc_type
+                : value?.source_doc_type === 'transaction_related_document'
+                    ? value.source_doc_type
+                    : null,
+        confidence: typeof value?.confidence === 'number' ? value.confidence : 0,
+        confirmation_state:
+            value?.confirmation_state === 'required' ||
+            value?.confirmation_state === 'confirmed'
+                ? value.confirmation_state
+                : 'not_required',
+        requires_kevin_confirmation: value?.requires_kevin_confirmation === true,
+        evidence: ensureArray<Partial<TransactionPaperworkEvidenceReference>>(
+            value?.evidence,
+        ).map(normalizeTransactionPaperworkEvidenceReference),
+        notes: ensureArray<string>(value?.notes),
+    };
+};
+
+const normalizeTransactionPaperworkCanonicalDealFacts = (
+    value: Partial<TransactionPaperworkCanonicalDealFacts> | null | undefined,
+): TransactionPaperworkCanonicalDealFacts => {
+    return {
+        facts: ensureArray<Partial<TransactionPaperworkCanonicalDealFact>>(
+            value?.facts,
+        ).map(normalizeTransactionPaperworkCanonicalDealFact),
+        unresolved_field_keys: ensureArray<string>(value?.unresolved_field_keys),
+        operator_notes: ensureArray<string>(value?.operator_notes),
+    };
+};
+
+const normalizeTransactionPaperworkQuestionItem = (
+    value: Partial<TransactionPaperworkQuestionItem> | null | undefined,
+): TransactionPaperworkQuestionItem => {
+    return {
+        field_key: typeof value?.field_key === 'string' ? value.field_key : '',
+        prompt: typeof value?.prompt === 'string' ? value.prompt : '',
+        reason:
+            value?.reason === 'commission_confirmation_required' ||
+            value?.reason === 'split_confirmation_required' ||
+            value?.reason === 'referral_fee_confirmation_required' ||
+            value?.reason === 'marketing_fee_confirmation_required' ||
+            value?.reason === 'low_confidence_field' ||
+            value?.reason === 'conflicting_field'
+                ? value.reason
+                : 'missing_field',
+        required: value?.required !== false,
+        suggested_value:
+            typeof value?.suggested_value === 'string' ? value.suggested_value : null,
+        confidence: typeof value?.confidence === 'number' ? value.confidence : null,
+        evidence: ensureArray<Partial<TransactionPaperworkEvidenceReference>>(
+            value?.evidence,
+        ).map(normalizeTransactionPaperworkEvidenceReference),
+    };
+};
+
+const normalizeTransactionPaperworkQuestionPacket = (
+    value: Partial<TransactionPaperworkQuestionPacket> | null | undefined,
+): TransactionPaperworkQuestionPacket => {
+    return {
+        questions: ensureArray<Partial<TransactionPaperworkQuestionItem>>(
+            value?.questions,
+        ).map(normalizeTransactionPaperworkQuestionItem),
+        blocking_field_keys: ensureArray<string>(value?.blocking_field_keys),
+        operator_notes: ensureArray<string>(value?.operator_notes),
+    };
+};
+
+const normalizeTransactionPaperworkPreparationResult = (
+    value: Partial<TransactionPaperworkPreparationResult> | null | undefined,
+): TransactionPaperworkPreparationResult => {
+    return {
+        source_documents: ensureArray<Partial<TransactionPaperworkSourceDocumentIntake>>(
+            value?.source_documents,
+        ).map(normalizeTransactionPaperworkSourceDocumentIntake),
+        canonical_deal_facts: normalizeTransactionPaperworkCanonicalDealFacts(
+            value?.canonical_deal_facts,
+        ),
+        question_packet: normalizeTransactionPaperworkQuestionPacket(value?.question_packet),
+        intake_issues: ensureArray<Partial<TransactionPaperworkIntakeIssue>>(
+            value?.intake_issues,
+        ).map(normalizeTransactionPaperworkIntakeIssue),
+        operator_notes: ensureArray<string>(value?.operator_notes),
+    };
+};
+
+const normalizeTransactionPaperworkPdfSourceResult = (
+    value: Partial<TransactionPaperworkPdfSourceResult> | null | undefined,
+): TransactionPaperworkPdfSourceResult => {
+    return {
+        document_label:
+            typeof value?.document_label === 'string' ? value.document_label : 'Document',
+        file_path: typeof value?.file_path === 'string' ? value.file_path : '',
+        file_name: typeof value?.file_name === 'string' ? value.file_name : '',
+        load_status: value?.load_status === 'loaded' ? 'loaded' : 'blocked',
+        extraction_method:
+            typeof value?.extraction_method === 'string'
+                ? value.extraction_method
+                : 'pdftotext',
+        page_count: typeof value?.page_count === 'number' ? value.page_count : 0,
+        extracted_text_present: value?.extracted_text_present === true,
+        notes: ensureArray<string>(value?.notes),
+    };
+};
+
+const normalizeTransactionPaperworkFieldTraceability = (
+    value: Partial<TransactionPaperworkFieldTraceability> | null | undefined,
+): TransactionPaperworkFieldTraceability => {
+    return {
+        template_field_key:
+            typeof value?.template_field_key === 'string' ? value.template_field_key : '',
+        final_value: typeof value?.final_value === 'string' ? value.final_value : null,
+        source_doc_type:
+            value?.source_doc_type === 'aps' ||
+            value?.source_doc_type === 'agreement_to_lease'
+                ? value.source_doc_type
+                : value?.source_doc_type === 'transaction_related_document'
+                    ? value.source_doc_type
+                    : null,
+        source_page: typeof value?.source_page === 'number' ? value.source_page : null,
+        evidence_anchor:
+            typeof value?.evidence_anchor === 'string' ? value.evidence_anchor : null,
+        evidence_snippet:
+            typeof value?.evidence_snippet === 'string' ? value.evidence_snippet : null,
+        confidence: typeof value?.confidence === 'number' ? value.confidence : 0,
+        transform_used:
+            typeof value?.transform_used === 'string' ? value.transform_used : null,
+        confirmed_by_kevin: value?.confirmed_by_kevin === true,
+    };
+};
+
+const normalizeTransactionPaperworkMappedField = (
+    value: Partial<TransactionPaperworkMappedField> | null | undefined,
+): TransactionPaperworkMappedField => {
+    return {
+        template_field_key:
+            typeof value?.template_field_key === 'string' ? value.template_field_key : '',
+        label: typeof value?.label === 'string' ? value.label : '',
+        section_key: typeof value?.section_key === 'string' ? value.section_key : '',
+        final_value: typeof value?.final_value === 'string' ? value.final_value : null,
+        value_source_category:
+            value?.value_source_category === 'auto_extracted' ||
+            value?.value_source_category === 'kevin_confirmed'
+                ? value.value_source_category
+                : 'unresolved',
+        confidence: typeof value?.confidence === 'number' ? value.confidence : 0,
+        confirmation_state:
+            value?.confirmation_state === 'required' ||
+            value?.confirmation_state === 'confirmed'
+                ? value.confirmation_state
+                : 'not_required',
+        requires_kevin_confirmation: value?.requires_kevin_confirmation === true,
+        evidence: ensureArray<Partial<TransactionPaperworkEvidenceReference>>(
+            value?.evidence,
+        ).map(normalizeTransactionPaperworkEvidenceReference),
+        traceability: normalizeTransactionPaperworkFieldTraceability(value?.traceability),
+        notes: ensureArray<string>(value?.notes),
+    };
+};
+
+const normalizeTransactionPaperworkReviewPackage = (
+    value: Partial<TransactionPaperworkReviewPackage> | null | undefined,
+): TransactionPaperworkReviewPackage => {
+    const mappedFields = isRecord(value?.mapped_fields) ? value.mapped_fields : {};
+    return {
+        template_id: typeof value?.template_id === 'string' ? value.template_id : '',
+        template_version:
+            typeof value?.template_version === 'string' ? value.template_version : '',
+        mapped_fields: Object.fromEntries(
+            Object.entries(mappedFields).map(([key, mappedField]) => [
+                key,
+                normalizeTransactionPaperworkMappedField(
+                    isRecord(mappedField)
+                        ? (mappedField as Partial<TransactionPaperworkMappedField>)
+                        : null,
+                ),
+            ]),
+        ),
+        unresolved_field_keys: ensureArray<string>(value?.unresolved_field_keys),
+        blocking_unresolved_field_keys: ensureArray<string>(
+            value?.blocking_unresolved_field_keys,
+        ),
+        review_ready: value?.review_ready === true,
+        operator_notes: ensureArray<string>(value?.operator_notes),
+    };
+};
+
+const normalizeTransactionPaperworkRenderedArtifactMetadata = (
+    value: Partial<TransactionPaperworkRenderedArtifactMetadata> | null | undefined,
+): TransactionPaperworkRenderedArtifactMetadata | null => {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    return {
+        output_pdf_path:
+            typeof value.output_pdf_path === 'string' ? value.output_pdf_path : '',
+        file_size_bytes:
+            typeof value.file_size_bytes === 'number' ? value.file_size_bytes : 0,
+        checksum_sha256:
+            typeof value.checksum_sha256 === 'string' ? value.checksum_sha256 : '',
+        page_count: typeof value.page_count === 'number' ? value.page_count : 0,
+    };
+};
+
+const normalizeTransactionPaperworkRenderResult = (
+    value: Partial<TransactionPaperworkRenderResult> | null | undefined,
+): TransactionPaperworkRenderResult => {
+    const traceability = isRecord(value?.traceability_by_field_key)
+        ? value.traceability_by_field_key
+        : {};
+
+    return {
+        template_id: typeof value?.template_id === 'string' ? value.template_id : '',
+        template_version:
+            typeof value?.template_version === 'string' ? value.template_version : '',
+        fill_mode:
+            value?.fill_mode === 'fill_pdf_fields' ? 'fill_pdf_fields' : 'overlay_coordinates',
+        output_status: value?.output_status === 'rendered' ? 'rendered' : 'blocked',
+        artifact: normalizeTransactionPaperworkRenderedArtifactMetadata(value?.artifact),
+        rendered_field_count:
+            typeof value?.rendered_field_count === 'number'
+                ? value.rendered_field_count
+                : 0,
+        skipped_unresolved_field_count:
+            typeof value?.skipped_unresolved_field_count === 'number'
+                ? value.skipped_unresolved_field_count
+                : 0,
+        unresolved_blocking_field_keys: ensureArray<string>(
+            value?.unresolved_blocking_field_keys,
+        ),
+        rendered_field_keys: ensureArray<string>(value?.rendered_field_keys),
+        traceability_by_field_key: Object.fromEntries(
+            Object.entries(traceability).map(([key, entry]) => [
+                key,
+                normalizeTransactionPaperworkFieldTraceability(
+                    isRecord(entry)
+                        ? (entry as Partial<TransactionPaperworkFieldTraceability>)
+                        : null,
+                ),
+            ]),
+        ),
+        operator_notes: ensureArray<string>(value?.operator_notes),
+    };
+};
+
+const normalizeTransactionPaperworkOrchestrationResult = (
+    value: Partial<TransactionPaperworkOrchestrationResult> | null | undefined,
+): TransactionPaperworkOrchestrationResult | null => {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    return {
+        pdf_sources: ensureArray<Partial<TransactionPaperworkPdfSourceResult>>(
+            value.pdf_sources,
+        ).map(normalizeTransactionPaperworkPdfSourceResult),
+        preparation_result: normalizeTransactionPaperworkPreparationResult(
+            value.preparation_result,
+        ),
+        review_package: normalizeTransactionPaperworkReviewPackage(value.review_package),
+        render_result: normalizeTransactionPaperworkRenderResult(value.render_result),
+        output_status: value.output_status === 'rendered' ? 'rendered' : 'blocked',
+        operator_notes: ensureArray<string>(value.operator_notes),
+    };
+};
+
+const normalizeTransactionPaperworkLatest = (
+    value: Partial<TransactionPaperworkLatestResponse> | null | undefined,
+): TransactionPaperworkLatestResponse => {
+    return {
+        run_id: typeof value?.run_id === 'number' ? value.run_id : null,
+        status: typeof value?.status === 'string' ? value.status : null,
+        error: typeof value?.error === 'string' ? value.error : null,
+        result: normalizeTransactionPaperworkOrchestrationResult(value?.result),
+    };
+};
+
 const normalizeMlsAuthStatus = (
     value: Partial<MlsAuthStatusResponse> | null | undefined,
 ): MlsAuthStatusResponse => {
@@ -2973,6 +3513,94 @@ export const agentsService = {
     ): Promise<AgentAuditLog[]> => {
         const res = await api.get<AgentAuditLog[]>(
             `/agents/buyer-match/runs/${runId}/audit-logs`,
+            {
+                params: { limit },
+            },
+        );
+        return ensureArray<AgentAuditLog>(res.data);
+    },
+
+    triggerTransactionPaperworkRunOnce: async (
+        payload: TransactionPaperworkRunRequest,
+    ): Promise<AgentRun> => {
+        const res = await api.post<AgentRun>(
+            '/agents/transaction-paperwork/run-once',
+            payload,
+        );
+        return res.data;
+    },
+
+    getTransactionPaperworkRuns: async (limit = 50): Promise<AgentRun[]> => {
+        const res = await api.get<AgentRun[]>('/agents/transaction-paperwork/runs', {
+            params: { limit },
+        });
+        return ensureArray<AgentRun>(res.data);
+    },
+
+    getLatestTransactionPaperworkResult: async (): Promise<TransactionPaperworkLatestResponse> => {
+        const res = await api.get<TransactionPaperworkLatestResponse>(
+            '/agents/transaction-paperwork/latest',
+        );
+        return normalizeTransactionPaperworkLatest(res.data);
+    },
+
+    getTransactionPaperworkRunReport: async (
+        runId: number,
+    ): Promise<TransactionPaperworkOrchestrationResult> => {
+        const res = await api.get<TransactionPaperworkOrchestrationResult>(
+            `/agents/transaction-paperwork/runs/${runId}/report`,
+        );
+        return normalizeTransactionPaperworkOrchestrationResult(res.data)
+            ?? {
+                pdf_sources: [],
+                preparation_result: {
+                    source_documents: [],
+                    canonical_deal_facts: {
+                        facts: [],
+                        unresolved_field_keys: [],
+                        operator_notes: [],
+                    },
+                    question_packet: {
+                        questions: [],
+                        blocking_field_keys: [],
+                        operator_notes: [],
+                    },
+                    intake_issues: [],
+                    operator_notes: [],
+                },
+                review_package: {
+                    template_id: '',
+                    template_version: '',
+                    mapped_fields: {},
+                    unresolved_field_keys: [],
+                    blocking_unresolved_field_keys: [],
+                    review_ready: false,
+                    operator_notes: [],
+                },
+                render_result: {
+                    template_id: '',
+                    template_version: '',
+                    fill_mode: 'overlay_coordinates',
+                    output_status: 'blocked',
+                    artifact: null,
+                    rendered_field_count: 0,
+                    skipped_unresolved_field_count: 0,
+                    unresolved_blocking_field_keys: [],
+                    rendered_field_keys: [],
+                    traceability_by_field_key: {},
+                    operator_notes: [],
+                },
+                output_status: 'blocked',
+                operator_notes: [],
+            };
+    },
+
+    getTransactionPaperworkRunAuditLogs: async (
+        runId: number,
+        limit = 100,
+    ): Promise<AgentAuditLog[]> => {
+        const res = await api.get<AgentAuditLog[]>(
+            `/agents/transaction-paperwork/runs/${runId}/audit-logs`,
             {
                 params: { limit },
             },
