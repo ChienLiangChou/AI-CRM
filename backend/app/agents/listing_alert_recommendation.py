@@ -222,12 +222,14 @@ def _parse_optional_float(value: str | None) -> float | None:
 def _strip_html(html: str | None) -> str:
     if not html:
         return ""
+    text = re.sub(r"(?s)<\s*style[^>]*>.*?</\s*style\s*>", " ", html)
     text = re.sub(
-        r"(?i)<\s*(br|/p|/div|/li|/tr|/table|/h\d)\s*>",
+        r"(?i)<\s*(br|/p|/div|/li|/tr|/table|/h\d)\s*/?\s*>",
         "\n",
-        html,
+        text,
     )
     text = re.sub(r"(?i)<\s*li[^>]*>", "\n- ", text)
+    text = re.sub(r"(?i)<\s*td[^>]*>", " ", text)
     text = re.sub(r"(?s)<[^>]+>", " ", text)
     text = unescape(text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -264,7 +266,71 @@ def _candidate_blocks(text: str) -> list[str]:
             continue
         seen.add(key)
         blocks.append(block)
-    return blocks
+
+    if any(_block_has_listing_signal(b) for b in blocks):
+        return blocks
+
+    merged = _merge_sparse_listing_blocks(blocks)
+    result_blocks: list[str] = []
+    merged_seen: set[str] = set()
+    for block in merged:
+        key = _normalize_match_text(block)
+        if key and key not in merged_seen:
+            merged_seen.add(key)
+            result_blocks.append(block)
+    return result_blocks
+
+
+def _merge_sparse_listing_blocks(blocks: list[str]) -> list[str]:
+    """Merge small adjacent blocks that together describe a single listing.
+
+    REALM HTML emails produce address, beds/baths, price, and MLS ref as
+    separate tiny paragraphs.  This walks the block list and greedily
+    attaches non-address blocks that follow an address block until the next
+    address or large non-listing block appears.
+    """
+    if not blocks:
+        return []
+
+    _LISTING_FRAGMENT_RE = re.compile(
+        r"(?i)"
+        r"(?:\d+\s*(?:bed|bath|br)\b)"
+        r"|(?:\$[\d,]+)"
+        r"|(?:#[A-Z]\d{5,})"
+        r"|(?:\bmls\b)"
+        r"|(?:\bdom\b)"
+        r"|(?:\bnew\b)"
+        r"|(?:\bdetached|semi|condo|townhouse|loft|house|apartment\b)"
+        r"|(?:\bbaczsplit|bungalow|storey\b)"
+    )
+
+    merged: list[str] = []
+    accumulator: list[str] = []
+
+    def flush():
+        if accumulator:
+            merged.append("\n".join(accumulator))
+            accumulator.clear()
+
+    for block in blocks:
+        stripped = block.strip()
+        if not stripped:
+            continue
+
+        if _extract_address(stripped):
+            flush()
+            accumulator.append(stripped)
+        elif accumulator and (
+            _LISTING_FRAGMENT_RE.search(stripped)
+            or len(stripped) < 80
+        ):
+            accumulator.append(stripped)
+        else:
+            flush()
+            merged.append(stripped)
+
+    flush()
+    return merged
 
 
 def _looks_like_address_line(value: str) -> bool:
@@ -306,6 +372,9 @@ def _extract_listing_ref(block: str, listing_url: str | None, index: int) -> str
     )
     if mls_match:
         return mls_match.group(1)
+    realm_ref_match = _REALM_LISTING_REF_RE.search(block)
+    if realm_ref_match:
+        return realm_ref_match.group(0).lstrip("#")
     if listing_url:
         path = urlsplit(listing_url).path.strip("/")
         if path:
@@ -347,14 +416,20 @@ def _extract_neighborhood(block: str) -> str | None:
     return None
 
 
+_REALM_LISTING_REF_RE = re.compile(r"#[A-Z]\d{5,}")
+_PRICE_SIGNAL_RE = re.compile(r"\$\s*[\d,]+(?:\.\d+)?\s*[kKmM]?")
+_BEDS_BATHS_RE = re.compile(r"(?i)\b\d+\s*(?:bed|beds|br|bath|baths)\b")
+
+
 def _block_has_listing_signal(block: str) -> bool:
+    if not _extract_address(block):
+        return False
     return bool(
-        _extract_address(block)
-        and (
-            _extract_urls(block)
-            or re.search(r"\$\s*[\d,]+", block)
-            or re.search(r"(?i)\bmls(?:®)?\b", block)
-        )
+        _extract_urls(block)
+        or _PRICE_SIGNAL_RE.search(block)
+        or re.search(r"(?i)\bmls(?:®)?\b", block)
+        or _REALM_LISTING_REF_RE.search(block)
+        or _BEDS_BATHS_RE.search(block)
     )
 
 
