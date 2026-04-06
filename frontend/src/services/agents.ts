@@ -300,13 +300,13 @@ export interface ListingAlertGmailReadQueryPolicy {
 }
 
 export interface ListingAlertGmailFetchCandidatesRequest {
-    access_token: string;
+    access_token?: string | null;
     gmail_user_id?: string;
     query_policy: ListingAlertGmailReadQueryPolicy;
 }
 
 export interface ListingAlertGmailImportMessageRequest {
-    access_token: string;
+    access_token?: string | null;
     gmail_user_id?: string;
     query_policy: ListingAlertGmailReadQueryPolicy;
     message_id: string;
@@ -318,6 +318,31 @@ export type ListingAlertGmailImportStatus =
     | 'imported'
     | 'duplicate_skipped'
     | 'policy_skipped';
+export type ListingAlertGmailOAuthStatus =
+    | 'disconnected'
+    | 'connected'
+    | 'reconnect_required';
+
+export interface ListingAlertGmailOAuthStatusResponse {
+    connection_key: string;
+    gmail_user_id: string;
+    status: ListingAlertGmailOAuthStatus;
+    account_email?: string | null;
+    granted_scopes: string[];
+    connected_at?: string | null;
+    last_refreshed_at?: string | null;
+    last_error?: string | null;
+    oauth_configured: boolean;
+    has_refresh_token: boolean;
+    reconnect_required: boolean;
+}
+
+export interface ListingAlertGmailOAuthStartResponse {
+    connection_key: string;
+    authorization_url: string;
+    state_expires_at: string;
+    requested_scopes: string[];
+}
 
 export interface ListingAlertGmailCandidateMessage {
     message_id: string;
@@ -1706,6 +1731,51 @@ const normalizeListingAlertGmailImportOutcome = (
         imported_run_id:
             typeof value?.imported_run_id === 'number' ? value.imported_run_id : null,
         reason: typeof value?.reason === 'string' ? value.reason : null,
+    };
+};
+
+const normalizeListingAlertGmailOAuthStatus = (
+    value: Partial<ListingAlertGmailOAuthStatusResponse> | null | undefined,
+): ListingAlertGmailOAuthStatusResponse => {
+    return {
+        connection_key:
+            typeof value?.connection_key === 'string'
+                ? value.connection_key
+                : 'listing_alert_primary',
+        gmail_user_id:
+            typeof value?.gmail_user_id === 'string' ? value.gmail_user_id : 'me',
+        status:
+            value?.status === 'connected' ||
+            value?.status === 'reconnect_required' ||
+            value?.status === 'disconnected'
+                ? value.status
+                : 'disconnected',
+        account_email:
+            typeof value?.account_email === 'string' ? value.account_email : null,
+        granted_scopes: ensureArray<string>(value?.granted_scopes),
+        connected_at: typeof value?.connected_at === 'string' ? value.connected_at : null,
+        last_refreshed_at:
+            typeof value?.last_refreshed_at === 'string' ? value.last_refreshed_at : null,
+        last_error: typeof value?.last_error === 'string' ? value.last_error : null,
+        oauth_configured: value?.oauth_configured === true,
+        has_refresh_token: value?.has_refresh_token === true,
+        reconnect_required: value?.reconnect_required === true,
+    };
+};
+
+const normalizeListingAlertGmailOAuthStart = (
+    value: Partial<ListingAlertGmailOAuthStartResponse> | null | undefined,
+): ListingAlertGmailOAuthStartResponse => {
+    return {
+        connection_key:
+            typeof value?.connection_key === 'string'
+                ? value.connection_key
+                : 'listing_alert_primary',
+        authorization_url:
+            typeof value?.authorization_url === 'string' ? value.authorization_url : '',
+        state_expires_at:
+            typeof value?.state_expires_at === 'string' ? value.state_expires_at : '',
+        requested_scopes: ensureArray<string>(value?.requested_scopes),
     };
 };
 
@@ -3622,7 +3692,7 @@ export const agentsService = {
         payload: ListingAlertGmailFetchCandidatesRequest,
     ): Promise<ListingAlertGmailFetchCandidatesResponse> => {
         const normalizedPayload: ListingAlertGmailFetchCandidatesRequest = {
-            access_token: payload.access_token,
+            access_token: payload.access_token ?? '',
             gmail_user_id: payload.gmail_user_id || 'me',
             query_policy: normalizeListingAlertGmailQueryPolicy(payload.query_policy),
         };
@@ -3637,7 +3707,7 @@ export const agentsService = {
         payload: ListingAlertGmailImportMessageRequest,
     ): Promise<ListingAlertGmailImportOutcome> => {
         const normalizedPayload: ListingAlertGmailImportMessageRequest = {
-            access_token: payload.access_token,
+            access_token: payload.access_token ?? '',
             gmail_user_id: payload.gmail_user_id || 'me',
             query_policy: normalizeListingAlertGmailQueryPolicy(payload.query_policy),
             message_id: payload.message_id,
@@ -3712,6 +3782,27 @@ export const agentsService = {
             },
         );
         return ensureArray<AgentApproval>(res.data);
+    },
+
+    getListingAlertGmailOAuthStatus: async (): Promise<ListingAlertGmailOAuthStatusResponse> => {
+        const res = await api.get<ListingAlertGmailOAuthStatusResponse>(
+            '/agents/listing-alert-recommendation/gmail/oauth/status',
+        );
+        return normalizeListingAlertGmailOAuthStatus(res.data);
+    },
+
+    startListingAlertGmailOAuth: async (): Promise<ListingAlertGmailOAuthStartResponse> => {
+        const res = await api.post<ListingAlertGmailOAuthStartResponse>(
+            '/agents/listing-alert-recommendation/gmail/oauth/start',
+        );
+        return normalizeListingAlertGmailOAuthStart(res.data);
+    },
+
+    disconnectListingAlertGmailOAuth: async (): Promise<ListingAlertGmailOAuthStatusResponse> => {
+        const res = await api.post<ListingAlertGmailOAuthStatusResponse>(
+            '/agents/listing-alert-recommendation/gmail/oauth/disconnect',
+        );
+        return normalizeListingAlertGmailOAuthStatus(res.data);
     },
 
     startMlsAuthAttempt: async (

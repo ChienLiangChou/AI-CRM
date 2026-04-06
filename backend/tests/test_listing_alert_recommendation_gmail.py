@@ -17,6 +17,7 @@ pywebpush_stub.WebPushException = Exception
 sys.modules.setdefault("pywebpush", pywebpush_stub)
 
 from app import models as crm_models
+from app.agents import gmail_oauth
 from app.agents import listing_alert_recommendation_gmail
 from app.agents import models as agent_models
 from app.agents import schemas as agent_schemas
@@ -214,8 +215,25 @@ class ListingAlertRecommendationGmailImportTests(unittest.TestCase):
             log.details or ""
             for log in self.db.query(agent_models.AgentAuditLog).all()
         ]
+        oauth_connection_payloads = []
+        for connection in (
+            self.db.query(agent_models.ListingAlertGmailOAuthConnection).all()
+        ):
+            oauth_connection_payloads.extend(
+                [
+                    connection.account_email or "",
+                    connection.granted_scopes or "",
+                    connection.encrypted_refresh_token or "",
+                    connection.last_error or "",
+                ]
+            )
 
-        for payload in task_payloads + run_payloads + audit_payloads:
+        for payload in (
+            task_payloads
+            + run_payloads
+            + audit_payloads
+            + oauth_connection_payloads
+        ):
             self.assertNotIn(token, payload)
 
     def test_fetch_and_import_gmail_alerts_feeds_existing_manual_packet_path(self):
@@ -525,6 +543,171 @@ class ListingAlertRecommendationGmailImportTests(unittest.TestCase):
             first_payload["imported_run_id"],
         )
         self.assert_token_not_persisted(access_token)
+
+    def test_fetch_candidates_route_uses_stored_oauth_when_access_token_blank(self):
+        stored_access_token = "stored-oauth-access-token"
+
+        with patch.object(
+            gmail_oauth,
+            "refresh_listing_alert_gmail_access_token",
+            return_value=gmail_oauth.GmailAccessTokenGrant(
+                access_token=stored_access_token,
+                gmail_user_id="me",
+                expires_at=None,
+            ),
+        ) as refresh_mock, patch.object(
+            listing_alert_recommendation_gmail,
+            "_gmail_api_request_json",
+            side_effect=[
+                self.list_response(
+                    message_id="gmail-stored-fetch-1",
+                    thread_id="gmail-stored-thread-1",
+                ),
+                self.gmail_message_response(
+                    message_id="gmail-stored-fetch-1",
+                    thread_id="gmail-stored-thread-1",
+                ),
+            ],
+        ):
+            response = self.client.post(
+                "/api/agents/listing-alert-recommendation/gmail/fetch-candidates",
+                json={
+                    "access_token": "",
+                    "gmail_user_id": "me",
+                    "query_policy": {
+                        "allowed_sender": "alerts@mls.example",
+                        "label_ids": ["mls-alerts"],
+                        "subject_keywords": ["Toronto MLS Alert"],
+                        "max_results": 5,
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["candidate_count"], 1)
+        self.assertEqual(refresh_mock.call_count, 1)
+        self.assert_token_not_persisted(stored_access_token)
+
+    def test_import_message_route_uses_stored_oauth_when_access_token_blank(self):
+        contact = self.create_contact()
+        self.create_interaction(contact.id)
+        stored_access_token = "stored-oauth-import-token"
+
+        with patch.object(
+            gmail_oauth,
+            "refresh_listing_alert_gmail_access_token",
+            return_value=gmail_oauth.GmailAccessTokenGrant(
+                access_token=stored_access_token,
+                gmail_user_id="me",
+                expires_at=None,
+            ),
+        ) as refresh_mock, patch.object(
+            listing_alert_recommendation_gmail,
+            "_gmail_api_request_json",
+            side_effect=[
+                self.gmail_message_response(
+                    message_id="gmail-stored-import-1",
+                    thread_id="gmail-stored-import-thread-1",
+                ),
+            ],
+        ):
+            response = self.client.post(
+                "/api/agents/listing-alert-recommendation/gmail/import-message",
+                json={
+                    "access_token": "",
+                    "gmail_user_id": "me",
+                    "query_policy": {
+                        "allowed_sender": "alerts@mls.example",
+                        "label_ids": ["mls-alerts"],
+                        "subject_keywords": ["Toronto MLS Alert"],
+                        "max_results": 5,
+                    },
+                    "message_id": "gmail-stored-import-1",
+                    "expected_contact_id": contact.id,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "imported")
+        self.assertEqual(refresh_mock.call_count, 1)
+        self.assert_token_not_persisted(stored_access_token)
+
+    def test_fetch_candidates_retries_once_after_stored_oauth_401(self):
+        with patch.object(
+            gmail_oauth,
+            "refresh_listing_alert_gmail_access_token",
+            side_effect=[
+                gmail_oauth.GmailAccessTokenGrant(
+                    access_token="stored-oauth-access-token-1",
+                    gmail_user_id="me",
+                    expires_at=None,
+                ),
+                gmail_oauth.GmailAccessTokenGrant(
+                    access_token="stored-oauth-access-token-2",
+                    gmail_user_id="me",
+                    expires_at=None,
+                ),
+            ],
+        ) as refresh_mock, patch.object(
+            listing_alert_recommendation_gmail,
+            "_gmail_api_request_json",
+            side_effect=[
+                ValueError("gmail_api_http_error_401"),
+                self.list_response(
+                    message_id="gmail-stored-retry-1",
+                    thread_id="gmail-stored-retry-thread-1",
+                ),
+                self.gmail_message_response(
+                    message_id="gmail-stored-retry-1",
+                    thread_id="gmail-stored-retry-thread-1",
+                ),
+            ],
+        ):
+            response = self.client.post(
+                "/api/agents/listing-alert-recommendation/gmail/fetch-candidates",
+                json={
+                    "access_token": "",
+                    "gmail_user_id": "me",
+                    "query_policy": {
+                        "allowed_sender": "alerts@mls.example",
+                        "label_ids": ["mls-alerts"],
+                        "subject_keywords": ["Toronto MLS Alert"],
+                        "max_results": 5,
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["candidate_count"], 1)
+        self.assertEqual(refresh_mock.call_count, 2)
+        self.assert_token_not_persisted("stored-oauth-access-token-1")
+        self.assert_token_not_persisted("stored-oauth-access-token-2")
+
+    def test_fetch_candidates_returns_conflict_when_stored_refresh_is_invalid(self):
+        with patch.object(
+            gmail_oauth,
+            "refresh_listing_alert_gmail_access_token",
+            side_effect=ValueError("gmail_oauth_refresh_token_invalid"),
+        ):
+            response = self.client.post(
+                "/api/agents/listing-alert-recommendation/gmail/fetch-candidates",
+                json={
+                    "access_token": "",
+                    "gmail_user_id": "me",
+                    "query_policy": {
+                        "allowed_sender": "alerts@mls.example",
+                        "label_ids": ["mls-alerts"],
+                        "subject_keywords": ["Toronto MLS Alert"],
+                        "max_results": 5,
+                    },
+                },
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json()["detail"],
+            "Stored Gmail connection is not ready; reconnect required",
+        )
 
 
 if __name__ == "__main__":

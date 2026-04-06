@@ -12,6 +12,7 @@ from . import (
     conversation_closer,
     daily_market_scan,
     event_strategy_review,
+    gmail_oauth,
     listing_alert_recommendation,
     listing_alert_recommendation_gmail,
     listing_cma,
@@ -43,6 +44,75 @@ def _listing_alert_recommendation_http_error_from_value_error(
         return HTTPException(status_code=401, detail="Gmail access token rejected")
     if str(error) == "gmail_api_http_error_403":
         return HTTPException(status_code=403, detail="Gmail access forbidden")
+    if str(error) in {
+        "gmail_oauth_connection_not_ready",
+        "gmail_oauth_refresh_token_invalid",
+    }:
+        return HTTPException(
+            status_code=409,
+            detail="Stored Gmail connection is not ready; reconnect required",
+        )
+    if str(error) in {
+        "gmail_oauth_client_id_missing",
+        "gmail_oauth_client_secret_missing",
+        "gmail_oauth_redirect_uri_missing",
+        "gmail_oauth_encryption_key_missing",
+        "gmail_oauth_encryption_key_invalid",
+    }:
+        return HTTPException(
+            status_code=503,
+            detail="Stored Gmail OAuth is not configured on the backend",
+        )
+    return _bad_request_from_value_error(error)
+
+
+def _listing_alert_gmail_oauth_http_error_from_value_error(
+    error: ValueError,
+) -> HTTPException:
+    error_code = str(error)
+    if error_code in {
+        "gmail_oauth_client_id_missing",
+        "gmail_oauth_client_secret_missing",
+        "gmail_oauth_redirect_uri_missing",
+        "gmail_oauth_encryption_key_missing",
+        "gmail_oauth_encryption_key_invalid",
+    }:
+        return HTTPException(
+            status_code=503,
+            detail="Gmail OAuth is not configured on the backend",
+        )
+    if error_code in {
+        "gmail_oauth_state_missing",
+        "gmail_oauth_state_invalid",
+        "gmail_oauth_state_expired",
+        "gmail_oauth_code_missing",
+    }:
+        return HTTPException(status_code=400, detail="Invalid Gmail OAuth callback")
+    if error_code in {
+        "gmail_oauth_code_exchange_failed",
+        "gmail_oauth_access_token_missing",
+        "gmail_oauth_refresh_token_missing",
+        "gmail_oauth_profile_email_missing",
+        "gmail_oauth_invalid_json",
+        "gmail_oauth_invalid_response_shape",
+        "gmail_oauth_access_token_rejected",
+        "gmail_oauth_profile_lookup_failed",
+        "gmail_oauth_network_error",
+    }:
+        return HTTPException(
+            status_code=502,
+            detail="Gmail OAuth exchange failed",
+        )
+    if error_code == "gmail_oauth_connection_not_ready":
+        return HTTPException(
+            status_code=409,
+            detail="Gmail OAuth connection is not ready",
+        )
+    if error_code == "gmail_oauth_refresh_token_invalid":
+        return HTTPException(
+            status_code=409,
+            detail="Stored Gmail refresh token is invalid; reconnect required",
+        )
     return _bad_request_from_value_error(error)
 
 
@@ -872,6 +942,62 @@ def get_latest_buyer_match_result(db: Session = Depends(get_db)):
 
 
 @router.post(
+    "/listing-alert-recommendation/gmail/oauth/start",
+    response_model=agent_schemas.ListingAlertGmailOAuthStartResponse,
+    summary="Create a Gmail OAuth authorization URL for Listing Alert intake.",
+)
+def start_listing_alert_gmail_oauth(
+    db: Session = Depends(get_db),
+):
+    try:
+        return gmail_oauth.start_listing_alert_gmail_oauth(db)
+    except ValueError as error:
+        raise _listing_alert_gmail_oauth_http_error_from_value_error(error) from error
+
+
+@router.get(
+    "/listing-alert-recommendation/gmail/oauth/status",
+    response_model=agent_schemas.ListingAlertGmailOAuthStatusResponse,
+    summary="Get Gmail OAuth connection status for Listing Alert intake.",
+)
+def get_listing_alert_gmail_oauth_status(
+    db: Session = Depends(get_db),
+):
+    return gmail_oauth.get_listing_alert_gmail_oauth_status(db)
+
+
+@router.get(
+    "/listing-alert-recommendation/gmail/oauth/callback",
+    response_model=agent_schemas.ListingAlertGmailOAuthStatusResponse,
+    summary="Handle the Gmail OAuth callback for Listing Alert intake.",
+)
+def handle_listing_alert_gmail_oauth_callback(
+    state: str,
+    code: str,
+    db: Session = Depends(get_db),
+):
+    try:
+        return gmail_oauth.handle_listing_alert_gmail_oauth_callback(
+            db,
+            state=state,
+            code=code,
+        )
+    except ValueError as error:
+        raise _listing_alert_gmail_oauth_http_error_from_value_error(error) from error
+
+
+@router.post(
+    "/listing-alert-recommendation/gmail/oauth/disconnect",
+    response_model=agent_schemas.ListingAlertGmailOAuthStatusResponse,
+    summary="Disconnect the stored Gmail OAuth connection for Listing Alert intake.",
+)
+def disconnect_listing_alert_gmail_oauth(
+    db: Session = Depends(get_db),
+):
+    return gmail_oauth.disconnect_listing_alert_gmail_oauth(db)
+
+
+@router.post(
     "/listing-alert-recommendation/gmail/fetch-candidates",
     response_model=agent_schemas.ListingAlertGmailFetchCandidatesResponse,
     summary="Fetch constrained Gmail MLS alert candidates without importing them.",
@@ -881,12 +1007,9 @@ def fetch_listing_alert_gmail_candidates(
     db: Session = Depends(get_db),
 ):
     try:
-        normalized_request = (
-            listing_alert_recommendation_gmail.normalize_gmail_read_config(request)
-        )
         return listing_alert_recommendation_gmail.fetch_gmail_candidates(
             db,
-            normalized_request,
+            request,
         )
     except ValueError as error:
         raise _listing_alert_recommendation_http_error_from_value_error(error) from error
@@ -902,16 +1025,9 @@ def import_listing_alert_gmail_message(
     db: Session = Depends(get_db),
 ):
     try:
-        normalized_config = listing_alert_recommendation_gmail.normalize_gmail_read_config(
-            {
-                "access_token": request.access_token,
-                "gmail_user_id": request.gmail_user_id,
-                "query_policy": request.query_policy,
-            }
-        )
         return listing_alert_recommendation_gmail.import_gmail_message_reference(
             db,
-            normalized_config,
+            request,
             request.message_id,
             expected_contact_id=request.expected_contact_id,
             explicit_contact_mappings=request.explicit_contact_mappings,

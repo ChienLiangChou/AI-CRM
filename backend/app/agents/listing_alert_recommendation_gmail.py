@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -12,6 +13,7 @@ from urllib.request import Request, urlopen
 from sqlalchemy.orm import Session
 
 from . import (
+    gmail_oauth,
     listing_alert_recommendation,
     models,
     schemas as agent_schemas,
@@ -22,6 +24,12 @@ from . import (
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1"
 DEFAULT_MAX_RESULTS = 10
 MAX_ALLOWED_RESULTS = 20
+
+
+@dataclass
+class ResolvedGmailReadConfig:
+    config: agent_schemas.ListingAlertGmailReadConfig
+    credential_source: str
 
 
 def _clean_text(value: Any) -> str | None:
@@ -106,8 +114,6 @@ def normalize_gmail_read_config(
         min(config.query_policy.max_results or DEFAULT_MAX_RESULTS, MAX_ALLOWED_RESULTS),
     )
 
-    if not config.access_token:
-        raise ValueError("gmail_access_token_missing")
     if not config.query_policy.allowed_sender:
         raise ValueError("gmail_allowed_sender_missing")
     if (
@@ -117,6 +123,53 @@ def normalize_gmail_read_config(
         raise ValueError("gmail_query_policy_too_broad")
 
     return config
+
+
+def _coerce_resolved_gmail_read_config(
+    raw: Any,
+) -> ResolvedGmailReadConfig:
+    if isinstance(raw, ResolvedGmailReadConfig):
+        return raw
+
+    normalized_config = normalize_gmail_read_config(raw)
+    credential_source = "manual_access_token"
+    if not _clean_text(normalized_config.access_token):
+        credential_source = "unresolved"
+    return ResolvedGmailReadConfig(
+        config=normalized_config,
+        credential_source=credential_source,
+    )
+
+
+def _refresh_stored_gmail_access_token(
+    db: Session,
+    resolved_config: ResolvedGmailReadConfig,
+) -> None:
+    grant = gmail_oauth.refresh_listing_alert_gmail_access_token(db)
+    resolved_config.config.access_token = grant.access_token
+    resolved_config.config.gmail_user_id = (
+        _clean_text(grant.gmail_user_id)
+        or resolved_config.config.gmail_user_id
+        or gmail_oauth.LISTING_ALERT_GMAIL_USER_ID
+    )
+    resolved_config.credential_source = "stored_oauth"
+
+
+def _resolve_gmail_read_config_for_execution(
+    db: Session,
+    raw: Any,
+) -> ResolvedGmailReadConfig:
+    resolved_config = _coerce_resolved_gmail_read_config(raw)
+    if _clean_text(resolved_config.config.access_token):
+        resolved_config.config.access_token = _clean_text(
+            resolved_config.config.access_token
+        )
+        if resolved_config.credential_source != "stored_oauth":
+            resolved_config.credential_source = "manual_access_token"
+        return resolved_config
+
+    _refresh_stored_gmail_access_token(db, resolved_config)
+    return resolved_config
 
 
 def _quote_query_value(value: str) -> str:
@@ -182,18 +235,50 @@ def _gmail_api_request_json(
     return parsed
 
 
+def _gmail_api_request_json_with_retry(
+    db: Session | None,
+    resolved_config: ResolvedGmailReadConfig,
+    path: str,
+    *,
+    query_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    try:
+        return _gmail_api_request_json(
+            resolved_config.config,
+            path,
+            query_params=query_params,
+        )
+    except ValueError as error:
+        if (
+            db is None
+            or str(error) != "gmail_api_http_error_401"
+            or resolved_config.credential_source != "stored_oauth"
+        ):
+            raise
+
+    _refresh_stored_gmail_access_token(db, resolved_config)
+    return _gmail_api_request_json(
+        resolved_config.config,
+        path,
+        query_params=query_params,
+    )
+
+
 def list_matching_gmail_message_references(
     config: Any,
+    *,
+    db: Session | None = None,
 ) -> tuple[str, list[agent_schemas.ListingAlertGmailMessageReference]]:
-    normalized_config = normalize_gmail_read_config(config)
-    query = build_constrained_gmail_query(normalized_config.query_policy)
-    response = _gmail_api_request_json(
-        normalized_config,
+    resolved_config = _coerce_resolved_gmail_read_config(config)
+    query = build_constrained_gmail_query(resolved_config.config.query_policy)
+    response = _gmail_api_request_json_with_retry(
+        db,
+        resolved_config,
         "messages",
         query_params={
             "q": query,
-            "labelIds": normalized_config.query_policy.label_ids,
-            "maxResults": normalized_config.query_policy.max_results,
+            "labelIds": resolved_config.config.query_policy.label_ids,
+            "maxResults": resolved_config.config.query_policy.max_results,
             "includeSpamTrash": "false",
         },
     )
@@ -302,8 +387,10 @@ def _parse_received_at(message_data: dict[str, Any], header_map: dict[str, str])
 def fetch_normalized_gmail_message(
     config: Any,
     message_ref: Any,
+    *,
+    db: Session | None = None,
 ) -> agent_schemas.ListingAlertGmailMessageInput:
-    normalized_config = normalize_gmail_read_config(config)
+    resolved_config = _coerce_resolved_gmail_read_config(config)
     if isinstance(message_ref, agent_schemas.ListingAlertGmailMessageReference):
         reference = message_ref
     elif hasattr(message_ref, "model_dump"):
@@ -322,8 +409,9 @@ def fetch_normalized_gmail_message(
             thread_id=str(message_ref),
         )
 
-    message_data = _gmail_api_request_json(
-        normalized_config,
+    message_data = _gmail_api_request_json_with_retry(
+        db,
+        resolved_config,
         f"messages/{quote(reference.message_id, safe='')}",
         query_params={"format": "full"},
     )
@@ -438,26 +526,33 @@ def fetch_gmail_candidates(
     db: Session,
     config: Any,
 ) -> agent_schemas.ListingAlertGmailFetchCandidatesResponse:
-    normalized_config = normalize_gmail_read_config(config)
-    query, message_refs = list_matching_gmail_message_references(normalized_config)
+    resolved_config = _resolve_gmail_read_config_for_execution(db, config)
+    query, message_refs = list_matching_gmail_message_references(
+        resolved_config,
+        db=db,
+    )
     service.write_audit_log(
         db,
         actor_type="system",
         action="listing_alert_gmail_query_executed",
         details=_safe_json_dumps(
             {
-                "gmail_user_id": normalized_config.gmail_user_id,
+                "gmail_user_id": resolved_config.config.gmail_user_id,
                 "query": query,
-                "label_ids": normalized_config.query_policy.label_ids,
+                "label_ids": resolved_config.config.query_policy.label_ids,
                 "matched_message_count": len(message_refs),
-                "max_results": normalized_config.query_policy.max_results,
+                "max_results": resolved_config.config.query_policy.max_results,
             }
         ),
     )
 
     candidates: list[agent_schemas.ListingAlertGmailCandidateMessage] = []
     for message_ref in message_refs:
-        normalized_message = fetch_normalized_gmail_message(normalized_config, message_ref)
+        normalized_message = fetch_normalized_gmail_message(
+            resolved_config,
+            message_ref,
+            db=db,
+        )
         service.write_audit_log(
             db,
             actor_type="system",
@@ -473,7 +568,7 @@ def fetch_gmail_candidates(
 
         policy_reason = _message_matches_query_policy(
             normalized_message,
-            normalized_config.query_policy,
+            resolved_config.config.query_policy,
         )
         if policy_reason is not None:
             service.write_audit_log(
@@ -508,7 +603,7 @@ def fetch_gmail_candidates(
         )
 
     return agent_schemas.ListingAlertGmailFetchCandidatesResponse(
-        gmail_user_id=normalized_config.gmail_user_id,
+        gmail_user_id=resolved_config.config.gmail_user_id,
         query=query,
         matched_message_count=len(message_refs),
         candidate_count=len(candidates),
@@ -527,7 +622,7 @@ def import_gmail_message_reference(
     ] | None = None,
     operator_notes: str | None = None,
 ) -> agent_schemas.ListingAlertGmailImportOutcome:
-    normalized_config = normalize_gmail_read_config(config)
+    resolved_config = _resolve_gmail_read_config_for_execution(db, config)
     if isinstance(message_ref, agent_schemas.ListingAlertGmailMessageReference):
         reference = message_ref
     elif hasattr(message_ref, "model_dump"):
@@ -578,7 +673,11 @@ def import_gmail_message_reference(
             reason="message_id_already_imported",
         )
 
-    normalized_message = fetch_normalized_gmail_message(normalized_config, reference)
+    normalized_message = fetch_normalized_gmail_message(
+        resolved_config,
+        reference,
+        db=db,
+    )
     service.write_audit_log(
         db,
         actor_type="system",
@@ -594,7 +693,7 @@ def import_gmail_message_reference(
 
     policy_reason = _message_matches_query_policy(
         normalized_message,
-        normalized_config.query_policy,
+        resolved_config.config.query_policy,
     )
     if policy_reason is not None:
         service.write_audit_log(
@@ -668,19 +767,22 @@ def fetch_and_import_gmail_alerts(
     ] | None = None,
     operator_notes: str | None = None,
 ) -> agent_schemas.ListingAlertGmailImportBatchResult:
-    normalized_config = normalize_gmail_read_config(config)
-    query, message_refs = list_matching_gmail_message_references(normalized_config)
+    resolved_config = _resolve_gmail_read_config_for_execution(db, config)
+    query, message_refs = list_matching_gmail_message_references(
+        resolved_config,
+        db=db,
+    )
     service.write_audit_log(
         db,
         actor_type="system",
         action="listing_alert_gmail_query_executed",
         details=_safe_json_dumps(
             {
-                "gmail_user_id": normalized_config.gmail_user_id,
+                "gmail_user_id": resolved_config.config.gmail_user_id,
                 "query": query,
-                "label_ids": normalized_config.query_policy.label_ids,
+                "label_ids": resolved_config.config.query_policy.label_ids,
                 "matched_message_count": len(message_refs),
-                "max_results": normalized_config.query_policy.max_results,
+                "max_results": resolved_config.config.query_policy.max_results,
             }
         ),
     )
@@ -690,7 +792,7 @@ def fetch_and_import_gmail_alerts(
         outcomes.append(
             import_gmail_message_reference(
                 db,
-                normalized_config,
+                resolved_config,
                 message_ref,
                 expected_contact_id=expected_contact_id,
                 explicit_contact_mappings=explicit_contact_mappings,
@@ -699,7 +801,7 @@ def fetch_and_import_gmail_alerts(
         )
 
     return agent_schemas.ListingAlertGmailImportBatchResult(
-        gmail_user_id=normalized_config.gmail_user_id,
+        gmail_user_id=resolved_config.config.gmail_user_id,
         query=query,
         matched_message_count=len(message_refs),
         outcomes=outcomes,

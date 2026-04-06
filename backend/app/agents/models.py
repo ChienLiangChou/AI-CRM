@@ -133,3 +133,38 @@ class AgentAuditLog(Base):
 
     run = relationship("AgentRun", back_populates="audit_logs")
 
+
+class ListingAlertGmailOAuthConnection(Base):
+    """Single-mailbox Gmail OAuth connection for Listing Alert intake."""
+
+    __tablename__ = "listing_alert_gmail_oauth_connections"
+
+    id = Column(Integer, primary_key=True, index=True)
+    connection_key = Column(String, unique=True, index=True)
+    gmail_user_id = Column(String, default="me")
+    status = Column(String, default="disconnected", index=True)
+    account_email = Column(String, nullable=True)
+    granted_scopes = Column(Text, nullable=True)
+    encrypted_refresh_token = Column(Text, nullable=True)
+    refresh_token_updated_at = Column(DateTime, nullable=True)
+    connected_at = Column(DateTime, nullable=True)
+    last_refreshed_at = Column(DateTime, nullable=True)
+    last_error = Column(String, nullable=True)
+    last_error_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class ListingAlertGmailOAuthState(Base):
+    """One-time OAuth state records used to validate Gmail callbacks."""
+
+    __tablename__ = "listing_alert_gmail_oauth_states"
+
+    id = Column(Integer, primary_key=True, index=True)
+    connection_key = Column(String, index=True)
+    state_hash = Column(String, unique=True, index=True)
+    expires_at = Column(DateTime, index=True)
+    used_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

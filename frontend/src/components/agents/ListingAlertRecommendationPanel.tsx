@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { agentsService } from '../../services/agents';
 import { getApiErrorMessage } from '../../services/httpErrors';
 import type {
@@ -9,6 +9,7 @@ import type {
     ListingAlertGmailCandidateMessage,
     ListingAlertGmailFetchCandidatesResponse,
     ListingAlertGmailImportOutcome,
+    ListingAlertGmailOAuthStatusResponse,
     ListingAlertManualPacketResultResponse,
     ListingAlertManualReviewPacket,
     ListingAlertManualReviewSubmissionRequest,
@@ -50,6 +51,8 @@ type GmailFetchFormState = {
     expectedContactId: string;
     operatorNotes: string;
 };
+
+type GmailIntakeExecutionMode = 'stored_oauth' | 'manual_fallback';
 
 type ShortlistSelectionState = {
     selected: boolean;
@@ -279,6 +282,36 @@ const getGmailImportOutcomeFollowupText = (outcome: ListingAlertGmailImportOutco
     return null;
 };
 
+const getGmailOAuthStatusTone = (
+    status?: ListingAlertGmailOAuthStatusResponse['status'] | null,
+) => {
+    if (status === 'connected') {
+        return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100';
+    }
+    if (status === 'reconnect_required') {
+        return 'border-amber-500/30 bg-amber-500/10 text-amber-100';
+    }
+    return 'border-white/10 bg-black/10 text-gray-200';
+};
+
+const getGmailOAuthStatusDescription = (
+    status?: ListingAlertGmailOAuthStatusResponse | null,
+) => {
+    if (!status) {
+        return 'Loading Gmail connection status...';
+    }
+    if (!status.oauth_configured) {
+        return 'Backend Gmail OAuth is not configured yet.';
+    }
+    if (status.status === 'connected') {
+        return 'Stored Gmail OAuth connection is healthy and ready for read-only fetch/import.';
+    }
+    if (status.status === 'reconnect_required') {
+        return 'Stored Gmail OAuth connection needs reauthorization before fetch/import can continue.';
+    }
+    return 'No stored Gmail OAuth connection is active yet.';
+};
+
 const findPacketReadyResult = (
     report: ListingAlertRecommendationRunReportResponse | null,
 ) => {
@@ -314,6 +347,9 @@ const renderContextValue = (value: unknown) => {
 };
 
 const ListingAlertRecommendationPanel = () => {
+    const gmailOauthPopupRef = useRef<Window | null>(null);
+    const gmailOauthPollTimerRef = useRef<number | null>(null);
+
     const [gmailFetchForm, setGmailFetchForm] = useState<GmailFetchFormState>(
         EMPTY_GMAIL_FETCH_FORM,
     );
@@ -330,6 +366,8 @@ const ListingAlertRecommendationPanel = () => {
     );
     const [gmailImportOutcome, setGmailImportOutcome] =
         useState<ListingAlertGmailImportOutcome | null>(null);
+    const [gmailOAuthStatus, setGmailOAuthStatus] =
+        useState<ListingAlertGmailOAuthStatusResponse | null>(null);
 
     const [runs, setRuns] = useState<AgentRun[]>([]);
     const [runReports, setRunReports] = useState<Record<number, ListingAlertRecommendationRunReportResponse>>(
@@ -345,6 +383,8 @@ const ListingAlertRecommendationPanel = () => {
     const [refreshing, setRefreshing] = useState(false);
     const [gmailFetching, setGmailFetching] = useState(false);
     const [gmailImporting, setGmailImporting] = useState(false);
+    const [gmailStatusLoading, setGmailStatusLoading] = useState(true);
+    const [gmailConnectionActionLoading, setGmailConnectionActionLoading] = useState(false);
     const [prepareSubmitting, setPrepareSubmitting] = useState(false);
     const [reviewSubmitting, setReviewSubmitting] = useState(false);
     const [reportLoading, setReportLoading] = useState(false);
@@ -357,6 +397,11 @@ const ListingAlertRecommendationPanel = () => {
     const [auditError, setAuditError] = useState<string | null>(null);
     const [approvalError, setApprovalError] = useState<string | null>(null);
     const [reviewFormError, setReviewFormError] = useState<string | null>(null);
+    const [gmailStatusNotice, setGmailStatusNotice] = useState<string | null>(null);
+    const [showManualTokenFallback, setShowManualTokenFallback] = useState(false);
+    const [manualTokenFallbackEnabled, setManualTokenFallbackEnabled] = useState(false);
+    const [gmailLastImportMode, setGmailLastImportMode] =
+        useState<GmailIntakeExecutionMode | null>(null);
 
     const selectedRun = runs.find((run) => run.id === selectedRunId) ?? null;
     const selectedReport = selectedRunId !== null ? runReports[selectedRunId] ?? null : null;
@@ -366,6 +411,14 @@ const ListingAlertRecommendationPanel = () => {
         gmailCandidatesResult?.candidates.find(
             (candidate) => candidate.message_id === selectedCandidateMessageId,
         ) ?? null;
+    const storedGmailConnectionReady =
+        gmailOAuthStatus?.status === 'connected' && gmailOAuthStatus.has_refresh_token;
+    const manualTokenValue = gmailFetchForm.accessToken.trim();
+    const usingManualTokenFallback =
+        showManualTokenFallback &&
+        manualTokenFallbackEnabled &&
+        manualTokenValue.length > 0;
+    const gmailIntakeReady = storedGmailConnectionReady || usingManualTokenFallback;
     const selectedShortlistCount = Object.values(shortlistSelections).filter(
         (item) => item.selected,
     ).length;
@@ -417,6 +470,66 @@ const ListingAlertRecommendationPanel = () => {
         }
     };
 
+    const clearGmailOauthPoll = () => {
+        if (gmailOauthPollTimerRef.current !== null) {
+            window.clearInterval(gmailOauthPollTimerRef.current);
+            gmailOauthPollTimerRef.current = null;
+        }
+    };
+
+    const loadGmailOAuthStatus = async (
+        options: { silent?: boolean } = {},
+    ): Promise<ListingAlertGmailOAuthStatusResponse | null> => {
+        if (!options.silent) {
+            setGmailStatusLoading(true);
+        }
+
+        try {
+            const status = await agentsService.getListingAlertGmailOAuthStatus();
+            setGmailOAuthStatus(status);
+            return status;
+        } catch (loadError) {
+            setGmailError(
+                getErrorMessage(loadError, 'Failed to load Gmail OAuth connection status.'),
+            );
+            return null;
+        } finally {
+            if (!options.silent) {
+                setGmailStatusLoading(false);
+            }
+        }
+    };
+
+    const startPollingGmailOAuthStatus = () => {
+        clearGmailOauthPoll();
+        gmailOauthPollTimerRef.current = window.setInterval(() => {
+            void (async () => {
+                const status = await loadGmailOAuthStatus({ silent: true });
+                const popupClosed = gmailOauthPopupRef.current?.closed ?? true;
+                if (status?.status === 'connected') {
+                    setGmailStatusNotice(
+                        'Gmail OAuth connection is active. Fetch/import now uses the stored mailbox connection by default.',
+                    );
+                    setGmailConnectionActionLoading(false);
+                    clearGmailOauthPoll();
+                    return;
+                }
+                if (status?.status === 'reconnect_required') {
+                    setGmailStatusNotice(
+                        'Gmail OAuth still needs reauthorization. Reconnect before fetch/import.',
+                    );
+                    setGmailConnectionActionLoading(false);
+                    clearGmailOauthPoll();
+                    return;
+                }
+                if (popupClosed) {
+                    setGmailConnectionActionLoading(false);
+                    clearGmailOauthPoll();
+                }
+            })();
+        }, 1500);
+    };
+
     const loadData = async (
         mode: 'initial' | 'refresh' = 'refresh',
         preferredRunId?: number | null,
@@ -466,6 +579,11 @@ const ListingAlertRecommendationPanel = () => {
 
     useEffect(() => {
         void loadData('initial');
+        void loadGmailOAuthStatus();
+
+        return () => {
+            clearGmailOauthPoll();
+        };
     }, []);
 
     useEffect(() => {
@@ -523,6 +641,75 @@ const ListingAlertRecommendationPanel = () => {
             ...current,
             [key]: value,
         }));
+    };
+
+    const handleRefreshGmailOAuthStatus = async () => {
+        setGmailStatusNotice(null);
+        await loadGmailOAuthStatus();
+    };
+
+    const handleStartGmailOAuth = async () => {
+        if (gmailOAuthStatus && !gmailOAuthStatus.oauth_configured) {
+            setGmailError('Backend Gmail OAuth is not configured yet.');
+            return;
+        }
+
+        setGmailError(null);
+        setGmailStatusNotice(null);
+        setGmailConnectionActionLoading(true);
+
+        const popup = window.open(
+            'about:blank',
+            'listing-alert-gmail-oauth',
+            'popup=yes,width=640,height=760',
+        );
+        if (!popup) {
+            setGmailConnectionActionLoading(false);
+            setGmailError('Popup was blocked. Allow popups and try Connect Gmail again.');
+            return;
+        }
+
+        popup.document.title = 'Connect Gmail';
+        popup.document.body.innerHTML =
+            '<div style="font-family: sans-serif; padding: 24px;">Opening Gmail OAuth…</div>';
+
+        try {
+            const start = await agentsService.startListingAlertGmailOAuth();
+            gmailOauthPopupRef.current = popup;
+            popup.location.href = start.authorization_url;
+            setGmailStatusNotice(
+                'Gmail OAuth window opened. Complete Google authorization, then this panel will refresh connection status automatically.',
+            );
+            startPollingGmailOAuthStatus();
+        } catch (startError) {
+            popup.close();
+            gmailOauthPopupRef.current = null;
+            setGmailConnectionActionLoading(false);
+            setGmailError(
+                getErrorMessage(startError, 'Failed to start Gmail OAuth connection flow.'),
+            );
+        }
+    };
+
+    const handleDisconnectGmailOAuth = async () => {
+        setGmailConnectionActionLoading(true);
+        setGmailError(null);
+        setGmailStatusNotice(null);
+        clearGmailOauthPoll();
+
+        try {
+            const status = await agentsService.disconnectListingAlertGmailOAuth();
+            setGmailOAuthStatus(status);
+            setGmailStatusNotice(
+                'Stored Gmail OAuth connection was disconnected. Fetch/import now requires reconnect or the debug fallback token.',
+            );
+        } catch (disconnectError) {
+            setGmailError(
+                getErrorMessage(disconnectError, 'Failed to disconnect stored Gmail OAuth connection.'),
+            );
+        } finally {
+            setGmailConnectionActionLoading(false);
+        }
     };
 
     const syncPacketFormFromImportedMessage = (
@@ -606,13 +793,22 @@ const ListingAlertRecommendationPanel = () => {
     };
 
     const handleFetchGmailCandidates = async () => {
-        if (!gmailFetchForm.accessToken.trim()) {
-            setGmailError('Temporary Gmail access token is required for read-only fetch.');
+        if (!gmailFetchForm.allowedSender.trim()) {
+            setGmailError('Allowed sender is required for constrained Gmail fetch.');
             return;
         }
 
-        if (!gmailFetchForm.allowedSender.trim()) {
-            setGmailError('Allowed sender is required for constrained Gmail fetch.');
+        if (!usingManualTokenFallback && !storedGmailConnectionReady) {
+            setGmailError(
+                gmailOAuthStatus?.status === 'reconnect_required'
+                    ? 'Stored Gmail OAuth needs reconnect before fetch/import can continue.'
+                    : 'Connect Gmail first, or explicitly enable the internal debug token fallback.',
+            );
+            return;
+        }
+
+        if (manualTokenFallbackEnabled && showManualTokenFallback && !manualTokenValue) {
+            setGmailError('Debug fallback is enabled, but no temporary Gmail token was provided.');
             return;
         }
 
@@ -628,7 +824,7 @@ const ListingAlertRecommendationPanel = () => {
 
         try {
             const result = await agentsService.fetchListingAlertGmailCandidates({
-                access_token: gmailFetchForm.accessToken.trim(),
+                access_token: usingManualTokenFallback ? manualTokenValue : '',
                 gmail_user_id: gmailFetchForm.gmailUserId.trim() || 'me',
                 query_policy: {
                     allowed_sender: gmailFetchForm.allowedSender.trim(),
@@ -655,8 +851,17 @@ const ListingAlertRecommendationPanel = () => {
             return;
         }
 
-        if (!gmailFetchForm.accessToken.trim()) {
-            setGmailError('Temporary Gmail access token is required for import.');
+        if (!usingManualTokenFallback && !storedGmailConnectionReady) {
+            setGmailError(
+                gmailOAuthStatus?.status === 'reconnect_required'
+                    ? 'Stored Gmail OAuth needs reconnect before import can continue.'
+                    : 'Connect Gmail first, or explicitly enable the internal debug token fallback.',
+            );
+            return;
+        }
+
+        if (manualTokenFallbackEnabled && showManualTokenFallback && !manualTokenValue) {
+            setGmailError('Debug fallback is enabled, but no temporary Gmail token was provided.');
             return;
         }
 
@@ -679,10 +884,11 @@ const ListingAlertRecommendationPanel = () => {
 
         setGmailImporting(true);
         setGmailError(null);
+        setGmailLastImportMode(usingManualTokenFallback ? 'manual_fallback' : 'stored_oauth');
 
         try {
             const outcome = await agentsService.importListingAlertGmailMessage({
-                access_token: gmailFetchForm.accessToken.trim(),
+                access_token: usingManualTokenFallback ? manualTokenValue : '',
                 gmail_user_id: gmailFetchForm.gmailUserId.trim() || 'me',
                 query_policy: {
                     allowed_sender: gmailFetchForm.allowedSender.trim(),
@@ -1188,9 +1394,10 @@ const ListingAlertRecommendationPanel = () => {
                 <div className="space-y-1">
                     <h2 className="text-lg font-medium">Listing Alert Recommendation</h2>
                     <p className="text-sm text-gray-400">
-                        Gmail-driven MLS alert intake for Manual Mode only. Gmail access in this panel is
-                        read-only, token-based, and temporary; manual review still remains external to
-                        ChatGPT Pro / GPT-5.4 Pro.
+                        Gmail-driven MLS alert intake for Manual Mode only. The primary production path
+                        now uses a stored read-only Gmail OAuth connection; temporary token input remains
+                        available only as an internal/debug fallback. Manual review still remains external
+                        to ChatGPT Pro / GPT-5.4 Pro.
                     </p>
                 </div>
                 <button
@@ -1215,33 +1422,124 @@ const ListingAlertRecommendationPanel = () => {
                         <div>
                             <h3 className="text-base font-medium">1. Gmail Intake</h3>
                             <p className="text-sm text-gray-400">
-                                Gmail READ only. Paste a temporary Gmail access token, fetch constrained
-                                MLS alert candidates, then import one message into the existing Manual Mode
-                                packet-prep workflow. The token stays in component memory only and is not stored.
+                                Gmail READ only. Stored OAuth is the default production path. Fetch
+                                constrained MLS alert candidates, then import one message into the
+                                existing Manual Mode packet-prep workflow. Temporary token fallback is
+                                kept only for internal/debug use.
                             </p>
                         </div>
 
+                        <div
+                            className={`rounded border px-3 py-3 text-sm space-y-3 ${getGmailOAuthStatusTone(
+                                gmailOAuthStatus?.status,
+                            )}`}
+                        >
+                            <div className="flex items-start justify-between gap-3">
+                                <div>
+                                    <div className="font-medium">
+                                        Stored Gmail connection ·{' '}
+                                        {gmailStatusLoading
+                                            ? 'Loading...'
+                                            : humanizeEnum(gmailOAuthStatus?.status || 'disconnected')}
+                                    </div>
+                                    <div className="mt-1 text-xs text-current/80">
+                                        {getGmailOAuthStatusDescription(gmailOAuthStatus)}
+                                    </div>
+                                </div>
+                                <div className="text-xs text-current/80">
+                                    Logical connection: {gmailOAuthStatus?.connection_key || 'listing_alert_primary'}
+                                </div>
+                            </div>
+
+                            <div className="grid gap-3 md:grid-cols-2 text-xs">
+                                <div>
+                                    <div className="font-semibold text-current/90">Mailbox</div>
+                                    <div className="mt-1 text-current/80">
+                                        {gmailOAuthStatus?.account_email || 'Not connected'}
+                                    </div>
+                                </div>
+                                <div>
+                                    <div className="font-semibold text-current/90">Gmail user ID</div>
+                                    <div className="mt-1 text-current/80">
+                                        {gmailOAuthStatus?.gmail_user_id || 'me'} (fixed for v1)
+                                    </div>
+                                </div>
+                                <div className="md:col-span-2">
+                                    <div className="font-semibold text-current/90">Granted scopes</div>
+                                    <div className="mt-1 text-current/80 break-all">
+                                        {gmailOAuthStatus?.granted_scopes?.length
+                                            ? gmailOAuthStatus.granted_scopes.join(' | ')
+                                            : 'No scopes recorded yet'}
+                                    </div>
+                                </div>
+                                {(gmailOAuthStatus?.connected_at || gmailOAuthStatus?.last_refreshed_at) && (
+                                    <>
+                                        <div>
+                                            <div className="font-semibold text-current/90">Connected</div>
+                                            <div className="mt-1 text-current/80">
+                                                {formatTimestamp(gmailOAuthStatus?.connected_at)}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div className="font-semibold text-current/90">Last refreshed</div>
+                                            <div className="mt-1 text-current/80">
+                                                {formatTimestamp(gmailOAuthStatus?.last_refreshed_at)}
+                                            </div>
+                                        </div>
+                                    </>
+                                )}
+                                {gmailOAuthStatus?.last_error && (
+                                    <div className="md:col-span-2">
+                                        <div className="font-semibold text-current/90">Connection health</div>
+                                        <div className="mt-1 text-current/80">
+                                            Last error: {gmailOAuthStatus.last_error}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2">
+                                <button
+                                    onClick={() => void handleStartGmailOAuth()}
+                                    className="px-4 py-2 text-sm rounded bg-sky-600 text-white hover:bg-sky-700 disabled:opacity-50"
+                                    disabled={
+                                        gmailConnectionActionLoading ||
+                                        !gmailOAuthStatus?.oauth_configured
+                                    }
+                                >
+                                    {gmailConnectionActionLoading
+                                        ? 'Opening Gmail OAuth...'
+                                        : gmailOAuthStatus?.status === 'connected'
+                                            ? 'Reconnect Gmail'
+                                            : 'Connect Gmail'}
+                                </button>
+                                <button
+                                    onClick={() => void handleRefreshGmailOAuthStatus()}
+                                    className="px-3 py-2 text-sm rounded border border-white/10 bg-white/5 text-white hover:bg-white/10 disabled:opacity-50"
+                                    disabled={gmailStatusLoading || gmailConnectionActionLoading}
+                                >
+                                    {gmailStatusLoading ? 'Refreshing Gmail Status...' : 'Refresh Gmail Status'}
+                                </button>
+                                <button
+                                    onClick={() => void handleDisconnectGmailOAuth()}
+                                    className="px-3 py-2 text-sm rounded border border-white/10 bg-white/5 text-white hover:bg-white/10 disabled:opacity-50"
+                                    disabled={
+                                        gmailConnectionActionLoading ||
+                                        !gmailOAuthStatus?.has_refresh_token
+                                    }
+                                >
+                                    Disconnect Gmail
+                                </button>
+                            </div>
+                        </div>
+
+                        {gmailStatusNotice && (
+                            <div className="rounded border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-sm text-sky-100">
+                                {gmailStatusNotice}
+                            </div>
+                        )}
+
                         <div className="grid gap-3 md:grid-cols-2">
-                            <label className="space-y-1 text-sm">
-                                <div className="text-gray-300">Temporary access token</div>
-                                <input
-                                    type="password"
-                                    value={gmailFetchForm.accessToken}
-                                    onChange={(event) => updateGmailFetchField('accessToken', event.target.value)}
-                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
-                                    placeholder="Request-scoped only"
-                                    autoComplete="off"
-                                />
-                            </label>
-                            <label className="space-y-1 text-sm">
-                                <div className="text-gray-300">Gmail user ID</div>
-                                <input
-                                    value={gmailFetchForm.gmailUserId}
-                                    onChange={(event) => updateGmailFetchField('gmailUserId', event.target.value)}
-                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
-                                    placeholder="me"
-                                />
-                            </label>
                             <label className="space-y-1 text-sm md:col-span-2">
                                 <div className="text-gray-300">Allowed sender</div>
                                 <input
@@ -1301,11 +1599,74 @@ const ListingAlertRecommendationPanel = () => {
                         <div className="rounded border border-white/10 bg-black/10 p-3 text-xs text-gray-300 space-y-1">
                             <div>Manual fetch only. No polling, no background refresh, no hidden retries.</div>
                             <div>
-                                Token is never stored in localStorage, sessionStorage, URL params, runs, tasks, or audit logs.
+                                Stored Gmail OAuth is the default production path for this panel. OAuth credentials are handled server-side and are not written into runs, tasks, or audit logs.
                             </div>
                             <div>
-                                Token stays in component memory only long enough to support fetch, candidate selection, and import. After an import response, the panel clears it.
+                                Temporary token fallback remains internal/debug only. If used, the token stays in component memory only long enough to support fetch, candidate selection, and import.
                             </div>
+                        </div>
+
+                        <div className="rounded border border-white/10 bg-black/10 p-3 space-y-3">
+                            <div className="flex items-center justify-between gap-3">
+                                <div>
+                                    <div className="font-medium text-sm">
+                                        Manual token fallback (internal/debug)
+                                    </div>
+                                    <div className="text-xs text-gray-400">
+                                        Keep disabled in normal production use. Stored OAuth remains the primary path.
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => {
+                                        setShowManualTokenFallback((current) => {
+                                            const next = !current;
+                                            if (!next) {
+                                                setManualTokenFallbackEnabled(false);
+                                            }
+                                            return next;
+                                        });
+                                    }}
+                                    className="px-3 py-2 text-sm rounded border border-white/10 bg-white/5 text-white hover:bg-white/10"
+                                >
+                                    {showManualTokenFallback ? 'Hide Debug Fallback' : 'Show Debug Fallback'}
+                                </button>
+                            </div>
+
+                            {showManualTokenFallback && (
+                                <div className="space-y-3">
+                                    <label className="flex items-start gap-2 text-sm text-gray-300">
+                                        <input
+                                            type="checkbox"
+                                            checked={manualTokenFallbackEnabled}
+                                            onChange={(event) =>
+                                                setManualTokenFallbackEnabled(event.target.checked)
+                                            }
+                                            className="mt-1"
+                                        />
+                                        <span>
+                                            Use a temporary Gmail access token for fetch/import instead of the stored
+                                            OAuth connection.
+                                        </span>
+                                    </label>
+
+                                    <label className="space-y-1 text-sm">
+                                        <div className="text-gray-300">Temporary access token</div>
+                                        <input
+                                            type="password"
+                                            value={gmailFetchForm.accessToken}
+                                            onChange={(event) => updateGmailFetchField('accessToken', event.target.value)}
+                                            className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                            placeholder="Request-scoped only"
+                                            autoComplete="off"
+                                        />
+                                    </label>
+
+                                    <div className="text-xs text-gray-500">
+                                        This fallback is not the primary production path. If used, the token is never
+                                        stored in localStorage, sessionStorage, URL params, runs, tasks, or audit logs.
+                                    </div>
+                                </div>
+                            )}
                         </div>
 
                         {gmailError && (
@@ -1318,7 +1679,15 @@ const ListingAlertRecommendationPanel = () => {
                             <button
                                 onClick={() => void handleFetchGmailCandidates()}
                                 className="px-4 py-2 text-sm rounded bg-sky-600 text-white hover:bg-sky-700 disabled:opacity-50"
-                                disabled={gmailFetching || gmailImporting || prepareSubmitting || reviewSubmitting || isBusy}
+                                disabled={
+                                    gmailFetching ||
+                                    gmailImporting ||
+                                    prepareSubmitting ||
+                                    reviewSubmitting ||
+                                    isBusy ||
+                                    gmailConnectionActionLoading ||
+                                    !gmailIntakeReady
+                                }
                             >
                                 {gmailFetching ? 'Fetching...' : 'Fetch Gmail Candidates'}
                             </button>
@@ -1329,6 +1698,13 @@ const ListingAlertRecommendationPanel = () => {
                                 </div>
                             )}
                         </div>
+
+                        {!gmailIntakeReady && (
+                            <div className="text-xs text-amber-100">
+                                Stored Gmail OAuth is not ready yet. Connect Gmail first, or explicitly enable the
+                                internal debug token fallback.
+                            </div>
+                        )}
 
                         <div className="rounded border border-white/10 bg-white/5 p-3 space-y-3">
                             <div>
@@ -1489,7 +1865,9 @@ const ListingAlertRecommendationPanel = () => {
                                     </div>
                                 )}
                                 <div className="mt-1 text-xs">
-                                    Temporary access token cleared after this import response.
+                                    {gmailLastImportMode === 'manual_fallback'
+                                        ? 'Temporary access token cleared after this import response.'
+                                        : 'Stored Gmail OAuth connection remained in use. No temporary token was required.'}
                                 </div>
                                 {getGmailImportOutcomeFollowupText(gmailImportOutcome) && (
                                     <div className="mt-1 text-xs">

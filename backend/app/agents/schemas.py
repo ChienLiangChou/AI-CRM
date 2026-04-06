@@ -361,6 +361,11 @@ ListingAlertGmailImportStatus = Literal[
     "duplicate_skipped",
     "policy_skipped",
 ]
+ListingAlertGmailOAuthStatus = Literal[
+    "disconnected",
+    "connected",
+    "reconnect_required",
+]
 ListingAlertAssociationMethod = Literal[
     "expected_contact_id",
     "explicit_mapping",
@@ -419,9 +424,30 @@ class ListingAlertGmailReadQueryPolicy(BaseModel):
 
 
 class ListingAlertGmailReadConfig(BaseModel):
-    access_token: str
+    access_token: Optional[str] = None
     gmail_user_id: str = "me"
     query_policy: ListingAlertGmailReadQueryPolicy
+
+
+class ListingAlertGmailOAuthStatusResponse(BaseModel):
+    connection_key: str
+    gmail_user_id: str = "me"
+    status: ListingAlertGmailOAuthStatus
+    account_email: Optional[str] = None
+    granted_scopes: list[str] = []
+    connected_at: Optional[datetime] = None
+    last_refreshed_at: Optional[datetime] = None
+    last_error: Optional[str] = None
+    oauth_configured: bool = False
+    has_refresh_token: bool = False
+    reconnect_required: bool = False
+
+
+class ListingAlertGmailOAuthStartResponse(BaseModel):
+    connection_key: str
+    authorization_url: str
+    state_expires_at: datetime
+    requested_scopes: list[str] = []
 
 
 class ListingAlertGmailMessageReference(BaseModel):
