@@ -299,16 +299,15 @@ export interface ListingAlertGmailReadQueryPolicy {
     max_results: number;
 }
 
-export interface ListingAlertGmailFetchCandidatesRequest {
+export interface ListingAlertGmailReadConfig {
     access_token?: string | null;
     gmail_user_id?: string;
     query_policy: ListingAlertGmailReadQueryPolicy;
 }
 
-export interface ListingAlertGmailImportMessageRequest {
-    access_token?: string | null;
-    gmail_user_id?: string;
-    query_policy: ListingAlertGmailReadQueryPolicy;
+export interface ListingAlertGmailFetchCandidatesRequest extends ListingAlertGmailReadConfig {}
+
+export interface ListingAlertGmailImportMessageRequest extends ListingAlertGmailReadConfig {
     message_id: string;
     expected_contact_id?: number | null;
     operator_notes?: string | null;
@@ -509,9 +508,58 @@ export interface ListingAlertReviewedSubmissionResultResponse {
     operator_notes: string[];
 }
 
+export interface ListingAlertAutomaticReviewedResultResponse
+    extends ListingAlertReviewedSubmissionResultResponse {
+    workflow_mode: 'automatic';
+}
+
+export type ListingAlertAutomaticMessageStatus =
+    | 'duplicate_skipped'
+    | 'blocked'
+    | 'completed_no_draft'
+    | 'waiting_approval';
+
+export interface ListingAlertAutomaticRunRequest {
+    gmail_read_config: ListingAlertGmailReadConfig;
+    operator_notes?: string | null;
+    max_messages: number;
+}
+
+export interface ListingAlertAutomaticMessageOutcomeSummary {
+    message_id: string;
+    thread_id?: string | null;
+    subject?: string | null;
+    received_at?: string | null;
+    status: ListingAlertAutomaticMessageStatus;
+    reason?: string | null;
+    task_id?: number | null;
+    run_id?: number | null;
+    review_run_id?: number | null;
+    execution_status?: ListingAlertExecutionStatus | null;
+    association_status?: ListingAlertAssociationStatus | null;
+    review_outcome?: ListingAlertReviewOutcome | null;
+    approval_id?: number | null;
+    packet_ready: boolean;
+}
+
+export interface ListingAlertAutomaticBatchResult {
+    gmail_user_id: string;
+    query: string;
+    matched_message_count: number;
+    candidate_count: number;
+    message_cap: number;
+    processed_message_count: number;
+    duplicate_skipped_count: number;
+    blocked_count: number;
+    completed_no_draft_count: number;
+    waiting_approval_count: number;
+    outcomes: ListingAlertAutomaticMessageOutcomeSummary[];
+}
+
 export type ListingAlertRecommendationStoredResult =
     | ListingAlertManualPacketResultResponse
-    | ListingAlertReviewedSubmissionResultResponse;
+    | ListingAlertReviewedSubmissionResultResponse
+    | ListingAlertAutomaticReviewedResultResponse;
 
 export interface ListingAlertRecommendationLatestResponse {
     run_id: number | null;
@@ -2008,13 +2056,17 @@ const normalizeListingAlertClientDraftResultItem = (
 };
 
 const normalizeListingAlertReviewedSubmissionResult = (
-    value: Partial<ListingAlertReviewedSubmissionResultResponse> | null | undefined,
-): ListingAlertReviewedSubmissionResultResponse | null => {
+    value:
+        | Partial<ListingAlertReviewedSubmissionResultResponse>
+        | Partial<ListingAlertAutomaticReviewedResultResponse>
+        | null
+        | undefined,
+): ListingAlertReviewedSubmissionResultResponse | ListingAlertAutomaticReviewedResultResponse | null => {
     if (!value || typeof value !== 'object') {
         return null;
     }
 
-    return {
+    const normalizedBase: ListingAlertReviewedSubmissionResultResponse = {
         source_run_id: typeof value.source_run_id === 'number' ? value.source_run_id : 0,
         source_task_id:
             typeof value.source_task_id === 'number' ? value.source_task_id : 0,
@@ -2038,6 +2090,99 @@ const normalizeListingAlertReviewedSubmissionResult = (
         ).map(normalizeListingAlertClientDraftResultItem),
         risk_flags: ensureArray<string>(value.risk_flags),
         operator_notes: ensureArray<string>(value.operator_notes),
+    };
+
+    if ('workflow_mode' in value && value.workflow_mode === 'automatic') {
+        return {
+            ...normalizedBase,
+            workflow_mode: 'automatic',
+        };
+    }
+
+    return normalizedBase;
+};
+
+const normalizeListingAlertAutomaticMessageOutcomeSummary = (
+    value: Partial<ListingAlertAutomaticMessageOutcomeSummary> | null | undefined,
+): ListingAlertAutomaticMessageOutcomeSummary => {
+    return {
+        message_id: typeof value?.message_id === 'string' ? value.message_id : '',
+        thread_id: typeof value?.thread_id === 'string' ? value.thread_id : null,
+        subject: typeof value?.subject === 'string' ? value.subject : null,
+        received_at: typeof value?.received_at === 'string' ? value.received_at : null,
+        status:
+            value?.status === 'duplicate_skipped' ||
+            value?.status === 'blocked' ||
+            value?.status === 'completed_no_draft' ||
+            value?.status === 'waiting_approval'
+                ? value.status
+                : 'blocked',
+        reason: typeof value?.reason === 'string' ? value.reason : null,
+        task_id: typeof value?.task_id === 'number' ? value.task_id : null,
+        run_id: typeof value?.run_id === 'number' ? value.run_id : null,
+        review_run_id:
+            typeof value?.review_run_id === 'number' ? value.review_run_id : null,
+        execution_status:
+            value?.execution_status === 'packet_ready' ||
+            value?.execution_status === 'blocked_no_candidates' ||
+            value?.execution_status === 'blocked_no_client_match' ||
+            value?.execution_status === 'blocked_ambiguous_client_match' ||
+            value?.execution_status === 'blocked_ambiguous_intent' ||
+            value?.execution_status === 'blocked_intent_mismatch'
+                ? value.execution_status
+                : null,
+        association_status:
+            value?.association_status === 'matched' ||
+            value?.association_status === 'blocked_no_match' ||
+            value?.association_status === 'blocked_ambiguous' ||
+            value?.association_status === 'blocked_ambiguous_intent' ||
+            value?.association_status === 'blocked_intent_mismatch'
+                ? value.association_status
+                : null,
+        review_outcome:
+            value?.review_outcome === 'waiting_approval' ||
+            value?.review_outcome === 'completed_no_draft'
+                ? value.review_outcome
+                : null,
+        approval_id: typeof value?.approval_id === 'number' ? value.approval_id : null,
+        packet_ready: Boolean(value?.packet_ready),
+    };
+};
+
+const normalizeListingAlertAutomaticBatchResult = (
+    value: Partial<ListingAlertAutomaticBatchResult> | null | undefined,
+): ListingAlertAutomaticBatchResult => {
+    return {
+        gmail_user_id: typeof value?.gmail_user_id === 'string' ? value.gmail_user_id : 'me',
+        query: typeof value?.query === 'string' ? value.query : '',
+        matched_message_count:
+            typeof value?.matched_message_count === 'number'
+                ? value.matched_message_count
+                : 0,
+        candidate_count:
+            typeof value?.candidate_count === 'number' ? value.candidate_count : 0,
+        message_cap: typeof value?.message_cap === 'number' ? value.message_cap : 3,
+        processed_message_count:
+            typeof value?.processed_message_count === 'number'
+                ? value.processed_message_count
+                : 0,
+        duplicate_skipped_count:
+            typeof value?.duplicate_skipped_count === 'number'
+                ? value.duplicate_skipped_count
+                : 0,
+        blocked_count:
+            typeof value?.blocked_count === 'number' ? value.blocked_count : 0,
+        completed_no_draft_count:
+            typeof value?.completed_no_draft_count === 'number'
+                ? value.completed_no_draft_count
+                : 0,
+        waiting_approval_count:
+            typeof value?.waiting_approval_count === 'number'
+                ? value.waiting_approval_count
+                : 0,
+        outcomes: ensureArray<Partial<ListingAlertAutomaticMessageOutcomeSummary>>(
+            value?.outcomes,
+        ).map(normalizeListingAlertAutomaticMessageOutcomeSummary),
     };
 };
 
@@ -3807,10 +3952,43 @@ export const agentsService = {
         return res.data;
     },
 
+    runListingAlertAutomaticModeOnce: async (
+        payload: ListingAlertAutomaticRunRequest,
+    ): Promise<ListingAlertAutomaticBatchResult> => {
+        const normalizedPayload: ListingAlertAutomaticRunRequest = {
+            gmail_read_config: {
+                access_token: payload.gmail_read_config.access_token ?? null,
+                gmail_user_id: payload.gmail_read_config.gmail_user_id?.trim() || 'me',
+                query_policy: normalizeListingAlertGmailQueryPolicy(
+                    payload.gmail_read_config.query_policy,
+                ),
+            },
+            operator_notes: payload.operator_notes?.trim() || null,
+            max_messages: Math.max(1, Math.min(payload.max_messages || 3, 3)),
+        };
+        const res = await api.post<ListingAlertAutomaticBatchResult>(
+            '/agents/listing-alert-recommendation/automatic/run-once',
+            normalizedPayload,
+        );
+        return normalizeListingAlertAutomaticBatchResult(res.data);
+    },
+
     getListingAlertRecommendationRuns: async (limit = 20): Promise<AgentRun[]> => {
         const res = await api.get<AgentRun[]>('/agents/listing-alert-recommendation/runs', {
             params: { limit },
         });
+        return ensureArray<AgentRun>(res.data);
+    },
+
+    getListingAlertRecommendationAutomaticRuns: async (
+        limit = 20,
+    ): Promise<AgentRun[]> => {
+        const res = await api.get<AgentRun[]>(
+            '/agents/listing-alert-recommendation/automatic/runs',
+            {
+                params: { limit },
+            },
+        );
         return ensureArray<AgentRun>(res.data);
     },
 
@@ -3821,11 +3999,27 @@ export const agentsService = {
         return normalizeListingAlertLatest(res.data);
     },
 
+    getLatestListingAlertRecommendationAutomaticResult: async (): Promise<ListingAlertRecommendationLatestResponse> => {
+        const res = await api.get<ListingAlertRecommendationLatestResponse>(
+            '/agents/listing-alert-recommendation/automatic/latest',
+        );
+        return normalizeListingAlertLatest(res.data);
+    },
+
     getListingAlertRecommendationRunReport: async (
         runId: number,
     ): Promise<ListingAlertRecommendationRunReportResponse> => {
         const res = await api.get<ListingAlertRecommendationRunReportResponse>(
             `/agents/listing-alert-recommendation/runs/${runId}/report`,
+        );
+        return normalizeListingAlertRunReport(res.data);
+    },
+
+    getListingAlertRecommendationAutomaticRunReport: async (
+        runId: number,
+    ): Promise<ListingAlertRecommendationRunReportResponse> => {
+        const res = await api.get<ListingAlertRecommendationRunReportResponse>(
+            `/agents/listing-alert-recommendation/automatic/runs/${runId}/report`,
         );
         return normalizeListingAlertRunReport(res.data);
     },
@@ -3843,8 +4037,28 @@ export const agentsService = {
         return ensureArray<AgentAuditLog>(res.data);
     },
 
+    getListingAlertRecommendationAutomaticRunAuditLogs: async (
+        runId: number,
+        limit = 100,
+    ): Promise<AgentAuditLog[]> => {
+        const res = await api.get<AgentAuditLog[]>(
+            `/agents/listing-alert-recommendation/automatic/runs/${runId}/audit-logs`,
+            {
+                params: { limit },
+            },
+        );
+        return ensureArray<AgentAuditLog>(res.data);
+    },
+
     getListingAlertRecommendationPendingApprovals: async (): Promise<AgentApproval[]> => {
         const res = await api.get<AgentApproval[]>('/agents/listing-alert-recommendation/approvals');
+        return ensureArray<AgentApproval>(res.data);
+    },
+
+    getListingAlertRecommendationAutomaticPendingApprovals: async (): Promise<AgentApproval[]> => {
+        const res = await api.get<AgentApproval[]>(
+            '/agents/listing-alert-recommendation/automatic/approvals',
+        );
         return ensureArray<AgentApproval>(res.data);
     },
 
@@ -3853,6 +4067,18 @@ export const agentsService = {
     ): Promise<AgentApproval[]> => {
         const res = await api.get<AgentApproval[]>(
             '/agents/listing-alert-recommendation/approvals/history',
+            {
+                params: { limit },
+            },
+        );
+        return ensureArray<AgentApproval>(res.data);
+    },
+
+    getListingAlertRecommendationAutomaticApprovalHistory: async (
+        limit = 20,
+    ): Promise<AgentApproval[]> => {
+        const res = await api.get<AgentApproval[]>(
+            '/agents/listing-alert-recommendation/automatic/approvals/history',
             {
                 params: { limit },
             },

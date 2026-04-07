@@ -5,6 +5,9 @@ import type {
     AgentApproval,
     AgentAuditLog,
     AgentRun,
+    ListingAlertAutomaticBatchResult,
+    ListingAlertAutomaticMessageOutcomeSummary,
+    ListingAlertAutomaticReviewedResultResponse,
     ListingAlertClientAssociationResponse,
     ListingAlertGmailCandidateMessage,
     ListingAlertGmailFetchCandidatesResponse,
@@ -25,6 +28,8 @@ const EMPTY_LATEST: ListingAlertRecommendationLatestResponse = {
     error: null,
     result: null,
 };
+
+const AUTOMATIC_MAX_MESSAGES = 3;
 
 type PacketFormState = {
     expectedContactId: string;
@@ -49,6 +54,15 @@ type GmailFetchFormState = {
     subjectKeywords: string;
     maxResults: string;
     expectedContactId: string;
+    operatorNotes: string;
+};
+
+type AutomaticRunFormState = {
+    gmailUserId: string;
+    allowedSender: string;
+    labelIds: string;
+    subjectKeywords: string;
+    maxMessages: string;
     operatorNotes: string;
 };
 
@@ -106,6 +120,15 @@ const EMPTY_GMAIL_FETCH_FORM: GmailFetchFormState = {
     operatorNotes: '',
 };
 
+const EMPTY_AUTOMATIC_FORM: AutomaticRunFormState = {
+    gmailUserId: 'me',
+    allowedSender: '',
+    labelIds: '',
+    subjectKeywords: '',
+    maxMessages: '3',
+    operatorNotes: '',
+};
+
 const EMPTY_REVIEW_FORM: ReviewFormState = {
     recommendationReasoning: '',
     tradeoffNotes: '',
@@ -150,6 +173,14 @@ const splitList = (value: string) =>
         .split(/[\n,]/)
         .map((item) => item.trim())
         .filter(Boolean);
+
+const clampAutomaticMaxMessages = (value: string) => {
+    const parsed = Number(value.trim() || `${AUTOMATIC_MAX_MESSAGES}`);
+    if (!Number.isFinite(parsed)) {
+        return `${AUTOMATIC_MAX_MESSAGES}`;
+    }
+    return String(Math.max(1, Math.min(Math.trunc(parsed), AUTOMATIC_MAX_MESSAGES)));
+};
 
 const formatTimestamp = (value?: string | null) => {
     if (!value) {
@@ -201,8 +232,16 @@ const isPacketResult = (
 
 const isReviewedSubmissionResult = (
     result: ListingAlertRecommendationRunReportResponse['result'] | ListingAlertRecommendationLatestResponse['result'],
-): result is ListingAlertReviewedSubmissionResultResponse => {
+): result is
+    | ListingAlertReviewedSubmissionResultResponse
+    | ListingAlertAutomaticReviewedResultResponse => {
     return Boolean(result && 'review_outcome' in result);
+};
+
+const isAutomaticReviewedResult = (
+    result: ListingAlertRecommendationRunReportResponse['result'] | ListingAlertRecommendationLatestResponse['result'],
+): result is ListingAlertAutomaticReviewedResultResponse => {
+    return Boolean(result && 'workflow_mode' in result && result.workflow_mode === 'automatic');
 };
 
 const getRunKindLabel = (result: ListingAlertRecommendationRunReportResponse['result']) => {
@@ -210,7 +249,9 @@ const getRunKindLabel = (result: ListingAlertRecommendationRunReportResponse['re
         return 'Packet prep';
     }
     if (isReviewedSubmissionResult(result)) {
-        return 'Reviewed submission';
+        return isAutomaticReviewedResult(result)
+            ? 'Automatic review'
+            : 'Reviewed submission';
     }
     return 'Unknown';
 };
@@ -274,6 +315,21 @@ const getGmailImportOutcomeTone = (status?: ListingAlertGmailImportOutcome['stat
         return 'border-amber-500/30 bg-amber-500/10 text-amber-100';
     }
     return 'border-rose-500/30 bg-rose-500/10 text-rose-100';
+};
+
+const getAutomaticOutcomeTone = (
+    status?: ListingAlertAutomaticMessageOutcomeSummary['status'] | null,
+) => {
+    if (status === 'waiting_approval') {
+        return 'border-sky-500/30 bg-sky-500/10 text-sky-100';
+    }
+    if (status === 'completed_no_draft') {
+        return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100';
+    }
+    if (status === 'duplicate_skipped' || status === 'blocked') {
+        return 'border-amber-500/30 bg-amber-500/10 text-amber-100';
+    }
+    return 'border-white/10 bg-black/10 text-gray-100';
 };
 
 const getGmailImportOutcomeFollowupText = (outcome: ListingAlertGmailImportOutcome) => {
@@ -360,6 +416,8 @@ const ListingAlertRecommendationPanel = () => {
     const [gmailFetchForm, setGmailFetchForm] = useState<GmailFetchFormState>(
         EMPTY_GMAIL_FETCH_FORM,
     );
+    const [automaticForm, setAutomaticForm] =
+        useState<AutomaticRunFormState>(EMPTY_AUTOMATIC_FORM);
     const [packetForm, setPacketForm] = useState<PacketFormState>(EMPTY_PACKET_FORM);
     const [reviewForm, setReviewForm] = useState<ReviewFormState>(EMPTY_REVIEW_FORM);
     const [shortlistSelections, setShortlistSelections] = useState<
@@ -375,6 +433,8 @@ const ListingAlertRecommendationPanel = () => {
         useState<ListingAlertGmailImportOutcome | null>(null);
     const [gmailOAuthStatus, setGmailOAuthStatus] =
         useState<ListingAlertGmailOAuthStatusResponse | null>(null);
+    const [automaticBatchResult, setAutomaticBatchResult] =
+        useState<ListingAlertAutomaticBatchResult | null>(null);
 
     const [runs, setRuns] = useState<AgentRun[]>([]);
     const [runReports, setRunReports] = useState<Record<number, ListingAlertRecommendationRunReportResponse>>(
@@ -385,24 +445,45 @@ const ListingAlertRecommendationPanel = () => {
     const [approvalHistory, setApprovalHistory] = useState<AgentApproval[]>([]);
     const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
     const [auditLogs, setAuditLogs] = useState<AgentAuditLog[]>([]);
+    const [automaticRuns, setAutomaticRuns] = useState<AgentRun[]>([]);
+    const [automaticRunReports, setAutomaticRunReports] = useState<
+        Record<number, ListingAlertRecommendationRunReportResponse>
+    >({});
+    const [automaticLatest, setAutomaticLatest] =
+        useState<ListingAlertRecommendationLatestResponse>(EMPTY_LATEST);
+    const [automaticApprovals, setAutomaticApprovals] = useState<AgentApproval[]>([]);
+    const [automaticApprovalHistory, setAutomaticApprovalHistory] = useState<AgentApproval[]>(
+        [],
+    );
+    const [selectedAutomaticRunId, setSelectedAutomaticRunId] = useState<number | null>(null);
+    const [automaticAuditLogs, setAutomaticAuditLogs] = useState<AgentAuditLog[]>([]);
 
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
+    const [automaticLoading, setAutomaticLoading] = useState(true);
+    const [automaticRefreshing, setAutomaticRefreshing] = useState(false);
     const [gmailFetching, setGmailFetching] = useState(false);
     const [gmailImporting, setGmailImporting] = useState(false);
+    const [automaticRunning, setAutomaticRunning] = useState(false);
     const [gmailStatusLoading, setGmailStatusLoading] = useState(true);
     const [gmailConnectionActionLoading, setGmailConnectionActionLoading] = useState(false);
     const [prepareSubmitting, setPrepareSubmitting] = useState(false);
     const [reviewSubmitting, setReviewSubmitting] = useState(false);
     const [reportLoading, setReportLoading] = useState(false);
     const [auditLoading, setAuditLoading] = useState(false);
+    const [automaticReportLoading, setAutomaticReportLoading] = useState(false);
+    const [automaticAuditLoading, setAutomaticAuditLoading] = useState(false);
     const [activeApprovalId, setActiveApprovalId] = useState<number | null>(null);
 
     const [error, setError] = useState<string | null>(null);
     const [gmailError, setGmailError] = useState<string | null>(null);
+    const [automaticError, setAutomaticError] = useState<string | null>(null);
     const [reportError, setReportError] = useState<string | null>(null);
     const [auditError, setAuditError] = useState<string | null>(null);
     const [approvalError, setApprovalError] = useState<string | null>(null);
+    const [automaticReportError, setAutomaticReportError] = useState<string | null>(null);
+    const [automaticAuditError, setAutomaticAuditError] = useState<string | null>(null);
+    const [automaticApprovalError, setAutomaticApprovalError] = useState<string | null>(null);
     const [reviewFormError, setReviewFormError] = useState<string | null>(null);
     const [gmailStatusNotice, setGmailStatusNotice] = useState<string | null>(null);
     const [showManualTokenFallback, setShowManualTokenFallback] = useState(false);
@@ -414,6 +495,12 @@ const ListingAlertRecommendationPanel = () => {
     const selectedReport = selectedRunId !== null ? runReports[selectedRunId] ?? null : null;
     const selectedPacketResult = findPacketReadyResult(selectedReport);
     const selectedPacket = selectedPacketResult?.manual_review_packet ?? null;
+    const selectedAutomaticRun =
+        automaticRuns.find((run) => run.id === selectedAutomaticRunId) ?? null;
+    const selectedAutomaticReport =
+        selectedAutomaticRunId !== null
+            ? automaticRunReports[selectedAutomaticRunId] ?? null
+            : null;
     const selectedCandidate =
         gmailCandidatesResult?.candidates.find(
             (candidate) => candidate.message_id === selectedCandidateMessageId,
@@ -429,7 +516,8 @@ const ListingAlertRecommendationPanel = () => {
     const selectedShortlistCount = Object.values(shortlistSelections).filter(
         (item) => item.selected,
     ).length;
-    const isBusy = loading || refreshing;
+    const automaticRunIds = new Set(automaticRuns.map((run) => run.id));
+    const isBusy = loading || refreshing || automaticLoading || automaticRefreshing;
 
     const loadReportsForRuns = async (runList: AgentRun[]) => {
         const settled = await Promise.allSettled(
@@ -447,6 +535,24 @@ const ListingAlertRecommendationPanel = () => {
         return nextReports;
     };
 
+    const loadAutomaticReportsForRuns = async (runList: AgentRun[]) => {
+        const settled = await Promise.allSettled(
+            runList.map(async (run) =>
+                agentsService.getListingAlertRecommendationAutomaticRunReport(run.id),
+            ),
+        );
+
+        const nextReports: Record<number, ListingAlertRecommendationRunReportResponse> = {};
+        for (const item of settled) {
+            if (item.status === 'fulfilled') {
+                nextReports[item.value.run_id] = item.value;
+            }
+        }
+
+        setAutomaticRunReports(nextReports);
+        return nextReports;
+    };
+
     const loadAuditLogs = async (runId: number) => {
         setAuditLoading(true);
         setAuditError(null);
@@ -458,6 +564,27 @@ const ListingAlertRecommendationPanel = () => {
             setAuditError(getErrorMessage(loadError, 'Audit history is unavailable for this run.'));
         } finally {
             setAuditLoading(false);
+        }
+    };
+
+    const loadAutomaticAuditLogs = async (runId: number) => {
+        setAutomaticAuditLoading(true);
+        setAutomaticAuditError(null);
+        try {
+            const logs = await agentsService.getListingAlertRecommendationAutomaticRunAuditLogs(
+                runId,
+            );
+            setAutomaticAuditLogs(logs);
+        } catch (loadError) {
+            setAutomaticAuditLogs([]);
+            setAutomaticAuditError(
+                getErrorMessage(
+                    loadError,
+                    'Automatic audit history is unavailable for this run.',
+                ),
+            );
+        } finally {
+            setAutomaticAuditLoading(false);
         }
     };
 
@@ -474,6 +601,26 @@ const ListingAlertRecommendationPanel = () => {
             setReportError(getErrorMessage(loadError, 'Run report is unavailable.'));
         } finally {
             setReportLoading(false);
+        }
+    };
+
+    const loadAutomaticReport = async (runId: number) => {
+        setAutomaticReportLoading(true);
+        setAutomaticReportError(null);
+        try {
+            const report = await agentsService.getListingAlertRecommendationAutomaticRunReport(
+                runId,
+            );
+            setAutomaticRunReports((current) => ({
+                ...current,
+                [report.run_id]: report,
+            }));
+        } catch (loadError) {
+            setAutomaticReportError(
+                getErrorMessage(loadError, 'Automatic run report is unavailable.'),
+            );
+        } finally {
+            setAutomaticReportLoading(false);
         }
     };
 
@@ -584,8 +731,71 @@ const ListingAlertRecommendationPanel = () => {
         }
     };
 
+    const loadAutomaticData = async (
+        mode: 'initial' | 'refresh' = 'refresh',
+        preferredRunId?: number | null,
+    ) => {
+        if (mode === 'initial') {
+            setAutomaticLoading(true);
+        } else {
+            setAutomaticRefreshing(true);
+        }
+        setAutomaticError(null);
+        setAutomaticApprovalError(null);
+
+        try {
+            const [runsData, latestData, approvalsData, approvalHistoryData] =
+                await Promise.all([
+                    agentsService.getListingAlertRecommendationAutomaticRuns(),
+                    agentsService.getLatestListingAlertRecommendationAutomaticResult(),
+                    agentsService.getListingAlertRecommendationAutomaticPendingApprovals(),
+                    agentsService.getListingAlertRecommendationAutomaticApprovalHistory(),
+                ]);
+
+            setAutomaticRuns(runsData);
+            setAutomaticLatest(latestData);
+            setAutomaticApprovals(approvalsData);
+            setAutomaticApprovalHistory(approvalHistoryData);
+
+            const nextSelectedRunId =
+                preferredRunId && runsData.some((run) => run.id === preferredRunId)
+                    ? preferredRunId
+                    : selectedAutomaticRunId &&
+                        runsData.some((run) => run.id === selectedAutomaticRunId)
+                        ? selectedAutomaticRunId
+                        : (runsData[0]?.id ?? null);
+
+            setSelectedAutomaticRunId(nextSelectedRunId);
+            await loadAutomaticReportsForRuns(runsData);
+        } catch (loadError) {
+            setAutomaticError(
+                getErrorMessage(
+                    loadError,
+                    'Failed to load Automatic Mode Listing Alert data.',
+                ),
+            );
+        } finally {
+            if (mode === 'initial') {
+                setAutomaticLoading(false);
+            } else {
+                setAutomaticRefreshing(false);
+            }
+        }
+    };
+
+    const refreshAllData = async (
+        preferredManualRunId?: number | null,
+        preferredAutomaticRunId?: number | null,
+    ) => {
+        await Promise.all([
+            loadData('refresh', preferredManualRunId),
+            loadAutomaticData('refresh', preferredAutomaticRunId),
+        ]);
+    };
+
     useEffect(() => {
         void loadData('initial');
+        void loadAutomaticData('initial');
         void loadGmailOAuthStatus();
 
         return () => {
@@ -606,6 +816,20 @@ const ListingAlertRecommendationPanel = () => {
         }
         void loadAuditLogs(selectedRunId);
     }, [selectedRunId]);
+
+    useEffect(() => {
+        if (selectedAutomaticRunId === null) {
+            setAutomaticAuditLogs([]);
+            setAutomaticAuditError(null);
+            setAutomaticReportError(null);
+            return;
+        }
+
+        if (!automaticRunReports[selectedAutomaticRunId]) {
+            void loadAutomaticReport(selectedAutomaticRunId);
+        }
+        void loadAutomaticAuditLogs(selectedAutomaticRunId);
+    }, [selectedAutomaticRunId]);
 
     useEffect(() => {
         if (!selectedPacket) {
@@ -643,6 +867,13 @@ const ListingAlertRecommendationPanel = () => {
         }));
     };
 
+    const updateAutomaticField = (key: keyof AutomaticRunFormState, value: string) => {
+        setAutomaticForm((current) => ({
+            ...current,
+            [key]: key === 'maxMessages' ? clampAutomaticMaxMessages(value) : value,
+        }));
+    };
+
     const updateReviewField = (key: keyof ReviewFormState, value: string) => {
         setReviewForm((current) => ({
             ...current,
@@ -668,6 +899,13 @@ const ListingAlertRecommendationPanel = () => {
     const handleRefreshGmailOAuthStatus = async () => {
         setGmailStatusNotice(null);
         await loadGmailOAuthStatus();
+    };
+
+    const handleRefreshPanel = async () => {
+        await Promise.all([
+            refreshAllData(selectedRunId, selectedAutomaticRunId),
+            loadGmailOAuthStatus({ silent: true }),
+        ]);
     };
 
     const handleStartGmailOAuth = async () => {
@@ -946,6 +1184,74 @@ const ListingAlertRecommendationPanel = () => {
         }
     };
 
+    const handleRunAutomaticMode = async () => {
+        if (!automaticForm.allowedSender.trim()) {
+            setAutomaticError('Allowed sender is required for Automatic Mode.');
+            return;
+        }
+
+        if (!storedGmailConnectionReady) {
+            setAutomaticError(
+                gmailOAuthStatus?.status === 'reconnect_required'
+                    ? 'Stored Gmail OAuth needs reconnect before Automatic Mode can run.'
+                    : 'Connect Gmail first. Automatic Mode uses the stored Gmail OAuth production path only.',
+            );
+            return;
+        }
+
+        const maxMessages = Number(
+            clampAutomaticMaxMessages(automaticForm.maxMessages.trim() || '3'),
+        );
+        if (!Number.isFinite(maxMessages) || maxMessages <= 0) {
+            setAutomaticError('Max messages must be between 1 and 3.');
+            return;
+        }
+
+        setAutomaticRunning(true);
+        setAutomaticError(null);
+
+        try {
+            const result = await agentsService.runListingAlertAutomaticModeOnce({
+                gmail_read_config: {
+                    gmail_user_id: automaticForm.gmailUserId.trim() || 'me',
+                    query_policy: {
+                        allowed_sender: automaticForm.allowedSender.trim(),
+                        label_ids: splitList(automaticForm.labelIds),
+                        subject_keywords: splitList(automaticForm.subjectKeywords),
+                        max_results: maxMessages,
+                    },
+                },
+                operator_notes: automaticForm.operatorNotes.trim() || null,
+                max_messages: maxMessages,
+            });
+
+            setAutomaticBatchResult(result);
+            const preferredAutomaticRunId =
+                result.outcomes.find(
+                    (outcome) =>
+                        outcome.status !== 'duplicate_skipped' &&
+                        (outcome.review_run_id !== null || outcome.run_id !== null),
+                )?.review_run_id ??
+                result.outcomes.find(
+                    (outcome) =>
+                        outcome.status !== 'duplicate_skipped' && outcome.run_id !== null,
+                )?.run_id ??
+                null;
+
+            await loadAutomaticData('refresh', preferredAutomaticRunId);
+        } catch (runError) {
+            setAutomaticBatchResult(null);
+            setAutomaticError(
+                getErrorMessage(
+                    runError,
+                    'Automatic Mode run failed before a batch summary could be returned.',
+                ),
+            );
+        } finally {
+            setAutomaticRunning(false);
+        }
+    };
+
     const handlePreparePacket = async () => {
         if (!packetForm.messageId.trim()) {
             setError('Message ID is required before preparing a manual review packet.');
@@ -1088,32 +1394,56 @@ const ListingAlertRecommendationPanel = () => {
         }
     };
 
-    const handleApprove = async (approvalId: number) => {
+    const handleApprove = async (approvalId: number, scope: 'manual' | 'automatic') => {
         setActiveApprovalId(approvalId);
-        setApprovalError(null);
+        if (scope === 'automatic') {
+            setAutomaticApprovalError(null);
+        } else {
+            setApprovalError(null);
+        }
         try {
             await agentsService.approve(approvalId);
-            await loadData('refresh', selectedRunId);
+            await refreshAllData(selectedRunId, selectedAutomaticRunId);
         } catch (decisionError) {
-            setApprovalError(getErrorMessage(decisionError, 'Failed to approve review item.'));
+            const message = getErrorMessage(
+                decisionError,
+                'Failed to approve review item.',
+            );
+            if (scope === 'automatic') {
+                setAutomaticApprovalError(message);
+            } else {
+                setApprovalError(message);
+            }
         } finally {
             setActiveApprovalId(null);
         }
     };
 
-    const handleReject = async (approvalId: number) => {
+    const handleReject = async (approvalId: number, scope: 'manual' | 'automatic') => {
         const reason = window.prompt('Rejection reason (optional):');
         if (reason === null) {
             return;
         }
 
         setActiveApprovalId(approvalId);
-        setApprovalError(null);
+        if (scope === 'automatic') {
+            setAutomaticApprovalError(null);
+        } else {
+            setApprovalError(null);
+        }
         try {
             await agentsService.reject(approvalId, reason);
-            await loadData('refresh', selectedRunId);
+            await refreshAllData(selectedRunId, selectedAutomaticRunId);
         } catch (decisionError) {
-            setApprovalError(getErrorMessage(decisionError, 'Failed to reject review item.'));
+            const message = getErrorMessage(
+                decisionError,
+                'Failed to reject review item.',
+            );
+            if (scope === 'automatic') {
+                setAutomaticApprovalError(message);
+            } else {
+                setApprovalError(message);
+            }
         } finally {
             setActiveApprovalId(null);
         }
@@ -1252,11 +1582,16 @@ const ListingAlertRecommendationPanel = () => {
 
     const renderReviewedSubmissionDetails = (
         runId: number,
-        result: ListingAlertReviewedSubmissionResultResponse,
+        result:
+            | ListingAlertReviewedSubmissionResultResponse
+            | ListingAlertAutomaticReviewedResultResponse,
+        activeApprovals: AgentApproval[],
+        resolvedApprovals: AgentApproval[],
     ) => {
         const hasDraft = result.client_facing_drafts.length > 0;
-        const approval = getRunApproval(runId, approvals, approvalHistory);
+        const approval = getRunApproval(runId, activeApprovals, resolvedApprovals);
         const approvalLabel = getRunApprovalLabel(approval);
+        const isAutomatic = isAutomaticReviewedResult(result);
 
         return (
             <div className="space-y-4">
@@ -1270,12 +1605,16 @@ const ListingAlertRecommendationPanel = () => {
                     Review outcome: {humanizeEnum(result.review_outcome)}
                     {!hasDraft && (
                         <div className="mt-1 text-xs text-gray-300">
-                            Internal-only completion. No client-facing draft was submitted.
+                            {isAutomatic
+                                ? 'Automatic review completed safely without a client-facing draft.'
+                                : 'Internal-only completion. No client-facing draft was submitted.'}
                         </div>
                     )}
                     {hasDraft && (
                         <div className="mt-1 text-xs text-sky-50">
-                            Client-facing draft was submitted and approval was created.
+                            {isAutomatic
+                                ? 'Automatic review generated a client-facing draft and created a review-only approval. No send occurred.'
+                                : 'Client-facing draft was submitted and approval was created.'}
                         </div>
                     )}
                     {approvalLabel && (
@@ -1530,13 +1869,21 @@ const ListingAlertRecommendationPanel = () => {
         );
     };
 
-    const pageStatus = loading
+    const pageStatus = loading || automaticLoading
         ? 'Loading Listing Alert Recommendation data...'
-        : refreshing
+        : refreshing || automaticRefreshing
             ? 'Refreshing Listing Alert Recommendation data...'
             : null;
     const latestApproval =
         latest.run_id !== null ? getRunApproval(latest.run_id, approvals, approvalHistory) : null;
+    const automaticLatestApproval =
+        automaticLatest.run_id !== null
+            ? getRunApproval(
+                  automaticLatest.run_id,
+                  automaticApprovals,
+                  automaticApprovalHistory,
+              )
+            : null;
 
     return (
         <section className="space-y-4 border rounded p-4 bg-white/5">
@@ -1544,18 +1891,24 @@ const ListingAlertRecommendationPanel = () => {
                 <div className="space-y-1">
                     <h2 className="text-lg font-medium">Listing Alert Recommendation</h2>
                     <p className="text-sm text-gray-400">
-                        Gmail-driven MLS alert intake for Manual Mode only. The primary production path
-                        now uses a stored read-only Gmail OAuth connection; temporary token input remains
-                        available only as an internal/debug fallback. Manual review still remains external
-                        to ChatGPT Pro / GPT-5.4 Pro.
+                        Gmail-driven MLS alert intake with distinct Manual Mode and Automatic Mode v1
+                        sections. Stored read-only Gmail OAuth is the production path; temporary token
+                        input remains internal/debug only. Automatic Mode is manual-triggered, bounded,
+                        review-first, and never sends automatically.
                     </p>
                 </div>
                 <button
-                    onClick={() => void loadData('refresh', selectedRunId)}
+                    onClick={() => void handleRefreshPanel()}
                     className="px-3 py-2 text-sm rounded border border-white/10 bg-white/5 text-white hover:bg-white/10"
-                    disabled={isBusy || prepareSubmitting || reviewSubmitting || activeApprovalId !== null}
+                    disabled={
+                        isBusy ||
+                        prepareSubmitting ||
+                        reviewSubmitting ||
+                        automaticRunning ||
+                        activeApprovalId !== null
+                    }
                 >
-                    {refreshing ? 'Refreshing...' : 'Refresh'}
+                    {refreshing || automaticRefreshing ? 'Refreshing...' : 'Refresh'}
                 </button>
             </div>
 
@@ -2033,6 +2386,382 @@ const ListingAlertRecommendationPanel = () => {
 
                     <section className="space-y-3">
                         <div>
+                            <h3 className="text-base font-medium">
+                                Automatic Mode v1
+                            </h3>
+                            <p className="text-sm text-gray-400">
+                                Manual trigger only. Bounded batch. Review-first. Uses the stored
+                                Gmail OAuth production path and stops at blocked, completed without
+                                draft, or waiting approval. No send, no Gmail draft creation, no
+                                background processing.
+                            </p>
+                        </div>
+
+                        <div className="rounded border border-white/10 bg-black/10 p-3 text-xs text-gray-300 space-y-1">
+                            <div>
+                                Production path: stored Gmail OAuth
+                                {gmailOAuthStatus?.account_email
+                                    ? ` (${gmailOAuthStatus.account_email})`
+                                    : ''}
+                            </div>
+                            <div>
+                                Trigger model: manual run-once only, max {AUTOMATIC_MAX_MESSAGES}{' '}
+                                messages per batch in v1.
+                            </div>
+                            <div>
+                                Stop points: blocked, completed_no_draft, waiting_approval.
+                            </div>
+                        </div>
+
+                        <div className="grid gap-3 md:grid-cols-2">
+                            <label className="space-y-1 text-sm">
+                                <div className="text-gray-300">Gmail user ID</div>
+                                <input
+                                    value={automaticForm.gmailUserId}
+                                    onChange={(event) =>
+                                        updateAutomaticField(
+                                            'gmailUserId',
+                                            event.target.value,
+                                        )
+                                    }
+                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="me"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm">
+                                <div className="text-gray-300">Max messages</div>
+                                <input
+                                    type="number"
+                                    min={1}
+                                    max={AUTOMATIC_MAX_MESSAGES}
+                                    value={automaticForm.maxMessages}
+                                    onChange={(event) =>
+                                        updateAutomaticField(
+                                            'maxMessages',
+                                            event.target.value,
+                                        )
+                                    }
+                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                />
+                                <div className="text-xs text-gray-500">
+                                    UI and backend both clamp this to {AUTOMATIC_MAX_MESSAGES}.
+                                </div>
+                            </label>
+                            <label className="space-y-1 text-sm md:col-span-2">
+                                <div className="text-gray-300">Allowed sender</div>
+                                <input
+                                    value={automaticForm.allowedSender}
+                                    onChange={(event) =>
+                                        updateAutomaticField(
+                                            'allowedSender',
+                                            event.target.value,
+                                        )
+                                    }
+                                    className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="alerts@mls.example"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm">
+                                <div className="text-gray-300">Label IDs</div>
+                                <textarea
+                                    value={automaticForm.labelIds}
+                                    onChange={(event) =>
+                                        updateAutomaticField('labelIds', event.target.value)
+                                    }
+                                    className="min-h-20 w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="Comma or newline separated"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm">
+                                <div className="text-gray-300">Subject keywords</div>
+                                <textarea
+                                    value={automaticForm.subjectKeywords}
+                                    onChange={(event) =>
+                                        updateAutomaticField(
+                                            'subjectKeywords',
+                                            event.target.value,
+                                        )
+                                    }
+                                    className="min-h-20 w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="Comma or newline separated"
+                                />
+                            </label>
+                            <label className="space-y-1 text-sm md:col-span-2">
+                                <div className="text-gray-300">Operator notes</div>
+                                <textarea
+                                    value={automaticForm.operatorNotes}
+                                    onChange={(event) =>
+                                        updateAutomaticField(
+                                            'operatorNotes',
+                                            event.target.value,
+                                        )
+                                    }
+                                    className="min-h-20 w-full rounded border border-white/10 bg-black/20 px-3 py-2"
+                                    placeholder="Optional notes stored with the automatic batch trigger"
+                                />
+                            </label>
+                        </div>
+
+                        {automaticError && (
+                            <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                                {automaticError}
+                            </div>
+                        )}
+
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={() => void handleRunAutomaticMode()}
+                                className="px-4 py-2 text-sm rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+                                disabled={
+                                    automaticRunning ||
+                                    gmailFetching ||
+                                    gmailImporting ||
+                                    prepareSubmitting ||
+                                    reviewSubmitting ||
+                                    isBusy ||
+                                    !storedGmailConnectionReady
+                                }
+                            >
+                                {automaticRunning
+                                    ? 'Running Automatic Mode...'
+                                    : 'Run Automatic Mode Once'}
+                            </button>
+                            <div className="text-xs text-gray-400">
+                                Stored OAuth only. No Expected contact ID auto-override. Uncertain
+                                matches stay blocked.
+                            </div>
+                        </div>
+
+                        {!storedGmailConnectionReady && (
+                            <div className="text-xs text-amber-100">
+                                Stored Gmail OAuth must be connected before Automatic Mode can run.
+                            </div>
+                        )}
+
+                        <div className="rounded border border-white/10 bg-white/5 p-3 space-y-3">
+                            <div className="flex items-start justify-between gap-3">
+                                <div>
+                                    <div className="font-medium text-sm">
+                                        Automatic Batch Result
+                                    </div>
+                                    <div className="text-xs text-gray-400">
+                                        Immediate batch summary only. Full per-message detail stays
+                                        in the underlying automatic runs below.
+                                    </div>
+                                </div>
+                                {automaticBatchResult?.query && (
+                                    <div className="max-w-xs text-right text-xs text-gray-500 break-all">
+                                        {automaticBatchResult.query}
+                                    </div>
+                                )}
+                            </div>
+
+                            {!automaticBatchResult ? (
+                                <div className="text-sm text-gray-500">
+                                    No Automatic Mode batch has been triggered yet.
+                                </div>
+                            ) : (
+                                <div className="space-y-3">
+                                    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                                        <div className="rounded border border-white/10 bg-black/10 p-3 text-sm">
+                                            <div className="text-xs text-gray-400">Matched</div>
+                                            <div className="mt-1 font-medium">
+                                                {automaticBatchResult.matched_message_count}
+                                            </div>
+                                        </div>
+                                        <div className="rounded border border-white/10 bg-black/10 p-3 text-sm">
+                                            <div className="text-xs text-gray-400">Candidates</div>
+                                            <div className="mt-1 font-medium">
+                                                {automaticBatchResult.candidate_count}
+                                            </div>
+                                        </div>
+                                        <div className="rounded border border-white/10 bg-black/10 p-3 text-sm">
+                                            <div className="text-xs text-gray-400">Processed</div>
+                                            <div className="mt-1 font-medium">
+                                                {automaticBatchResult.processed_message_count}
+                                            </div>
+                                        </div>
+                                        <div className="rounded border border-white/10 bg-black/10 p-3 text-sm">
+                                            <div className="text-xs text-gray-400">Message cap</div>
+                                            <div className="mt-1 font-medium">
+                                                {automaticBatchResult.message_cap}
+                                            </div>
+                                        </div>
+                                        <div className="rounded border border-white/10 bg-black/10 p-3 text-sm">
+                                            <div className="text-xs text-gray-400">
+                                                Duplicate skipped
+                                            </div>
+                                            <div className="mt-1 font-medium">
+                                                {automaticBatchResult.duplicate_skipped_count}
+                                            </div>
+                                        </div>
+                                        <div className="rounded border border-white/10 bg-black/10 p-3 text-sm">
+                                            <div className="text-xs text-gray-400">Blocked</div>
+                                            <div className="mt-1 font-medium">
+                                                {automaticBatchResult.blocked_count}
+                                            </div>
+                                        </div>
+                                        <div className="rounded border border-white/10 bg-black/10 p-3 text-sm">
+                                            <div className="text-xs text-gray-400">
+                                                Completed no draft
+                                            </div>
+                                            <div className="mt-1 font-medium">
+                                                {automaticBatchResult.completed_no_draft_count}
+                                            </div>
+                                        </div>
+                                        <div className="rounded border border-white/10 bg-black/10 p-3 text-sm">
+                                            <div className="text-xs text-gray-400">
+                                                Waiting approval
+                                            </div>
+                                            <div className="mt-1 font-medium">
+                                                {automaticBatchResult.waiting_approval_count}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {automaticBatchResult.outcomes.length === 0 ? (
+                                        <div className="text-sm text-gray-500">
+                                            This batch returned no per-message outcomes.
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-3">
+                                            {automaticBatchResult.outcomes.map((outcome) => {
+                                                const inspectRunId =
+                                                    outcome.review_run_id ?? outcome.run_id ?? null;
+                                                const inspectable =
+                                                    inspectRunId !== null &&
+                                                    automaticRunIds.has(inspectRunId);
+
+                                                return (
+                                                    <div
+                                                        key={`${outcome.message_id}-${outcome.status}`}
+                                                        className={`rounded border px-3 py-3 text-sm space-y-2 ${getAutomaticOutcomeTone(
+                                                            outcome.status,
+                                                        )}`}
+                                                    >
+                                                        <div className="flex items-start justify-between gap-3">
+                                                            <div>
+                                                                <div className="font-medium">
+                                                                    {humanizeEnum(outcome.status)}
+                                                                </div>
+                                                                <div className="mt-1 text-xs text-current/80">
+                                                                    {outcome.subject ||
+                                                                        'Untitled message'}{' '}
+                                                                    · Message {outcome.message_id}
+                                                                </div>
+                                                                <div className="text-xs text-current/80">
+                                                                    Thread:{' '}
+                                                                    {outcome.thread_id || 'n/a'} ·
+                                                                    Received:{' '}
+                                                                    {formatTimestamp(
+                                                                        outcome.received_at,
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                            {inspectable && inspectRunId !== null && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() =>
+                                                                        setSelectedAutomaticRunId(
+                                                                            inspectRunId,
+                                                                        )
+                                                                    }
+                                                                    className="px-3 py-2 text-xs rounded border border-white/10 bg-white/5 text-white hover:bg-white/10"
+                                                                >
+                                                                    Inspect Run #{inspectRunId}
+                                                                </button>
+                                                            )}
+                                                        </div>
+
+                                                        <div className="grid gap-2 text-xs md:grid-cols-2 xl:grid-cols-4">
+                                                            <div>
+                                                                <span className="font-semibold text-current/90">
+                                                                    Task:
+                                                                </span>{' '}
+                                                                {outcome.task_id ?? 'n/a'}
+                                                            </div>
+                                                            <div>
+                                                                <span className="font-semibold text-current/90">
+                                                                    Packet run:
+                                                                </span>{' '}
+                                                                {outcome.run_id ?? 'n/a'}
+                                                            </div>
+                                                            <div>
+                                                                <span className="font-semibold text-current/90">
+                                                                    Review run:
+                                                                </span>{' '}
+                                                                {outcome.review_run_id ?? 'n/a'}
+                                                            </div>
+                                                            <div>
+                                                                <span className="font-semibold text-current/90">
+                                                                    Approval:
+                                                                </span>{' '}
+                                                                {outcome.approval_id ?? 'n/a'}
+                                                            </div>
+                                                            <div>
+                                                                <span className="font-semibold text-current/90">
+                                                                    Execution:
+                                                                </span>{' '}
+                                                                {humanizeEnum(
+                                                                    outcome.execution_status ??
+                                                                        null,
+                                                                )}
+                                                            </div>
+                                                            <div>
+                                                                <span className="font-semibold text-current/90">
+                                                                    Association:
+                                                                </span>{' '}
+                                                                {humanizeEnum(
+                                                                    outcome.association_status ??
+                                                                        null,
+                                                                )}
+                                                            </div>
+                                                            <div>
+                                                                <span className="font-semibold text-current/90">
+                                                                    Review outcome:
+                                                                </span>{' '}
+                                                                {humanizeEnum(
+                                                                    outcome.review_outcome ??
+                                                                        null,
+                                                                )}
+                                                            </div>
+                                                            <div>
+                                                                <span className="font-semibold text-current/90">
+                                                                    Packet ready:
+                                                                </span>{' '}
+                                                                {outcome.packet_ready
+                                                                    ? 'Yes'
+                                                                    : 'No'}
+                                                            </div>
+                                                        </div>
+
+                                                        {outcome.reason && (
+                                                            <div className="text-xs text-current/80">
+                                                                Reason: {outcome.reason}
+                                                            </div>
+                                                        )}
+
+                                                        {!inspectable &&
+                                                            inspectRunId !== null && (
+                                                                <div className="text-xs text-current/80">
+                                                                    Underlying run #{inspectRunId}{' '}
+                                                                    is not an automatic run and is
+                                                                    therefore not shown in the
+                                                                    automatic run views below.
+                                                                </div>
+                                                            )}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    </section>
+
+                    <section className="space-y-3">
+                        <div>
                             <h3 className="text-base font-medium">2. Manual Packet Preparation</h3>
                             <p className="text-sm text-gray-400">
                                 Manual-input fallback. Use normalized Gmail fields directly when you do not
@@ -2245,6 +2974,8 @@ const ListingAlertRecommendationPanel = () => {
                                     renderReviewedSubmissionDetails(
                                         selectedReport.run_id,
                                         selectedReport.result,
+                                        approvals,
+                                        approvalHistory,
                                     )}
 
                                 {!selectedReport.result && selectedReport.status === 'failed' && (
@@ -2450,6 +3181,536 @@ const ListingAlertRecommendationPanel = () => {
                 </div>
 
                 <div className="space-y-4">
+                    <section className="space-y-3">
+                        <div>
+                            <h3 className="text-base font-medium">
+                                Automatic Mode Latest / Recent Runs
+                            </h3>
+                            <p className="text-sm text-gray-400">
+                                Automatic per-message runs only. Manual Mode runs remain in their
+                                own sections below.
+                            </p>
+                        </div>
+
+                        {automaticError && (
+                            <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                                {automaticError}
+                            </div>
+                        )}
+
+                        <div className="rounded border border-white/10 bg-white/5 p-3 space-y-2 text-sm">
+                            <div className="font-medium">Latest Automatic Run</div>
+                            {automaticLatest.run_id === null ? (
+                                <div className="text-sm text-gray-500">
+                                    No automatic runs yet.
+                                </div>
+                            ) : (
+                                <div className="space-y-1">
+                                    <div>
+                                        Run #{automaticLatest.run_id} ·{' '}
+                                        {automaticLatest.status || 'unknown status'}
+                                    </div>
+                                    {automaticLatest.result && (
+                                        <div className="text-xs text-gray-400">
+                                            {getRunKindLabel(automaticLatest.result)}
+                                            {isPacketResult(automaticLatest.result) && (
+                                                <>
+                                                    {' '}
+                                                    ·{' '}
+                                                    {humanizeEnum(
+                                                        automaticLatest.result.execution_status,
+                                                    )}
+                                                </>
+                                            )}
+                                            {isReviewedSubmissionResult(
+                                                automaticLatest.result,
+                                            ) && (
+                                                <>
+                                                    {' '}
+                                                    ·{' '}
+                                                    {(automaticLatestApproval
+                                                        ? `Approval ${getRunApprovalLabel(automaticLatestApproval)}`
+                                                        : null) ??
+                                                        humanizeEnum(
+                                                            automaticLatest.result.review_outcome,
+                                                        )}
+                                                </>
+                                            )}
+                                        </div>
+                                    )}
+                                    {automaticLatest.error && (
+                                        <div className="text-xs text-rose-300">
+                                            Error: {automaticLatest.error}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
+                        {automaticRuns.length === 0 ? (
+                            <div className="text-sm text-gray-500">
+                                No automatic recent runs yet.
+                            </div>
+                        ) : (
+                            <div className="rounded border border-white/10 bg-white/5 p-3 space-y-2">
+                                {automaticRuns.map((run) => {
+                                    const report = automaticRunReports[run.id];
+                                    const runKind = report
+                                        ? getRunKindLabel(report.result)
+                                        : 'Loading kind...';
+                                    const runApproval = getRunApproval(
+                                        run.id,
+                                        automaticApprovals,
+                                        automaticApprovalHistory,
+                                    );
+
+                                    return (
+                                        <div
+                                            key={run.id}
+                                            className={`rounded border border-white/10 p-3 text-sm ${
+                                                selectedAutomaticRunId === run.id
+                                                    ? 'bg-white/10'
+                                                    : 'bg-black/10'
+                                            }`}
+                                        >
+                                            <div className="flex items-start justify-between gap-3">
+                                                <div>
+                                                    <div className="font-medium">
+                                                        Run #{run.id} · {run.status}
+                                                    </div>
+                                                    <div className="text-xs text-gray-400">
+                                                        {runKind} · Created{' '}
+                                                        {formatTimestamp(run.created_at)}
+                                                    </div>
+                                                    {report && isPacketResult(report.result) && (
+                                                        <div className="text-xs text-gray-400 mt-1">
+                                                            Packet state:{' '}
+                                                            {humanizeEnum(
+                                                                report.result.execution_status,
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                    {report &&
+                                                        isReviewedSubmissionResult(
+                                                            report.result,
+                                                        ) && (
+                                                            <div className="text-xs text-gray-400 mt-1">
+                                                                {getRunApprovalLabel(runApproval)
+                                                                    ? `Approval status: ${getRunApprovalLabel(runApproval)}`
+                                                                    : `Review outcome: ${humanizeEnum(report.result.review_outcome)}`}
+                                                            </div>
+                                                        )}
+                                                    {run.error && (
+                                                        <div className="text-xs text-rose-300 mt-1">
+                                                            Error: {run.error}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <button
+                                                    onClick={() =>
+                                                        setSelectedAutomaticRunId(run.id)
+                                                    }
+                                                    className="px-2 py-1 text-xs rounded border border-white/10 bg-white/5 text-white hover:bg-white/10"
+                                                    disabled={
+                                                        prepareSubmitting ||
+                                                        reviewSubmitting ||
+                                                        automaticRunning ||
+                                                        activeApprovalId !== null
+                                                    }
+                                                >
+                                                    {selectedAutomaticRunId === run.id
+                                                        ? 'Inspecting'
+                                                        : 'Inspect'}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </section>
+
+                    <section className="space-y-3">
+                        <div>
+                            <h3 className="text-base font-medium">
+                                Automatic Selected Run Report
+                            </h3>
+                            <p className="text-sm text-gray-400">
+                                Shows the stored automatic packet-prep or automatic reviewed result
+                                for the selected automatic run.
+                            </p>
+                        </div>
+
+                        {automaticReportError && (
+                            <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                                {automaticReportError}
+                            </div>
+                        )}
+
+                        {selectedAutomaticRunId === null ? (
+                            <div className="text-sm text-gray-500">
+                                No automatic runs yet. Trigger Automatic Mode once to create one.
+                            </div>
+                        ) : automaticReportLoading && !selectedAutomaticReport ? (
+                            <div className="text-sm text-gray-400">
+                                Loading automatic run report...
+                            </div>
+                        ) : !selectedAutomaticReport ? (
+                            <div className="text-sm text-gray-500">
+                                Automatic run report is not available for the selected run.
+                            </div>
+                        ) : (
+                            <div className="space-y-3">
+                                <div className="rounded border border-white/10 bg-white/5 p-3 text-sm">
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div className="font-medium">
+                                            Run #{selectedAutomaticReport.run_id} ·{' '}
+                                            {getRunKindLabel(selectedAutomaticReport.result)}
+                                        </div>
+                                        <div className="text-xs text-gray-400">
+                                            Status: {selectedAutomaticReport.status}
+                                        </div>
+                                    </div>
+                                    {selectedAutomaticReport.summary && (
+                                        <div className="mt-1 text-xs text-gray-300">
+                                            {selectedAutomaticReport.summary}
+                                        </div>
+                                    )}
+                                    {selectedAutomaticReport.error && (
+                                        <div className="mt-2 rounded border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+                                            Error: {selectedAutomaticReport.error}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {selectedAutomaticReport.result &&
+                                    isPacketResult(selectedAutomaticReport.result) && (
+                                        <div className="space-y-3">
+                                            <div
+                                                className={`rounded border px-3 py-2 text-sm ${getExecutionTone(selectedAutomaticReport.result.execution_status)}`}
+                                            >
+                                                Packet execution status:{' '}
+                                                {humanizeEnum(
+                                                    selectedAutomaticReport.result
+                                                        .execution_status,
+                                                )}
+                                                {selectedAutomaticReport.result.association
+                                                    .blocked_reason && (
+                                                    <div className="mt-1 text-xs">
+                                                        Blocked reason:{' '}
+                                                        {
+                                                            selectedAutomaticReport.result
+                                                                .association.blocked_reason
+                                                        }
+                                                    </div>
+                                                )}
+                                            </div>
+                                            {selectedAutomaticReport.result
+                                                .manual_review_packet ? (
+                                                renderPacketDetails(
+                                                    selectedAutomaticReport.result
+                                                        .manual_review_packet,
+                                                )
+                                            ) : (
+                                                <div className="space-y-3">
+                                                    {renderAssociationSummary(
+                                                        selectedAutomaticReport.result
+                                                            .association,
+                                                    )}
+                                                    {renderAssociationDiagnostics(
+                                                        selectedAutomaticReport.result
+                                                            .association,
+                                                    )}
+                                                    <div className="rounded border border-white/10 bg-white/5 p-3 text-sm text-gray-300">
+                                                        This automatic packet-prep run was stored
+                                                        without a manual review packet. Blocked or
+                                                        ambiguous states are still preserved above.
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                {selectedAutomaticReport.result &&
+                                    isReviewedSubmissionResult(
+                                        selectedAutomaticReport.result,
+                                    ) &&
+                                    renderReviewedSubmissionDetails(
+                                        selectedAutomaticReport.run_id,
+                                        selectedAutomaticReport.result,
+                                        automaticApprovals,
+                                        automaticApprovalHistory,
+                                    )}
+
+                                {!selectedAutomaticReport.result &&
+                                    selectedAutomaticReport.status === 'failed' && (
+                                        <div className="rounded border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
+                                            This automatic run failed validation or could not be
+                                            persisted. Inspect the automatic audit log below for the
+                                            failure trail.
+                                        </div>
+                                    )}
+                            </div>
+                        )}
+                    </section>
+
+                    <section className="space-y-3">
+                        <div>
+                            <h3 className="text-base font-medium">
+                                Automatic Audit Log View
+                            </h3>
+                            <p className="text-sm text-gray-400">
+                                Automatic per-message audit trail only. This shows real underlying
+                                automatic run logs, not a synthetic batch object.
+                            </p>
+                        </div>
+
+                        {selectedAutomaticRun ? (
+                            <div className="text-sm text-gray-400">
+                                Inspecting automatic run #{selectedAutomaticRun.id} (
+                                {selectedAutomaticRun.status})
+                            </div>
+                        ) : (
+                            <div className="text-sm text-gray-500">
+                                Select an automatic run to inspect its audit log.
+                            </div>
+                        )}
+
+                        {automaticAuditError && (
+                            <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                                {automaticAuditError}
+                            </div>
+                        )}
+
+                        {automaticAuditLoading ? (
+                            <div className="text-sm text-gray-400">
+                                Loading automatic audit history...
+                            </div>
+                        ) : selectedAutomaticRunId === null ? null : automaticAuditLogs.length ===
+                          0 ? (
+                            <div className="text-sm text-gray-500">
+                                No automatic audit history found for this run.
+                            </div>
+                        ) : (
+                            <div className="rounded border border-white/10 bg-white/5 p-3 space-y-3">
+                                {automaticAuditLogs.map((log) => (
+                                    <div
+                                        key={log.id}
+                                        className="border-b border-gray-700/40 pb-3 last:border-b-0"
+                                    >
+                                        <div className="flex items-center justify-between gap-3">
+                                            <div className="text-sm font-medium">
+                                                {humanizeEnum(log.action)}
+                                            </div>
+                                            <div className="text-xs text-gray-400">
+                                                {formatTimestamp(log.created_at)}
+                                            </div>
+                                        </div>
+                                        <div className="text-xs text-gray-400 mt-0.5">
+                                            Actor: {humanizeEnum(log.actor_type)}
+                                        </div>
+                                        {log.details && (
+                                            <pre className="mt-2 text-xs whitespace-pre-wrap rounded bg-black/20 p-2 overflow-auto">
+                                                {formatAuditDetails(log.details)}
+                                            </pre>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </section>
+
+                    <section className="space-y-3">
+                        <div>
+                            <h3 className="text-base font-medium">
+                                Automatic Approval Visibility
+                            </h3>
+                            <p className="text-sm text-gray-400">
+                                Pending and resolved approvals created by automatic review only. No
+                                client delivery occurs from this panel.
+                            </p>
+                        </div>
+
+                        {automaticApprovalError && (
+                            <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                                {automaticApprovalError}
+                            </div>
+                        )}
+
+                        <div className="space-y-3">
+                            <div>
+                                <div className="font-medium text-sm mb-2">
+                                    Pending Automatic Approvals
+                                </div>
+                                {automaticApprovals.length === 0 ? (
+                                    <div className="text-sm text-gray-500">
+                                        No pending automatic approvals.
+                                    </div>
+                                ) : (
+                                    <div className="rounded border border-white/10 bg-white/5 p-3 space-y-3">
+                                        {automaticApprovals.map((approval) => {
+                                            const payload = parseApprovalPayload(
+                                                approval.payload,
+                                            );
+                                            const isSubmitting =
+                                                activeApprovalId === approval.id;
+
+                                            return (
+                                                <div
+                                                    key={approval.id}
+                                                    className="rounded border border-white/10 bg-black/10 p-3 text-sm"
+                                                >
+                                                    <div className="flex items-start justify-between gap-3">
+                                                        <div>
+                                                            <div className="font-medium">
+                                                                Approval #{approval.id} ·{' '}
+                                                                {approval.action_type}
+                                                            </div>
+                                                            <div className="text-xs text-gray-400">
+                                                                Run #{approval.run_id} · Risk{' '}
+                                                                {approval.risk_level}
+                                                            </div>
+                                                            {payload.contact_id && (
+                                                                <div className="text-xs text-gray-400 mt-1">
+                                                                    Contact #{payload.contact_id}
+                                                                </div>
+                                                            )}
+                                                            {payload.review_mode && (
+                                                                <div className="text-xs text-gray-400 mt-1">
+                                                                    Review mode:{' '}
+                                                                    {payload.review_mode}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                        <div className="flex items-center gap-2">
+                                                            <button
+                                                                onClick={() =>
+                                                                    void handleApprove(
+                                                                        approval.id,
+                                                                        'automatic',
+                                                                    )
+                                                                }
+                                                                className="px-2 py-1 text-xs rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                                                                disabled={
+                                                                    isBusy ||
+                                                                    prepareSubmitting ||
+                                                                    reviewSubmitting ||
+                                                                    automaticRunning ||
+                                                                    activeApprovalId !== null
+                                                                }
+                                                            >
+                                                                {isSubmitting
+                                                                    ? 'Working...'
+                                                                    : 'Approve'}
+                                                            </button>
+                                                            <button
+                                                                onClick={() =>
+                                                                    void handleReject(
+                                                                        approval.id,
+                                                                        'automatic',
+                                                                    )
+                                                                }
+                                                                className="px-2 py-1 text-xs rounded bg-rose-600 text-white hover:bg-rose-700 disabled:opacity-50"
+                                                                disabled={
+                                                                    isBusy ||
+                                                                    prepareSubmitting ||
+                                                                    reviewSubmitting ||
+                                                                    automaticRunning ||
+                                                                    activeApprovalId !== null
+                                                                }
+                                                            >
+                                                                Reject
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                    {payload.subject && (
+                                                        <div className="mt-3">
+                                                            <div className="text-xs font-semibold text-gray-300">
+                                                                Subject
+                                                            </div>
+                                                            <div className="text-sm text-gray-100">
+                                                                {payload.subject}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    {payload.body && (
+                                                        <div className="mt-3">
+                                                            <div className="text-xs font-semibold text-gray-300">
+                                                                Body
+                                                            </div>
+                                                            <pre className="text-xs whitespace-pre-wrap rounded bg-black/20 p-2 overflow-auto">
+                                                                {payload.body}
+                                                            </pre>
+                                                        </div>
+                                                    )}
+                                                    {payload.shortlist_addresses &&
+                                                        payload.shortlist_addresses.length > 0 && (
+                                                            <div className="mt-2 text-xs text-gray-300">
+                                                                Shortlist:{' '}
+                                                                {payload.shortlist_addresses.join(
+                                                                    ' | ',
+                                                                )}
+                                                            </div>
+                                                        )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div>
+                                <div className="font-medium text-sm mb-2">
+                                    Automatic Approval History
+                                </div>
+                                {automaticApprovalHistory.length === 0 ? (
+                                    <div className="text-sm text-gray-500">
+                                        No automatic approval decisions yet.
+                                    </div>
+                                ) : (
+                                    <div className="rounded border border-white/10 bg-white/5 p-3 space-y-3">
+                                        {automaticApprovalHistory.map((approval) => {
+                                            const payload = parseApprovalPayload(
+                                                approval.payload,
+                                            );
+                                            return (
+                                                <div
+                                                    key={approval.id}
+                                                    className="rounded border border-white/10 bg-black/10 p-3 text-sm"
+                                                >
+                                                    <div className="flex items-center justify-between gap-3">
+                                                        <div className="font-medium">
+                                                            Approval #{approval.id} ·{' '}
+                                                            {approval.status}
+                                                        </div>
+                                                        <div className="text-xs text-gray-400">
+                                                            {getApprovalDecisionMeta(approval)}
+                                                        </div>
+                                                    </div>
+                                                    <div className="text-xs text-gray-400 mt-1">
+                                                        Run #{approval.run_id} ·{' '}
+                                                        {approval.action_type}
+                                                    </div>
+                                                    {approval.rejection_reason && (
+                                                        <div className="mt-2 text-xs text-rose-300">
+                                                            Rejection reason:{' '}
+                                                            {approval.rejection_reason}
+                                                        </div>
+                                                    )}
+                                                    {payload.subject && (
+                                                        <div className="mt-2 text-xs text-gray-300">
+                                                            Subject: {payload.subject}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </section>
+
                     <section className="space-y-3">
                         <div>
                             <h3 className="text-base font-medium">5. Latest / Recent Runs</h3>
@@ -2661,14 +3922,24 @@ const ListingAlertRecommendationPanel = () => {
                                                         </div>
                                                         <div className="flex items-center gap-2">
                                                             <button
-                                                                onClick={() => void handleApprove(approval.id)}
+                                                                onClick={() =>
+                                                                    void handleApprove(
+                                                                        approval.id,
+                                                                        'manual',
+                                                                    )
+                                                                }
                                                                 className="px-2 py-1 text-xs rounded bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
                                                                 disabled={isBusy || prepareSubmitting || reviewSubmitting || activeApprovalId !== null}
                                                             >
                                                                 {isSubmitting ? 'Working...' : 'Approve'}
                                                             </button>
                                                             <button
-                                                                onClick={() => void handleReject(approval.id)}
+                                                                onClick={() =>
+                                                                    void handleReject(
+                                                                        approval.id,
+                                                                        'manual',
+                                                                    )
+                                                                }
                                                                 className="px-2 py-1 text-xs rounded bg-rose-600 text-white hover:bg-rose-700 disabled:opacity-50"
                                                                 disabled={isBusy || prepareSubmitting || reviewSubmitting || activeApprovalId !== null}
                                                             >

@@ -366,6 +366,12 @@ ListingAlertGmailOAuthStatus = Literal[
     "connected",
     "reconnect_required",
 ]
+ListingAlertAutomaticMessageStatus = Literal[
+    "duplicate_skipped",
+    "blocked",
+    "completed_no_draft",
+    "waiting_approval",
+]
 ListingAlertAssociationMethod = Literal[
     "expected_contact_id",
     "explicit_mapping",
@@ -506,6 +512,43 @@ class ListingAlertGmailFetchCandidatesResponse(BaseModel):
     candidates: list[ListingAlertGmailCandidateMessage] = []
 
 
+class ListingAlertAutomaticRunRequest(BaseModel):
+    gmail_read_config: ListingAlertGmailReadConfig
+    operator_notes: Optional[str] = None
+    max_messages: int = 3
+
+
+class ListingAlertAutomaticMessageOutcomeSummary(BaseModel):
+    message_id: str
+    thread_id: Optional[str] = None
+    subject: Optional[str] = None
+    received_at: Optional[datetime] = None
+    status: ListingAlertAutomaticMessageStatus
+    reason: Optional[str] = None
+    task_id: Optional[int] = None
+    run_id: Optional[int] = None
+    review_run_id: Optional[int] = None
+    execution_status: Optional[ListingAlertExecutionStatus] = None
+    association_status: Optional[ListingAlertAssociationStatus] = None
+    review_outcome: Optional[ListingAlertReviewOutcome] = None
+    approval_id: Optional[int] = None
+    packet_ready: bool = False
+
+
+class ListingAlertAutomaticBatchResult(BaseModel):
+    gmail_user_id: str
+    query: str
+    matched_message_count: int = 0
+    candidate_count: int = 0
+    message_cap: int = 3
+    processed_message_count: int = 0
+    duplicate_skipped_count: int = 0
+    blocked_count: int = 0
+    completed_no_draft_count: int = 0
+    waiting_approval_count: int = 0
+    outcomes: list[ListingAlertAutomaticMessageOutcomeSummary] = []
+
+
 class ListingAlertNormalizedListing(BaseModel):
     listing_ref: str
     address: str
@@ -622,8 +665,15 @@ class ListingAlertReviewedSubmissionResultResponse(BaseModel):
     operator_notes: list[str] = []
 
 
+class ListingAlertAutomaticReviewedResultResponse(
+    ListingAlertReviewedSubmissionResultResponse
+):
+    workflow_mode: Literal["automatic"] = "automatic"
+
+
 ListingAlertRecommendationStoredResult = (
     ListingAlertManualPacketResultResponse
+    | ListingAlertAutomaticReviewedResultResponse
     | ListingAlertReviewedSubmissionResultResponse
 )
 

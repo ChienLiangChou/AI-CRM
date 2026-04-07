@@ -187,19 +187,13 @@ def _serialize_listing_alert_recommendation_result(raw_result: str | None):
 
     try:
         if "review_outcome" in parsed:
-            if hasattr(
-                agent_schemas.ListingAlertReviewedSubmissionResultResponse,
-                "model_validate",
-            ):
-                model = (
-                    agent_schemas.ListingAlertReviewedSubmissionResultResponse.model_validate(
-                        parsed
-                    )
-                )
+            review_model = agent_schemas.ListingAlertReviewedSubmissionResultResponse
+            if parsed.get("workflow_mode") == "automatic":
+                review_model = agent_schemas.ListingAlertAutomaticReviewedResultResponse
+            if hasattr(review_model, "model_validate"):
+                model = review_model.model_validate(parsed)
                 return model.model_dump()
-            model = agent_schemas.ListingAlertReviewedSubmissionResultResponse.parse_obj(
-                parsed
-            )
+            model = review_model.parse_obj(parsed)
             return model.dict()
 
         if "execution_status" in parsed:
@@ -219,6 +213,84 @@ def _serialize_listing_alert_recommendation_result(raw_result: str | None):
             return model.dict()
     except (ValidationError, TypeError, ValueError):
         return None
+
+
+def _load_listing_alert_task_payload(task: models.AgentTask | None) -> dict | None:
+    if task is None or not task.payload:
+        return None
+    try:
+        parsed = json.loads(task.payload)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
+def _is_listing_alert_automatic_task(task: models.AgentTask | None) -> bool:
+    payload = _load_listing_alert_task_payload(task)
+    if payload is None:
+        return False
+    return payload.get("execution_mode") == "automatic"
+
+
+def _list_listing_alert_automatic_runs_query(db: Session):
+    return (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(models.AgentTask.agent_type == "listing_alert_recommendation")
+        .order_by(models.AgentRun.created_at.desc())
+    )
+
+
+def _list_listing_alert_automatic_runs(
+    db: Session,
+    *,
+    limit: int | None = None,
+) -> list[models.AgentRun]:
+    runs = _list_listing_alert_automatic_runs_query(db).all()
+    filtered = [
+        run for run in runs if _is_listing_alert_automatic_task(run.task)
+    ]
+    if limit is not None:
+        return filtered[:limit]
+    return filtered
+
+
+def _get_listing_alert_automatic_run_or_404(
+    db: Session,
+    run_id: int,
+) -> models.AgentRun:
+    run = (
+        db.query(models.AgentRun)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(
+            models.AgentRun.id == run_id,
+            models.AgentTask.agent_type == "listing_alert_recommendation",
+        )
+        .first()
+    )
+    if run is None or not _is_listing_alert_automatic_task(run.task):
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
+
+
+def _list_listing_alert_automatic_approvals(
+    db: Session,
+) -> list[models.AgentApproval]:
+    approvals = (
+        db.query(models.AgentApproval)
+        .join(models.AgentRun, models.AgentApproval.run_id == models.AgentRun.id)
+        .join(models.AgentTask, models.AgentRun.task_id == models.AgentTask.id)
+        .filter(models.AgentTask.agent_type == "listing_alert_recommendation")
+        .order_by(models.AgentApproval.created_at.desc())
+        .all()
+    )
+    return [
+        approval
+        for approval in approvals
+        if approval.run is not None and _is_listing_alert_automatic_task(approval.run.task)
+    ]
 
     return None
 
@@ -1080,6 +1152,27 @@ def submit_listing_alert_manual_review(
         raise _listing_alert_recommendation_http_error_from_value_error(error) from error
 
 
+@router.post(
+    "/listing-alert-recommendation/automatic/run-once",
+    response_model=agent_schemas.ListingAlertAutomaticBatchResult,
+    summary="Trigger one bounded Automatic Mode Listing Alert run.",
+)
+def run_listing_alert_recommendation_automatic_once(
+    request: agent_schemas.ListingAlertAutomaticRunRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        normalized_request = listing_alert_recommendation.normalize_automatic_run_request(
+            request
+        )
+        return listing_alert_recommendation.run_listing_alert_automatic_batch_once(
+            db,
+            normalized_request,
+        )
+    except ValueError as error:
+        raise _listing_alert_recommendation_http_error_from_value_error(error) from error
+
+
 @router.get(
     "/listing-alert-recommendation/runs",
     response_model=List[agent_schemas.AgentRun],
@@ -1097,6 +1190,18 @@ def list_listing_alert_recommendation_runs(
         .limit(limit)
         .all()
     )
+
+
+@router.get(
+    "/listing-alert-recommendation/automatic/runs",
+    response_model=List[agent_schemas.AgentRun],
+    summary="List recent Automatic Mode Listing Alert per-message runs.",
+)
+def list_listing_alert_recommendation_automatic_runs(
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    return _list_listing_alert_automatic_runs(db, limit=limit)
 
 
 @router.get(
@@ -1130,6 +1235,32 @@ def get_latest_listing_alert_recommendation_result(db: Session = Depends(get_db)
 
 
 @router.get(
+    "/listing-alert-recommendation/automatic/latest",
+    response_model=agent_schemas.ListingAlertRecommendationLatestResponse,
+    summary="Get the latest Automatic Mode Listing Alert per-message run result.",
+)
+def get_latest_listing_alert_recommendation_automatic_result(
+    db: Session = Depends(get_db),
+):
+    runs = _list_listing_alert_automatic_runs(db, limit=1)
+    if not runs:
+        return {
+            "run_id": None,
+            "status": None,
+            "error": None,
+            "result": None,
+        }
+
+    run = runs[0]
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "error": run.error,
+        "result": _serialize_listing_alert_recommendation_result(run.result),
+    }
+
+
+@router.get(
     "/listing-alert-recommendation/runs/{run_id}/report",
     response_model=agent_schemas.ListingAlertRecommendationRunReportResponse,
     summary="Get the stored packet/result envelope for a Listing Alert Recommendation run.",
@@ -1150,6 +1281,26 @@ def get_listing_alert_recommendation_run_report(
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
 
+    return {
+        "run_id": run.id,
+        "task_id": run.task_id,
+        "status": run.status,
+        "summary": run.summary,
+        "error": run.error,
+        "result": _serialize_listing_alert_recommendation_result(run.result),
+    }
+
+
+@router.get(
+    "/listing-alert-recommendation/automatic/runs/{run_id}/report",
+    response_model=agent_schemas.ListingAlertRecommendationRunReportResponse,
+    summary="Get the stored packet/result envelope for an Automatic Mode Listing Alert run.",
+)
+def get_listing_alert_recommendation_automatic_run_report(
+    run_id: int,
+    db: Session = Depends(get_db),
+):
+    run = _get_listing_alert_automatic_run_or_404(db, run_id)
     return {
         "run_id": run.id,
         "task_id": run.task_id,
@@ -1192,6 +1343,26 @@ def list_listing_alert_recommendation_run_audit_logs(
 
 
 @router.get(
+    "/listing-alert-recommendation/automatic/runs/{run_id}/audit-logs",
+    response_model=List[agent_schemas.AgentAuditLog],
+    summary="List audit logs for an Automatic Mode Listing Alert run.",
+)
+def list_listing_alert_recommendation_automatic_run_audit_logs(
+    run_id: int,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    run = _get_listing_alert_automatic_run_or_404(db, run_id)
+    return (
+        db.query(models.AgentAuditLog)
+        .filter(models.AgentAuditLog.run_id == run.id)
+        .order_by(models.AgentAuditLog.created_at.asc())
+        .limit(limit)
+        .all()
+    )
+
+
+@router.get(
     "/listing-alert-recommendation/approvals",
     response_model=List[agent_schemas.AgentApproval],
     summary="List pending Listing Alert Recommendation approvals.",
@@ -1214,6 +1385,24 @@ def list_listing_alert_recommendation_pending_approvals(
 
 
 @router.get(
+    "/listing-alert-recommendation/automatic/approvals",
+    response_model=List[agent_schemas.AgentApproval],
+    summary="List pending Automatic Mode Listing Alert approvals.",
+)
+def list_listing_alert_recommendation_automatic_pending_approvals(
+    db: Session = Depends(get_db),
+):
+    approvals = _list_listing_alert_automatic_approvals(db)
+    return [
+        approval
+        for approval in approvals
+        if approval.status == "pending"
+        and approval.run is not None
+        and approval.run.status == "waiting_approval"
+    ]
+
+
+@router.get(
     "/listing-alert-recommendation/approvals/history",
     response_model=List[agent_schemas.AgentApproval],
     summary="List recent resolved Listing Alert Recommendation approval decisions.",
@@ -1232,6 +1421,31 @@ def list_listing_alert_recommendation_approval_history(
         )
         .all()
     )
+    approvals.sort(
+        key=lambda approval: (
+            approval.approved_at
+            or approval.rejected_at
+            or approval.created_at
+        ),
+        reverse=True,
+    )
+    return approvals[:limit]
+
+
+@router.get(
+    "/listing-alert-recommendation/automatic/approvals/history",
+    response_model=List[agent_schemas.AgentApproval],
+    summary="List recent resolved Automatic Mode Listing Alert approval decisions.",
+)
+def list_listing_alert_recommendation_automatic_approval_history(
+    limit: int = 20,
+    db: Session = Depends(get_db),
+):
+    approvals = [
+        approval
+        for approval in _list_listing_alert_automatic_approvals(db)
+        if approval.status in {"approved", "rejected"}
+    ]
     approvals.sort(
         key=lambda approval: (
             approval.approved_at

@@ -15,6 +15,7 @@ from . import models, schemas as agent_schemas, service
 
 AGENT_TYPE: agent_schemas.AgentType = "listing_alert_recommendation"
 MANUAL_PACKET_VERSION = "listing_alert_manual_review_v1"
+AUTOMATIC_BATCH_MESSAGE_CAP = 3
 MAX_EXTRACTED_CANDIDATES = 10
 MAX_SHORTLIST = 3
 MAX_DRAFT_OUTPUTS = 1
@@ -1678,8 +1679,11 @@ def _build_reviewed_submission_result(
     )
 
 
-def _build_manual_review_approval_payload(
-    result: agent_schemas.ListingAlertReviewedSubmissionResultResponse,
+def _build_listing_alert_review_approval_payload(
+    result: agent_schemas.ListingAlertReviewedSubmissionResultResponse
+    | agent_schemas.ListingAlertAutomaticReviewedResultResponse,
+    *,
+    review_mode: str,
 ) -> dict[str, Any]:
     draft = result.client_facing_drafts[0]
     return {
@@ -1698,7 +1702,7 @@ def _build_manual_review_approval_payload(
         ],
         "tradeoff_notes": result.tradeoff_notes,
         "recommendation_reasoning": result.recommendation_reasoning,
-        "review_mode": "manual_only",
+        "review_mode": review_mode,
     }
 
 
@@ -1712,11 +1716,34 @@ def _safe_task_payload_json(request: Any) -> str:
         return json.dumps({"invalid_request": True}, ensure_ascii=False)
 
 
-def run_listing_alert_manual_packet_once(
+def _update_task_subject_from_association(
     db: Session,
-    request: Any,
+    task: models.AgentTask,
+    association: agent_schemas.ListingAlertClientAssociationResponse,
+) -> None:
+    if association.contact_id is None:
+        return
+    task.subject_type = "contact"
+    task.subject_id = association.contact_id
+    db.commit()
+    db.refresh(task)
+
+
+def _run_listing_alert_packet_once(
+    db: Session,
+    normalized_request: agent_schemas.ListingAlertRunRequest,
+    *,
+    run_summary: str,
+    planning_action: str,
+    extracted_action: str,
+    association_resolved_action: str,
+    association_blocked_action: str,
+    packet_ready_action: str,
+    packet_blocked_action: str,
+    failure_action: str,
+    expected_execution_mode: agent_schemas.ListingAlertExecutionMode | None = None,
+    mode_mismatch_error: str = "automatic_mode_not_implemented",
 ) -> models.AgentRun:
-    normalized_request = normalize_run_request(request)
     task = service.create_task(
         db,
         agent_type=AGENT_TYPE,
@@ -1725,7 +1752,7 @@ def run_listing_alert_manual_packet_once(
     run = service.create_run(
         db,
         task=task,
-        summary="Listing alert manual review packet preparation",
+        summary=run_summary,
     )
     now = datetime.utcnow()
     run = service.update_run_status(db, run, status="planning", started_at=now)
@@ -1733,7 +1760,7 @@ def run_listing_alert_manual_packet_once(
         db,
         run=run,
         task=task,
-        action="listing_alert_manual_packet_planning_started",
+        action=planning_action,
         details=_json_dumps(
             {
                 "execution_mode": normalized_request.execution_mode,
@@ -1744,15 +1771,18 @@ def run_listing_alert_manual_packet_once(
     )
 
     try:
-        if normalized_request.execution_mode != "manual":
-            raise ValueError("automatic_mode_not_implemented")
+        if (
+            expected_execution_mode is not None
+            and normalized_request.execution_mode != expected_execution_mode
+        ):
+            raise ValueError(mode_mismatch_error)
 
         extracted_listings = extract_normalized_listings(normalized_request.gmail_alert)
         service.write_audit_log(
             db,
             run=run,
             task=task,
-            action="listing_alert_candidates_extracted",
+            action=extracted_action,
             details=_json_dumps(
                 {
                     "message_id": normalized_request.gmail_alert.message_id,
@@ -1763,15 +1793,11 @@ def run_listing_alert_manual_packet_once(
         )
 
         result = build_manual_review_packet_result(db, normalized_request)
-        if result.association.contact_id is not None:
-            task.subject_type = "contact"
-            task.subject_id = result.association.contact_id
-            db.commit()
-            db.refresh(task)
+        _update_task_subject_from_association(db, task, result.association)
 
-        association_action = "listing_alert_client_association_blocked"
+        association_action = association_blocked_action
         if result.association.status == "matched":
-            association_action = "listing_alert_client_association_resolved"
+            association_action = association_resolved_action
         service.write_audit_log(
             db,
             run=run,
@@ -1789,9 +1815,9 @@ def run_listing_alert_manual_packet_once(
             ),
         )
 
-        completion_action = "listing_alert_manual_packet_blocked"
+        completion_action = packet_blocked_action
         if result.execution_status == "packet_ready":
-            completion_action = "listing_alert_manual_packet_prepared"
+            completion_action = packet_ready_action
 
         run = service.update_run_status(
             db,
@@ -1827,10 +1853,661 @@ def run_listing_alert_manual_packet_once(
             db,
             run=run,
             task=task,
-            action="listing_alert_manual_packet_failed",
+            action=failure_action,
             details=_json_dumps({"error": str(exc)}),
         )
         return run
+
+
+def run_listing_alert_manual_packet_once(
+    db: Session,
+    request: Any,
+) -> models.AgentRun:
+    normalized_request = normalize_run_request(request)
+    return _run_listing_alert_packet_once(
+        db,
+        normalized_request,
+        run_summary="Listing alert manual review packet preparation",
+        planning_action="listing_alert_manual_packet_planning_started",
+        extracted_action="listing_alert_candidates_extracted",
+        association_resolved_action="listing_alert_client_association_resolved",
+        association_blocked_action="listing_alert_client_association_blocked",
+        packet_ready_action="listing_alert_manual_packet_prepared",
+        packet_blocked_action="listing_alert_manual_packet_blocked",
+        failure_action="listing_alert_manual_packet_failed",
+        expected_execution_mode="manual",
+        mode_mismatch_error="automatic_mode_not_implemented",
+    )
+
+
+def normalize_automatic_run_request(
+    raw: Any,
+) -> agent_schemas.ListingAlertAutomaticRunRequest:
+    if isinstance(raw, agent_schemas.ListingAlertAutomaticRunRequest):
+        normalized = raw
+    else:
+        normalized = agent_schemas.ListingAlertAutomaticRunRequest(
+            **_request_to_dict(raw)
+        )
+    normalized.max_messages = max(
+        1,
+        min(normalized.max_messages or AUTOMATIC_BATCH_MESSAGE_CAP, AUTOMATIC_BATCH_MESSAGE_CAP),
+    )
+    return normalized
+
+
+def run_listing_alert_automatic_packet_once(
+    db: Session,
+    request: Any,
+) -> models.AgentRun:
+    normalized_request = normalize_run_request(request)
+    return _run_listing_alert_packet_once(
+        db,
+        normalized_request,
+        run_summary="Listing alert automatic packet preparation",
+        planning_action="listing_alert_automatic_packet_planning_started",
+        extracted_action="listing_alert_automatic_candidates_extracted",
+        association_resolved_action="listing_alert_automatic_client_association_resolved",
+        association_blocked_action="listing_alert_automatic_client_association_blocked",
+        packet_ready_action="listing_alert_automatic_packet_prepared",
+        packet_blocked_action="listing_alert_automatic_packet_blocked",
+        failure_action="listing_alert_automatic_packet_failed",
+        expected_execution_mode="automatic",
+        mode_mismatch_error="automatic_execution_mode_required",
+    )
+
+
+def _automatic_operator_notes(value: str | None) -> str:
+    return (
+        _clean_text(value)
+        or "Automatic Mode v1 bounded batch packet preparation."
+    )
+
+
+def _automatic_review_operator_notes() -> list[str]:
+    return [
+        "Generated automatically by Listing Alert Recommendation Automatic Mode v1.",
+        "Stopped before any client delivery and requires review-first handling.",
+    ]
+
+
+def _automatic_listing_selection_reasons(
+    packet: agent_schemas.ListingAlertManualReviewPacket,
+    listing: agent_schemas.ListingAlertNormalizedListing,
+) -> list[str]:
+    reasons: list[str] = []
+    neighborhood = _clean_text(listing.neighborhood)
+    property_type = _clean_text(listing.property_type)
+    if neighborhood:
+        reasons.append(f"Matches the current area signal around {neighborhood}.")
+    if property_type:
+        reasons.append(f"Fits the current {property_type} search profile.")
+
+    budget_min = packet.contact_context.get("budget_min")
+    budget_max = packet.contact_context.get("budget_max")
+    price = listing.price
+    if price is not None:
+        if (
+            budget_min is not None
+            and budget_max is not None
+            and budget_min <= price <= budget_max
+        ):
+            reasons.append("Falls inside the stated budget range.")
+        elif budget_max is not None and price <= budget_max:
+            reasons.append("Fits under the current budget ceiling.")
+        elif budget_min is not None and price >= budget_min:
+            reasons.append("Meets the current budget floor.")
+
+    if not reasons:
+        reasons.append("Appears worth a closer manual review against the current criteria.")
+    return reasons[:3]
+
+
+def _automatic_shortlist_submission_items(
+    packet: agent_schemas.ListingAlertManualReviewPacket,
+) -> list[agent_schemas.ListingAlertReviewedShortlistSubmissionItem]:
+    shortlisted: list[agent_schemas.ListingAlertReviewedShortlistSubmissionItem] = []
+    for rank, listing in enumerate(packet.extracted_listings[:MAX_SHORTLIST], start=1):
+        shortlisted.append(
+            agent_schemas.ListingAlertReviewedShortlistSubmissionItem(
+                listing_ref=listing.listing_ref,
+                rank=rank,
+                why_selected=_automatic_listing_selection_reasons(packet, listing),
+            )
+        )
+    return shortlisted
+
+
+def _automatic_tradeoff_notes(
+    packet: agent_schemas.ListingAlertManualReviewPacket,
+) -> list[str]:
+    notes: list[str] = []
+    if packet.extracted_listing_count > MAX_SHORTLIST:
+        notes.append(
+            "More matching listings were extracted than the shortlist cap, so only the top review set was carried forward."
+        )
+    if packet.comparison_frame.get("market_type_detected") == "unknown":
+        notes.append(
+            "Market type remained ambiguous, so no client-facing draft should be generated automatically."
+        )
+    return notes[:5]
+
+
+def _automatic_recommendation_reasoning(
+    packet: agent_schemas.ListingAlertManualReviewPacket,
+    shortlist_count: int,
+) -> str:
+    contact_name = _clean_text(packet.contact_context.get("contact_name")) or "the client"
+    intent = packet.association.representation_intent or "undetermined_intent"
+    market_type = packet.comparison_frame.get("market_type_detected") or "unknown"
+    return (
+        f"Automatic Mode v1 shortlisted {shortlist_count} listing(s) for {contact_name} "
+        f"after a matched {intent} association on a {market_type} alert. "
+        "The shortlist stays within the existing review caps and remains approval-gated before any client-facing use."
+    )
+
+
+def _automatic_should_generate_client_draft(
+    packet: agent_schemas.ListingAlertManualReviewPacket,
+    shortlist_count: int,
+) -> bool:
+    market_type = packet.comparison_frame.get("market_type_detected")
+    return shortlist_count >= 2 and market_type in {"sale", "rent"}
+
+
+def _automatic_client_draft_submissions(
+    packet: agent_schemas.ListingAlertManualReviewPacket,
+    shortlist: list[agent_schemas.ListingAlertReviewedShortlistSubmissionItem],
+) -> list[agent_schemas.ListingAlertClientDraftSubmissionItem]:
+    if not _automatic_should_generate_client_draft(packet, len(shortlist)):
+        return []
+
+    contact_name = _clean_text(packet.contact_context.get("contact_name")) or "there"
+    shortlist_addresses = [
+        listing.address
+        for listing in packet.extracted_listings
+        if any(item.listing_ref == listing.listing_ref for item in shortlist)
+    ]
+    body_lines = [
+        f"Hi {contact_name},",
+        "",
+        f"I pulled together {len(shortlist)} listings that look worth reviewing together based on your current criteria.",
+    ]
+    for address in shortlist_addresses[:MAX_SHORTLIST]:
+        body_lines.append(f"- {address}")
+    body_lines.extend(
+        [
+            "",
+            "If these are directionally right, Kevin can help compare the tradeoffs and confirm the next best options to review more closely.",
+        ]
+    )
+    return [
+        agent_schemas.ListingAlertClientDraftSubmissionItem(
+            variant="shortlist_summary",
+            subject="Listings worth reviewing together",
+            body="\n".join(body_lines).strip(),
+        )
+    ]
+
+
+def _build_automatic_reviewed_result(
+    *,
+    source_run: models.AgentRun,
+    source_task: models.AgentTask,
+    packet_result: agent_schemas.ListingAlertManualPacketResultResponse,
+) -> agent_schemas.ListingAlertAutomaticReviewedResultResponse:
+    packet = packet_result.manual_review_packet
+    if packet is None or packet_result.execution_status != "packet_ready":
+        raise ValueError("source_packet_not_reviewable")
+    if packet_result.association.status != "matched":
+        raise ValueError("source_packet_association_blocked")
+
+    shortlist_submission = _automatic_shortlist_submission_items(packet)
+    draft_submissions = _automatic_client_draft_submissions(packet, shortlist_submission)
+    submission = agent_schemas.ListingAlertManualReviewSubmissionRequest(
+        source_run_id=source_run.id,
+        shortlisted_listings=shortlist_submission,
+        tradeoff_notes=_automatic_tradeoff_notes(packet),
+        recommendation_reasoning=_automatic_recommendation_reasoning(
+            packet,
+            len(shortlist_submission),
+        ),
+        client_facing_drafts=draft_submissions,
+        operator_notes=_automatic_review_operator_notes(),
+    )
+    shortlisted_listings = _validated_shortlist_result(packet, submission)
+    client_facing_drafts = _validated_reviewed_drafts(submission)
+    review_outcome: agent_schemas.ListingAlertReviewOutcome = (
+        "waiting_approval" if client_facing_drafts else "completed_no_draft"
+    )
+    risk_flags = ["automatic_review_generated"]
+    if client_facing_drafts:
+        risk_flags.append("client_facing_draft_requires_review")
+    else:
+        risk_flags.append("no_client_facing_draft_generated")
+
+    return agent_schemas.ListingAlertAutomaticReviewedResultResponse(
+        source_run_id=source_run.id,
+        source_task_id=source_task.id,
+        packet_version=packet.packet_version,
+        association=packet_result.association,
+        review_outcome=review_outcome,
+        shortlisted_listings=shortlisted_listings,
+        tradeoff_notes=_dedupe_clean_list(submission.tradeoff_notes)[:5],
+        recommendation_reasoning=_clean_text(submission.recommendation_reasoning) or "",
+        client_facing_drafts=client_facing_drafts,
+        risk_flags=risk_flags,
+        operator_notes=_dedupe_clean_list(submission.operator_notes),
+        workflow_mode="automatic",
+    )
+
+
+def _persist_listing_alert_review_run(
+    db: Session,
+    *,
+    run: models.AgentRun,
+    task: models.AgentTask,
+    source_run: models.AgentRun,
+    result: agent_schemas.ListingAlertReviewedSubmissionResultResponse
+    | agent_schemas.ListingAlertAutomaticReviewedResultResponse,
+    approval_created_action: str,
+    completed_no_draft_action: str,
+    review_mode: str,
+) -> models.AgentRun:
+    if result.client_facing_drafts:
+        approval_payload = _build_listing_alert_review_approval_payload(
+            result,
+            review_mode=review_mode,
+        )
+        approval = service.create_approval(
+            db,
+            run=run,
+            action_type=LISTING_ALERT_DRAFT_APPROVAL_ACTION,
+            risk_level="high",
+            payload=_json_dumps(approval_payload),
+        )
+        result.client_facing_drafts[0].approval_id = approval.id
+        run = service.update_run_status(
+            db,
+            run,
+            status="waiting_approval",
+            result=_json_dumps(result),
+            finished_at=datetime.utcnow(),
+        )
+        service.update_task_status(db, task, status="waiting_approval")
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            action=approval_created_action,
+            details=_json_dumps(
+                {
+                    "approval_id": approval.id,
+                    "action_type": LISTING_ALERT_DRAFT_APPROVAL_ACTION,
+                    "source_run_id": source_run.id,
+                }
+            ),
+        )
+        return run
+
+    run = service.update_run_status(
+        db,
+        run,
+        status="completed",
+        result=_json_dumps(result),
+        finished_at=datetime.utcnow(),
+    )
+    service.update_task_status(db, task, status="completed")
+    service.write_audit_log(
+        db,
+        run=run,
+        task=task,
+        action=completed_no_draft_action,
+        details=_json_dumps(
+            {
+                "source_run_id": source_run.id,
+                "shortlisted_listing_count": len(result.shortlisted_listings),
+            }
+        ),
+    )
+    return run
+
+
+def _automatic_packet_outcome_from_run(
+    *,
+    candidate: agent_schemas.ListingAlertGmailCandidateMessage,
+    run: models.AgentRun,
+) -> agent_schemas.ListingAlertAutomaticMessageOutcomeSummary:
+    if not run.result:
+        raise ValueError("listing_alert_automatic_packet_result_missing")
+    try:
+        parsed = json.loads(run.result)
+    except json.JSONDecodeError as exc:
+        raise ValueError("listing_alert_automatic_packet_result_invalid") from exc
+    result = agent_schemas.ListingAlertManualPacketResultResponse(**parsed)
+    return agent_schemas.ListingAlertAutomaticMessageOutcomeSummary(
+        message_id=candidate.message_id,
+        thread_id=candidate.thread_id,
+        subject=candidate.subject,
+        received_at=candidate.received_at,
+        status="blocked",
+        reason=result.association.blocked_reason,
+        task_id=run.task_id,
+        run_id=run.id,
+        execution_status=result.execution_status,
+        association_status=result.association.status,
+        packet_ready=False,
+    )
+
+
+def _automatic_review_outcome_from_runs(
+    *,
+    candidate: agent_schemas.ListingAlertGmailCandidateMessage,
+    packet_run: models.AgentRun,
+    review_run: models.AgentRun,
+) -> agent_schemas.ListingAlertAutomaticMessageOutcomeSummary:
+    if not review_run.result:
+        raise ValueError("listing_alert_automatic_review_result_missing")
+    try:
+        parsed_review = json.loads(review_run.result)
+    except json.JSONDecodeError as exc:
+        raise ValueError("listing_alert_automatic_review_result_invalid") from exc
+    result = agent_schemas.ListingAlertAutomaticReviewedResultResponse(**parsed_review)
+    approval_id = None
+    if result.client_facing_drafts:
+        approval_id = result.client_facing_drafts[0].approval_id
+    return agent_schemas.ListingAlertAutomaticMessageOutcomeSummary(
+        message_id=candidate.message_id,
+        thread_id=candidate.thread_id,
+        subject=candidate.subject,
+        received_at=candidate.received_at,
+        status=result.review_outcome,
+        reason=None,
+        task_id=packet_run.task_id,
+        run_id=packet_run.id,
+        review_run_id=review_run.id,
+        execution_status="packet_ready",
+        association_status=result.association.status,
+        review_outcome=result.review_outcome,
+        approval_id=approval_id,
+        packet_ready=True,
+    )
+
+
+def run_listing_alert_automatic_review_once(
+    db: Session,
+    *,
+    source_run: models.AgentRun,
+) -> models.AgentRun:
+    task = source_run.task
+    if task is None:
+        raise ValueError("source_task_missing")
+
+    run = service.create_run(
+        db,
+        task=task,
+        summary="Listing alert automatic review generation",
+    )
+    service.update_task_status(db, task, status="executing")
+    run = service.update_run_status(
+        db,
+        run,
+        status="planning",
+        plan=_json_dumps(
+            {
+                "source_run_id": source_run.id,
+                "source_task_id": task.id,
+                "submission_type": "automatic_review_generation",
+            }
+        ),
+        started_at=datetime.utcnow(),
+    )
+
+    try:
+        packet_result = _load_manual_packet_result(source_run)
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            action="listing_alert_automatic_review_started",
+            details=_json_dumps(
+                {
+                    "source_run_id": source_run.id,
+                    "source_task_id": task.id,
+                    "execution_status": packet_result.execution_status,
+                }
+            ),
+        )
+
+        reviewed_result = _build_automatic_reviewed_result(
+            source_run=source_run,
+            source_task=task,
+            packet_result=packet_result,
+        )
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            action="listing_alert_automatic_shortlist_generated",
+            details=_json_dumps(
+                {
+                    "source_run_id": source_run.id,
+                    "shortlisted_listing_count": len(reviewed_result.shortlisted_listings),
+                }
+            ),
+        )
+        if reviewed_result.client_facing_drafts:
+            service.write_audit_log(
+                db,
+                run=run,
+                task=task,
+                action="listing_alert_automatic_draft_generated",
+                details=_json_dumps(
+                    {
+                        "source_run_id": source_run.id,
+                        "draft_count": len(reviewed_result.client_facing_drafts),
+                    }
+                ),
+            )
+
+        return _persist_listing_alert_review_run(
+            db,
+            run=run,
+            task=task,
+            source_run=source_run,
+            result=reviewed_result,
+            approval_created_action="listing_alert_automatic_review_approval_created",
+            completed_no_draft_action="listing_alert_automatic_review_completed_no_draft",
+            review_mode="automatic_only",
+        )
+    except Exception as exc:
+        run = service.update_run_status(
+            db,
+            run,
+            status="failed",
+            error=str(exc),
+            finished_at=datetime.utcnow(),
+        )
+        service.update_task_status(db, task, status="failed")
+        service.write_audit_log(
+            db,
+            run=run,
+            task=task,
+            action="listing_alert_automatic_review_failed",
+            details=_json_dumps(
+                {
+                    "source_run_id": source_run.id,
+                    "error": str(exc),
+                }
+            ),
+        )
+        return run
+
+
+def run_listing_alert_automatic_batch_once(
+    db: Session,
+    request: Any,
+) -> agent_schemas.ListingAlertAutomaticBatchResult:
+    from . import listing_alert_recommendation_gmail
+
+    normalized_request = normalize_automatic_run_request(request)
+    service.write_audit_log(
+        db,
+        actor_type="system",
+        action="listing_alert_automatic_batch_started",
+        details=_json_dumps(
+            {
+                "max_messages_requested": normalized_request.max_messages,
+                "message_cap": AUTOMATIC_BATCH_MESSAGE_CAP,
+            }
+        ),
+    )
+
+    candidate_response = listing_alert_recommendation_gmail.fetch_gmail_candidates(
+        db,
+        normalized_request.gmail_read_config,
+    )
+    candidates_to_process = candidate_response.candidates[: normalized_request.max_messages]
+    resolved_config = None
+    outcomes: list[agent_schemas.ListingAlertAutomaticMessageOutcomeSummary] = []
+
+    for candidate in candidates_to_process:
+        if candidate.existing_task_id is not None:
+            outcome = agent_schemas.ListingAlertAutomaticMessageOutcomeSummary(
+                message_id=candidate.message_id,
+                thread_id=candidate.thread_id,
+                subject=candidate.subject,
+                received_at=candidate.received_at,
+                status="duplicate_skipped",
+                reason="message_id_already_imported",
+                task_id=candidate.existing_task_id,
+                run_id=candidate.existing_run_id,
+                packet_ready=False,
+            )
+            outcomes.append(outcome)
+            details = _json_dumps(outcome)
+            service.write_audit_log(
+                db,
+                actor_type="system",
+                action="listing_alert_automatic_message_outcome_recorded",
+                details=details,
+            )
+            service.write_audit_log(
+                db,
+                actor_type="system",
+                action="listing_alert_automatic_message_duplicate_skipped",
+                details=details,
+            )
+            continue
+
+        if resolved_config is None:
+            resolved_config = (
+                listing_alert_recommendation_gmail._resolve_gmail_read_config_for_execution(
+                    db,
+                    normalized_request.gmail_read_config,
+                )
+            )
+
+        normalized_message = listing_alert_recommendation_gmail.fetch_normalized_gmail_message(
+            resolved_config,
+            agent_schemas.ListingAlertGmailMessageReference(
+                message_id=candidate.message_id,
+                thread_id=candidate.thread_id,
+            ),
+            db=db,
+        )
+        run = run_listing_alert_automatic_packet_once(
+            db,
+            agent_schemas.ListingAlertRunRequest(
+                execution_mode="automatic",
+                gmail_alert=normalized_message,
+                expected_contact_id=None,
+                explicit_contact_mappings=[],
+                operator_notes=_automatic_operator_notes(
+                    normalized_request.operator_notes
+                ),
+            ),
+        )
+        if run.status == "failed":
+            raise ValueError("listing_alert_automatic_packet_run_failed")
+
+        packet_result = _load_manual_packet_result(run)
+        if packet_result.execution_status != "packet_ready":
+            outcome = _automatic_packet_outcome_from_run(candidate=candidate, run=run)
+            outcomes.append(outcome)
+            details = _json_dumps(outcome)
+            service.write_audit_log(
+                db,
+                actor_type="system",
+                action="listing_alert_automatic_message_outcome_recorded",
+                details=details,
+            )
+            service.write_audit_log(
+                db,
+                actor_type="system",
+                action="listing_alert_automatic_message_blocked",
+                details=details,
+            )
+            continue
+
+        review_run = run_listing_alert_automatic_review_once(db, source_run=run)
+        if review_run.status == "failed":
+            raise ValueError("listing_alert_automatic_review_run_failed")
+
+        outcome = _automatic_review_outcome_from_runs(
+            candidate=candidate,
+            packet_run=run,
+            review_run=review_run,
+        )
+        outcomes.append(outcome)
+        details = _json_dumps(outcome)
+        service.write_audit_log(
+            db,
+            actor_type="system",
+            action="listing_alert_automatic_message_outcome_recorded",
+            details=details,
+        )
+        specific_action = "listing_alert_automatic_message_completed_no_draft"
+        if outcome.status == "waiting_approval":
+            specific_action = "listing_alert_automatic_message_waiting_approval"
+        service.write_audit_log(
+            db,
+            actor_type="system",
+            action=specific_action,
+            details=details,
+        )
+
+    duplicate_skipped_count = sum(
+        1 for item in outcomes if item.status == "duplicate_skipped"
+    )
+    blocked_count = sum(1 for item in outcomes if item.status == "blocked")
+    completed_no_draft_count = sum(
+        1 for item in outcomes if item.status == "completed_no_draft"
+    )
+    waiting_approval_count = sum(
+        1 for item in outcomes if item.status == "waiting_approval"
+    )
+
+    result = agent_schemas.ListingAlertAutomaticBatchResult(
+        gmail_user_id=candidate_response.gmail_user_id,
+        query=candidate_response.query,
+        matched_message_count=candidate_response.matched_message_count,
+        candidate_count=candidate_response.candidate_count,
+        message_cap=normalized_request.max_messages,
+        processed_message_count=len(outcomes),
+        duplicate_skipped_count=duplicate_skipped_count,
+        blocked_count=blocked_count,
+        completed_no_draft_count=completed_no_draft_count,
+        waiting_approval_count=waiting_approval_count,
+        outcomes=outcomes,
+    )
+    service.write_audit_log(
+        db,
+        actor_type="system",
+        action="listing_alert_automatic_batch_completed",
+        details=_json_dumps(result),
+    )
+    return result
 
 
 def submit_listing_alert_manual_review(
@@ -1883,60 +2560,16 @@ def submit_listing_alert_manual_review(
         reviewed_result = _build_reviewed_submission_result(packet_result, submission)
         reviewed_result.source_task_id = task.id
 
-        if reviewed_result.client_facing_drafts:
-            approval_payload = _build_manual_review_approval_payload(reviewed_result)
-            approval = service.create_approval(
-                db,
-                run=run,
-                action_type=LISTING_ALERT_DRAFT_APPROVAL_ACTION,
-                risk_level="high",
-                payload=_json_dumps(approval_payload),
-            )
-            reviewed_result.client_facing_drafts[0].approval_id = approval.id
-            run = service.update_run_status(
-                db,
-                run,
-                status="waiting_approval",
-                result=_json_dumps(reviewed_result),
-                finished_at=datetime.utcnow(),
-            )
-            service.update_task_status(db, task, status="waiting_approval")
-            service.write_audit_log(
-                db,
-                run=run,
-                task=task,
-                action="listing_alert_manual_review_approval_created",
-                details=_json_dumps(
-                    {
-                        "approval_id": approval.id,
-                        "action_type": LISTING_ALERT_DRAFT_APPROVAL_ACTION,
-                        "source_run_id": source_run.id,
-                    }
-                ),
-            )
-            return run
-
-        run = service.update_run_status(
-            db,
-            run,
-            status="completed",
-            result=_json_dumps(reviewed_result),
-            finished_at=datetime.utcnow(),
-        )
-        service.update_task_status(db, task, status="completed")
-        service.write_audit_log(
+        return _persist_listing_alert_review_run(
             db,
             run=run,
             task=task,
-            action="listing_alert_manual_review_completed_no_draft",
-            details=_json_dumps(
-                {
-                    "source_run_id": source_run.id,
-                    "shortlisted_listing_count": len(reviewed_result.shortlisted_listings),
-                }
-            ),
+            source_run=source_run,
+            result=reviewed_result,
+            approval_created_action="listing_alert_manual_review_approval_created",
+            completed_no_draft_action="listing_alert_manual_review_completed_no_draft",
+            review_mode="manual_only",
         )
-        return run
     except Exception as exc:
         run = service.update_run_status(
             db,

@@ -3,6 +3,7 @@ import sys
 import types
 import unittest
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 from fastapi import HTTPException
 from sqlalchemy import create_engine
@@ -15,6 +16,7 @@ sys.modules.setdefault("pywebpush", pywebpush_stub)
 
 from app import models as crm_models
 from app.agents import listing_alert_recommendation
+from app.agents import listing_alert_recommendation_gmail
 from app.agents import models as agent_models
 from app.agents import router as agent_router
 from app.agents import schemas as agent_schemas
@@ -210,10 +212,165 @@ class ListingAlertRecommendationStepOneTests(unittest.TestCase):
         defaults.update(overrides)
         return agent_schemas.ListingAlertRunRequest(**defaults)
 
+    def build_gmail_read_config(self, **overrides) -> agent_schemas.ListingAlertGmailReadConfig:
+        defaults = {
+            "access_token": "",
+            "gmail_user_id": "me",
+            "query_policy": agent_schemas.ListingAlertGmailReadQueryPolicy(
+                allowed_sender="alerts@mls.example",
+                label_ids=["mls-alerts"],
+                subject_keywords=["Toronto MLS Alert"],
+                max_results=10,
+            ),
+        }
+        defaults.update(overrides)
+        return agent_schemas.ListingAlertGmailReadConfig(**defaults)
+
+    def build_automatic_request(
+        self,
+        **overrides,
+    ) -> agent_schemas.ListingAlertAutomaticRunRequest:
+        defaults = {
+            "gmail_read_config": self.build_gmail_read_config(),
+            "operator_notes": "Automatic Mode v1 run once.",
+            "max_messages": 3,
+        }
+        defaults.update(overrides)
+        return agent_schemas.ListingAlertAutomaticRunRequest(**defaults)
+
+    def automatic_candidate(
+        self,
+        *,
+        message_id: str,
+        thread_id: str,
+        subject: str,
+        existing_task_id: int | None = None,
+        existing_run_id: int | None = None,
+    ) -> agent_schemas.ListingAlertGmailCandidateMessage:
+        return agent_schemas.ListingAlertGmailCandidateMessage(
+            message_id=message_id,
+            thread_id=thread_id,
+            received_at=utcnow_naive(),
+            subject=subject,
+            from_address="alerts@mls.example",
+            label_ids=["mls-alerts"],
+            existing_task_id=existing_task_id,
+            existing_run_id=existing_run_id,
+        )
+
+    def automatic_resolved_gmail_config(
+        self,
+    ) -> listing_alert_recommendation_gmail.ResolvedGmailReadConfig:
+        return listing_alert_recommendation_gmail.ResolvedGmailReadConfig(
+            config=self.build_gmail_read_config(),
+            credential_source="stored_oauth",
+        )
+
+    def run_automatic_waiting_approval_batch(
+        self,
+        *,
+        message_id: str,
+        thread_id: str,
+        subject: str = "Toronto MLS Alert for Mia Chen",
+    ) -> agent_schemas.ListingAlertAutomaticBatchResult:
+        self.create_contact(
+            name="Mia Chen",
+            email="mia@example.com",
+        )
+        message = self.sale_alert_message(subject=subject)
+        message.message_id = message_id
+        message.thread_id = thread_id
+        with patch.object(
+            listing_alert_recommendation_gmail,
+            "fetch_gmail_candidates",
+            return_value=agent_schemas.ListingAlertGmailFetchCandidatesResponse(
+                gmail_user_id="me",
+                query='from:"alerts@mls.example" subject:"Toronto MLS Alert"',
+                matched_message_count=1,
+                candidate_count=1,
+                candidates=[
+                    self.automatic_candidate(
+                        message_id=message_id,
+                        thread_id=thread_id,
+                        subject=subject,
+                    )
+                ],
+            ),
+        ), patch.object(
+            listing_alert_recommendation_gmail,
+            "_resolve_gmail_read_config_for_execution",
+            return_value=self.automatic_resolved_gmail_config(),
+        ), patch.object(
+            listing_alert_recommendation_gmail,
+            "fetch_normalized_gmail_message",
+            return_value=message,
+        ):
+            return listing_alert_recommendation.run_listing_alert_automatic_batch_once(
+                self.db,
+                self.build_automatic_request(),
+            )
+
+    def run_automatic_completed_no_draft_batch(
+        self,
+        *,
+        message_id: str,
+        thread_id: str,
+        subject: str = "Toronto MLS Rental Alert for Avery Tenant",
+    ) -> agent_schemas.ListingAlertAutomaticBatchResult:
+        self.create_contact(
+            name="Avery Tenant",
+            email=f"{message_id}@example.com",
+            client_type="tenant",
+            budget_min=2200,
+            budget_max=3200,
+            preferred_areas=json.dumps(["CityPlace"]),
+            property_preferences=json.dumps({"types": ["condo"]}),
+        )
+        message = self.rent_alert_message(subject=subject)
+        message.message_id = message_id
+        message.thread_id = thread_id
+        with patch.object(
+            listing_alert_recommendation_gmail,
+            "fetch_gmail_candidates",
+            return_value=agent_schemas.ListingAlertGmailFetchCandidatesResponse(
+                gmail_user_id="me",
+                query='from:"alerts@mls.example" subject:"Toronto MLS Rental Alert"',
+                matched_message_count=1,
+                candidate_count=1,
+                candidates=[
+                    self.automatic_candidate(
+                        message_id=message_id,
+                        thread_id=thread_id,
+                        subject=subject,
+                    )
+                ],
+            ),
+        ), patch.object(
+            listing_alert_recommendation_gmail,
+            "_resolve_gmail_read_config_for_execution",
+            return_value=self.automatic_resolved_gmail_config(),
+        ), patch.object(
+            listing_alert_recommendation_gmail,
+            "fetch_normalized_gmail_message",
+            return_value=message,
+        ):
+            return listing_alert_recommendation.run_listing_alert_automatic_batch_once(
+                self.db,
+                self.build_automatic_request(),
+            )
+
     def get_audit_actions(self, run_id: int) -> list[str]:
         logs = (
             self.db.query(agent_models.AgentAuditLog)
             .filter(agent_models.AgentAuditLog.run_id == run_id)
+            .order_by(agent_models.AgentAuditLog.created_at.asc())
+            .all()
+        )
+        return [log.action for log in logs]
+
+    def get_all_audit_actions(self) -> list[str]:
+        logs = (
+            self.db.query(agent_models.AgentAuditLog)
             .order_by(agent_models.AgentAuditLog.created_at.asc())
             .all()
         )
@@ -532,6 +689,401 @@ class ListingAlertRecommendationStepOneTests(unittest.TestCase):
         self.assertEqual(
             result["manual_review_packet"]["extracted_listing_count"],
             10,
+        )
+
+    def test_automatic_batch_enforces_hard_message_cap_of_three(self):
+        self.create_contact(name="Mia Chen", email="mia@example.com")
+        candidates: list[agent_schemas.ListingAlertGmailCandidateMessage] = []
+        normalized_messages: list[agent_schemas.ListingAlertGmailMessageInput] = []
+        for index in range(4):
+            message_id = f"auto-cap-{index}"
+            thread_id = f"thread-auto-cap-{index}"
+            candidates.append(
+                self.automatic_candidate(
+                    message_id=message_id,
+                    thread_id=thread_id,
+                    subject="Toronto MLS Alert for Mia Chen",
+                )
+            )
+            message = self.sale_alert_message(subject="Toronto MLS Alert for Mia Chen")
+            message.message_id = message_id
+            message.thread_id = thread_id
+            normalized_messages.append(message)
+
+        with patch.object(
+            listing_alert_recommendation_gmail,
+            "fetch_gmail_candidates",
+            return_value=agent_schemas.ListingAlertGmailFetchCandidatesResponse(
+                gmail_user_id="me",
+                query='from:"alerts@mls.example" subject:"Toronto MLS Alert"',
+                matched_message_count=4,
+                candidate_count=4,
+                candidates=candidates,
+            ),
+        ), patch.object(
+            listing_alert_recommendation_gmail,
+            "_resolve_gmail_read_config_for_execution",
+            return_value=self.automatic_resolved_gmail_config(),
+        ) as resolve_mock, patch.object(
+            listing_alert_recommendation_gmail,
+            "fetch_normalized_gmail_message",
+            side_effect=normalized_messages[:3],
+        ) as fetch_mock:
+            result = listing_alert_recommendation.run_listing_alert_automatic_batch_once(
+                self.db,
+                self.build_automatic_request(max_messages=10),
+            )
+
+        self.assertEqual(result.message_cap, 3)
+        self.assertEqual(result.processed_message_count, 3)
+        self.assertEqual(len(result.outcomes), 3)
+        self.assertEqual(fetch_mock.call_count, 3)
+        self.assertEqual(resolve_mock.call_count, 1)
+        self.assertEqual(
+            [item.message_id for item in result.outcomes],
+            ["auto-cap-0", "auto-cap-1", "auto-cap-2"],
+        )
+        self.assertTrue(
+            all(item.status == "waiting_approval" for item in result.outcomes)
+        )
+        self.assertTrue(all(item.review_run_id is not None for item in result.outcomes))
+        self.assertEqual(self.db.query(agent_models.AgentTask).count(), 3)
+        self.assertEqual(self.db.query(agent_models.AgentRun).count(), 6)
+        self.assertEqual(self.db.query(agent_models.AgentApproval).count(), 3)
+
+    def test_automatic_batch_summarizes_duplicate_blocked_and_waiting_approval(self):
+        contact = self.create_contact(
+            name="Mia Chen",
+            email="mia@example.com",
+            budget_min=None,
+            budget_max=None,
+            preferred_areas="[]",
+            property_preferences="{}",
+        )
+
+        duplicate_message = self.sale_alert_message(subject="Toronto MLS Alert for Mia Chen")
+        duplicate_message.message_id = "auto-dup-1"
+        duplicate_message.thread_id = "thread-auto-dup-1"
+        existing_run = listing_alert_recommendation.run_listing_alert_manual_packet_once(
+            self.db,
+            self.build_request(
+                gmail_alert=duplicate_message,
+                expected_contact_id=contact.id,
+            ),
+        )
+
+        blocked_message = self.sale_alert_message(
+            subject="Toronto MLS Alert for Unknown Client"
+        )
+        blocked_message.message_id = "auto-block-1"
+        blocked_message.thread_id = "thread-auto-block-1"
+
+        ready_message = self.sale_alert_message(subject="Toronto MLS Alert for Mia Chen")
+        ready_message.message_id = "auto-ready-1"
+        ready_message.thread_id = "thread-auto-ready-1"
+
+        with patch.object(
+            listing_alert_recommendation_gmail,
+            "fetch_gmail_candidates",
+            return_value=agent_schemas.ListingAlertGmailFetchCandidatesResponse(
+                gmail_user_id="me",
+                query='from:"alerts@mls.example" subject:"Toronto MLS Alert"',
+                matched_message_count=3,
+                candidate_count=3,
+                candidates=[
+                    self.automatic_candidate(
+                        message_id="auto-dup-1",
+                        thread_id="thread-auto-dup-1",
+                        subject="Toronto MLS Alert for Mia Chen",
+                        existing_task_id=existing_run.task_id,
+                        existing_run_id=existing_run.id,
+                    ),
+                    self.automatic_candidate(
+                        message_id="auto-block-1",
+                        thread_id="thread-auto-block-1",
+                        subject="Toronto MLS Alert for Unknown Client",
+                    ),
+                    self.automatic_candidate(
+                        message_id="auto-ready-1",
+                        thread_id="thread-auto-ready-1",
+                        subject="Toronto MLS Alert for Mia Chen",
+                    ),
+                ],
+            ),
+        ), patch.object(
+            listing_alert_recommendation_gmail,
+            "_resolve_gmail_read_config_for_execution",
+            return_value=self.automatic_resolved_gmail_config(),
+        ), patch.object(
+            listing_alert_recommendation_gmail,
+            "fetch_normalized_gmail_message",
+            side_effect=[blocked_message, ready_message],
+        ):
+            result = listing_alert_recommendation.run_listing_alert_automatic_batch_once(
+                self.db,
+                self.build_automatic_request(),
+            )
+
+        self.assertEqual(result.duplicate_skipped_count, 1)
+        self.assertEqual(result.blocked_count, 1)
+        self.assertEqual(result.waiting_approval_count, 1)
+        self.assertEqual(result.completed_no_draft_count, 0)
+
+        duplicate_outcome, blocked_outcome, review_outcome = result.outcomes
+        self.assertEqual(duplicate_outcome.status, "duplicate_skipped")
+        self.assertEqual(duplicate_outcome.reason, "message_id_already_imported")
+        self.assertEqual(duplicate_outcome.task_id, existing_run.task_id)
+        self.assertEqual(duplicate_outcome.run_id, existing_run.id)
+        self.assertIsNone(duplicate_outcome.execution_status)
+
+        self.assertEqual(blocked_outcome.status, "blocked")
+        self.assertEqual(blocked_outcome.execution_status, "blocked_no_client_match")
+        self.assertEqual(blocked_outcome.association_status, "blocked_no_match")
+        self.assertEqual(blocked_outcome.reason, "no_safe_contact_match")
+        self.assertFalse(blocked_outcome.packet_ready)
+        self.assertIsNotNone(blocked_outcome.task_id)
+        self.assertIsNotNone(blocked_outcome.run_id)
+        self.assertIsNone(blocked_outcome.review_run_id)
+
+        self.assertEqual(review_outcome.status, "waiting_approval")
+        self.assertEqual(review_outcome.execution_status, "packet_ready")
+        self.assertEqual(review_outcome.association_status, "matched")
+        self.assertEqual(review_outcome.review_outcome, "waiting_approval")
+        self.assertTrue(review_outcome.packet_ready)
+        self.assertIsNotNone(review_outcome.task_id)
+        self.assertIsNotNone(review_outcome.run_id)
+        self.assertIsNotNone(review_outcome.review_run_id)
+        self.assertIsNotNone(review_outcome.approval_id)
+
+        blocked_task = (
+            self.db.query(agent_models.AgentTask)
+            .filter(agent_models.AgentTask.id == blocked_outcome.task_id)
+            .first()
+        )
+        review_task = (
+            self.db.query(agent_models.AgentTask)
+            .filter(agent_models.AgentTask.id == review_outcome.task_id)
+            .first()
+        )
+        self.assertEqual(json.loads(blocked_task.payload)["execution_mode"], "automatic")
+        self.assertEqual(json.loads(review_task.payload)["execution_mode"], "automatic")
+        review_task_runs = (
+            self.db.query(agent_models.AgentRun)
+            .filter(agent_models.AgentRun.task_id == review_task.id)
+            .order_by(agent_models.AgentRun.id.asc())
+            .all()
+        )
+        self.assertEqual(len(review_task_runs), 2)
+        self.assertEqual(review_task_runs[0].id, review_outcome.run_id)
+        self.assertEqual(review_task_runs[1].id, review_outcome.review_run_id)
+
+    def test_automatic_batch_can_complete_with_no_draft_for_safe_packet_ready_message(self):
+        contact = self.create_contact(
+            name="Avery Tenant",
+            email="avery@example.com",
+            client_type="tenant",
+            budget_min=2200,
+            budget_max=3200,
+            preferred_areas=json.dumps(["CityPlace"]),
+            property_preferences=json.dumps({"types": ["condo"]}),
+        )
+        rent_message = self.rent_alert_message(subject="Toronto MLS Rental Alert for Avery Tenant")
+        rent_message.message_id = "auto-rent-1"
+        rent_message.thread_id = "thread-auto-rent-1"
+
+        with patch.object(
+            listing_alert_recommendation_gmail,
+            "fetch_gmail_candidates",
+            return_value=agent_schemas.ListingAlertGmailFetchCandidatesResponse(
+                gmail_user_id="me",
+                query='from:"alerts@mls.example" subject:"Toronto MLS Rental Alert"',
+                matched_message_count=1,
+                candidate_count=1,
+                candidates=[
+                    self.automatic_candidate(
+                        message_id="auto-rent-1",
+                        thread_id="thread-auto-rent-1",
+                        subject="Toronto MLS Rental Alert for Avery Tenant",
+                    )
+                ],
+            ),
+        ), patch.object(
+            listing_alert_recommendation_gmail,
+            "_resolve_gmail_read_config_for_execution",
+            return_value=self.automatic_resolved_gmail_config(),
+        ), patch.object(
+            listing_alert_recommendation_gmail,
+            "fetch_normalized_gmail_message",
+            return_value=rent_message,
+        ):
+            result = listing_alert_recommendation.run_listing_alert_automatic_batch_once(
+                self.db,
+                self.build_automatic_request(),
+            )
+
+        self.assertEqual(result.completed_no_draft_count, 1)
+        self.assertEqual(result.waiting_approval_count, 0)
+        outcome = result.outcomes[0]
+        self.assertEqual(outcome.status, "completed_no_draft")
+        self.assertEqual(outcome.review_outcome, "completed_no_draft")
+        self.assertTrue(outcome.packet_ready)
+        self.assertIsNotNone(outcome.review_run_id)
+        self.assertIsNone(outcome.approval_id)
+        review_run = (
+            self.db.query(agent_models.AgentRun)
+            .filter(agent_models.AgentRun.id == outcome.review_run_id)
+            .first()
+        )
+        review_result = json.loads(review_run.result)
+        self.assertEqual(review_run.status, "completed")
+        self.assertEqual(review_result["workflow_mode"], "automatic")
+        self.assertEqual(review_result["review_outcome"], "completed_no_draft")
+        self.assertEqual(len(review_result["client_facing_drafts"]), 0)
+
+    def test_automatic_batch_writes_batch_and_per_message_audit_logs(self):
+        contact = self.create_contact(
+            name="Mia Chen",
+            email="mia@example.com",
+            budget_min=None,
+            budget_max=None,
+            preferred_areas="[]",
+            property_preferences="{}",
+        )
+        duplicate_message = self.sale_alert_message(subject="Toronto MLS Alert for Mia Chen")
+        duplicate_message.message_id = "audit-dup-1"
+        duplicate_message.thread_id = "thread-audit-dup-1"
+        existing_run = listing_alert_recommendation.run_listing_alert_manual_packet_once(
+            self.db,
+            self.build_request(
+                gmail_alert=duplicate_message,
+                expected_contact_id=contact.id,
+            ),
+        )
+
+        blocked_message = self.sale_alert_message(
+            subject="Toronto MLS Alert for Unknown Client"
+        )
+        blocked_message.message_id = "audit-block-1"
+        blocked_message.thread_id = "thread-audit-block-1"
+
+        ready_message = self.sale_alert_message(subject="Toronto MLS Alert for Mia Chen")
+        ready_message.message_id = "audit-ready-1"
+        ready_message.thread_id = "thread-audit-ready-1"
+
+        with patch.object(
+            listing_alert_recommendation_gmail,
+            "fetch_gmail_candidates",
+            return_value=agent_schemas.ListingAlertGmailFetchCandidatesResponse(
+                gmail_user_id="me",
+                query='from:"alerts@mls.example" subject:"Toronto MLS Alert"',
+                matched_message_count=3,
+                candidate_count=3,
+                candidates=[
+                    self.automatic_candidate(
+                        message_id="audit-dup-1",
+                        thread_id="thread-audit-dup-1",
+                        subject="Toronto MLS Alert for Mia Chen",
+                        existing_task_id=existing_run.task_id,
+                        existing_run_id=existing_run.id,
+                    ),
+                    self.automatic_candidate(
+                        message_id="audit-block-1",
+                        thread_id="thread-audit-block-1",
+                        subject="Toronto MLS Alert for Unknown Client",
+                    ),
+                    self.automatic_candidate(
+                        message_id="audit-ready-1",
+                        thread_id="thread-audit-ready-1",
+                        subject="Toronto MLS Alert for Mia Chen",
+                    ),
+                ],
+            ),
+        ), patch.object(
+            listing_alert_recommendation_gmail,
+            "_resolve_gmail_read_config_for_execution",
+            return_value=self.automatic_resolved_gmail_config(),
+        ), patch.object(
+            listing_alert_recommendation_gmail,
+            "fetch_normalized_gmail_message",
+            side_effect=[blocked_message, ready_message],
+        ):
+            result = listing_alert_recommendation.run_listing_alert_automatic_batch_once(
+                self.db,
+                self.build_automatic_request(),
+            )
+
+        all_actions = self.get_all_audit_actions()
+        self.assertIn("listing_alert_automatic_batch_started", all_actions)
+        self.assertEqual(
+            all_actions.count("listing_alert_automatic_message_outcome_recorded"),
+            3,
+        )
+        self.assertIn("listing_alert_automatic_message_duplicate_skipped", all_actions)
+        self.assertIn("listing_alert_automatic_message_blocked", all_actions)
+        self.assertIn("listing_alert_automatic_message_waiting_approval", all_actions)
+        self.assertIn("listing_alert_automatic_batch_completed", all_actions)
+
+        blocked_outcome = next(item for item in result.outcomes if item.status == "blocked")
+        ready_outcome = next(
+            item for item in result.outcomes if item.status == "waiting_approval"
+        )
+        blocked_actions = self.get_audit_actions(blocked_outcome.run_id)
+        packet_actions = self.get_audit_actions(ready_outcome.run_id)
+        review_actions = self.get_audit_actions(ready_outcome.review_run_id)
+
+        self.assertIn("listing_alert_automatic_packet_planning_started", blocked_actions)
+        self.assertIn("listing_alert_automatic_candidates_extracted", blocked_actions)
+        self.assertIn(
+            "listing_alert_automatic_client_association_blocked",
+            blocked_actions,
+        )
+        self.assertIn("listing_alert_automatic_packet_blocked", blocked_actions)
+
+        self.assertIn("listing_alert_automatic_packet_planning_started", packet_actions)
+        self.assertIn("listing_alert_automatic_candidates_extracted", packet_actions)
+        self.assertIn(
+            "listing_alert_automatic_client_association_resolved",
+            packet_actions,
+        )
+        self.assertIn("listing_alert_automatic_packet_prepared", packet_actions)
+        self.assertIn("listing_alert_automatic_review_started", review_actions)
+        self.assertIn("listing_alert_automatic_shortlist_generated", review_actions)
+        self.assertIn("listing_alert_automatic_draft_generated", review_actions)
+        self.assertIn(
+            "listing_alert_automatic_review_approval_created",
+            review_actions,
+        )
+
+    def test_automatic_review_failure_writes_failed_audit_log(self):
+        contact = self.create_contact(
+            name="Sparse Buyer",
+            email="sparse@example.com",
+            budget_min=None,
+            budget_max=None,
+            preferred_areas="[]",
+            property_preferences="{}",
+        )
+        blocked_run = listing_alert_recommendation.run_listing_alert_automatic_packet_once(
+            self.db,
+            self.build_request(
+                execution_mode="automatic",
+                gmail_alert=self.sale_alert_message(
+                    subject="Toronto MLS Alert for Unknown Client"
+                ),
+                expected_contact_id=None,
+            ),
+        )
+
+        review_run = listing_alert_recommendation.run_listing_alert_automatic_review_once(
+            self.db,
+            source_run=blocked_run,
+        )
+
+        self.assertEqual(blocked_run.task.subject_id, None)
+        self.assertEqual(review_run.status, "failed")
+        self.assertIn(
+            "listing_alert_automatic_review_failed",
+            self.get_audit_actions(review_run.id),
         )
 
     def test_manual_review_submission_with_draft_creates_review_only_approval(self):
@@ -885,6 +1437,185 @@ class ListingAlertRecommendationStepOneTests(unittest.TestCase):
             db=self.db,
         )
         self.assertEqual(scoped_report["run_id"], listing_run.id)
+
+    def test_router_automatic_run_once_returns_batch_summary(self):
+        self.create_contact(name="Mia Chen", email="mia@example.com")
+        message = self.sale_alert_message(subject="Toronto MLS Alert for Mia Chen")
+        message.message_id = "router-auto-1"
+        message.thread_id = "router-thread-1"
+
+        with patch.object(
+            listing_alert_recommendation_gmail,
+            "fetch_gmail_candidates",
+            return_value=agent_schemas.ListingAlertGmailFetchCandidatesResponse(
+                gmail_user_id="me",
+                query='from:"alerts@mls.example" subject:"Toronto MLS Alert"',
+                matched_message_count=1,
+                candidate_count=1,
+                candidates=[
+                    self.automatic_candidate(
+                        message_id="router-auto-1",
+                        thread_id="router-thread-1",
+                        subject="Toronto MLS Alert for Mia Chen",
+                    )
+                ],
+            ),
+        ), patch.object(
+            listing_alert_recommendation_gmail,
+            "_resolve_gmail_read_config_for_execution",
+            return_value=self.automatic_resolved_gmail_config(),
+        ), patch.object(
+            listing_alert_recommendation_gmail,
+            "fetch_normalized_gmail_message",
+            return_value=message,
+        ):
+            result = agent_router.run_listing_alert_recommendation_automatic_once(
+                self.build_automatic_request(),
+                db=self.db,
+            )
+
+        self.assertEqual(result.processed_message_count, 1)
+        self.assertEqual(result.waiting_approval_count, 1)
+        self.assertEqual(result.outcomes[0].status, "waiting_approval")
+        self.assertIsNotNone(result.outcomes[0].run_id)
+        self.assertIsNotNone(result.outcomes[0].review_run_id)
+
+    def test_router_automatic_latest_empty_and_run_read_routes(self):
+        empty_latest = agent_router.get_latest_listing_alert_recommendation_automatic_result(
+            db=self.db
+        )
+        self.assertEqual(
+            empty_latest,
+            {
+                "run_id": None,
+                "status": None,
+                "error": None,
+                "result": None,
+            },
+        )
+
+        waiting_batch = self.run_automatic_waiting_approval_batch(
+            message_id="auto-route-waiting-1",
+            thread_id="auto-route-thread-waiting-1",
+        )
+        no_draft_batch = self.run_automatic_completed_no_draft_batch(
+            message_id="auto-route-nodraft-1",
+            thread_id="auto-route-thread-nodraft-1",
+        )
+        manual_run = agent_router.prepare_listing_alert_manual_packet(
+            self.build_request(expected_contact_id=self.create_contact(
+                name="Manual Buyer",
+                email="manual@example.com",
+            ).id),
+            db=self.db,
+        )
+
+        automatic_runs = agent_router.list_listing_alert_recommendation_automatic_runs(
+            db=self.db,
+            limit=10,
+        )
+        automatic_run_ids = [run.id for run in automatic_runs]
+
+        self.assertEqual(len(automatic_runs), 4)
+        self.assertNotIn(manual_run.id, automatic_run_ids)
+        self.assertTrue(
+            all(
+                json.loads(run.task.payload)["execution_mode"] == "automatic"
+                for run in automatic_runs
+            )
+        )
+
+        latest = agent_router.get_latest_listing_alert_recommendation_automatic_result(
+            db=self.db
+        )
+        latest_review_run_id = no_draft_batch.outcomes[0].review_run_id
+        self.assertEqual(latest["run_id"], latest_review_run_id)
+        self.assertEqual(latest["status"], "completed")
+        self.assertEqual(latest["result"]["workflow_mode"], "automatic")
+        self.assertEqual(latest["result"]["review_outcome"], "completed_no_draft")
+
+        report = agent_router.get_listing_alert_recommendation_automatic_run_report(
+            latest_review_run_id,
+            db=self.db,
+        )
+        self.assertEqual(report["run_id"], latest_review_run_id)
+        self.assertEqual(report["result"]["workflow_mode"], "automatic")
+        self.assertEqual(report["result"]["review_outcome"], "completed_no_draft")
+
+        with self.assertRaises(HTTPException) as error:
+            agent_router.get_listing_alert_recommendation_automatic_run_report(
+                manual_run.id,
+                db=self.db,
+            )
+        self.assertEqual(error.exception.status_code, 404)
+
+        waiting_packet_run_id = waiting_batch.outcomes[0].run_id
+        waiting_packet_audits = (
+            agent_router.list_listing_alert_recommendation_automatic_run_audit_logs(
+                waiting_packet_run_id,
+                db=self.db,
+            )
+        )
+        self.assertIn(
+            "listing_alert_automatic_packet_prepared",
+            [log.action for log in waiting_packet_audits],
+        )
+
+        with self.assertRaises(HTTPException) as error:
+            agent_router.list_listing_alert_recommendation_automatic_run_audit_logs(
+                manual_run.id,
+                db=self.db,
+            )
+        self.assertEqual(error.exception.status_code, 404)
+
+    def test_router_automatic_approvals_and_history_are_scoped(self):
+        automatic_batch = self.run_automatic_waiting_approval_batch(
+            message_id="auto-approval-1",
+            thread_id="auto-approval-thread-1",
+        )
+        manual_contact = self.create_contact(name="Manual Approval Buyer", email="manual-approval@example.com")
+        manual_packet_run = agent_router.prepare_listing_alert_manual_packet(
+            self.build_request(expected_contact_id=manual_contact.id),
+            db=self.db,
+        )
+        manual_packet_result = json.loads(manual_packet_run.result)
+        manual_submission_run = agent_router.submit_listing_alert_manual_review(
+            agent_schemas.ListingAlertManualReviewSubmissionRequest(
+                source_run_id=manual_packet_run.id,
+                shortlisted_listings=[
+                    agent_schemas.ListingAlertReviewedShortlistSubmissionItem(
+                        listing_ref=manual_packet_result["extracted_listings"][0]["listing_ref"],
+                        rank=1,
+                        why_selected=["Manual review selected this listing."],
+                    )
+                ],
+                tradeoff_notes=[],
+                recommendation_reasoning="Manual review reasoning.",
+                client_facing_drafts=[
+                    agent_schemas.ListingAlertClientDraftSubmissionItem(
+                        subject="Manual shortlist",
+                        body="Manual mode draft.",
+                    )
+                ],
+                operator_notes=[],
+            ),
+            db=self.db,
+        )
+
+        pending = agent_router.list_listing_alert_recommendation_automatic_pending_approvals(
+            db=self.db
+        )
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0].run_id, automatic_batch.outcomes[0].review_run_id)
+        self.assertNotEqual(pending[0].run_id, manual_submission_run.id)
+
+        agent_router.approve_agent_action(pending[0].id, db=self.db)
+        history = agent_router.list_listing_alert_recommendation_automatic_approval_history(
+            db=self.db
+        )
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0].status, "approved")
+        self.assertEqual(history[0].run_id, automatic_batch.outcomes[0].review_run_id)
 
 
 if __name__ == "__main__":
