@@ -74,6 +74,31 @@ STREET_SUFFIXES = (
     "parkway",
     "pkwy",
 )
+CLIENT_TYPE_ALIASES = {
+    "buyer": "buyer",
+    "buyers": "buyer",
+    "tenant": "tenant",
+    "tenants": "tenant",
+    "renter": "tenant",
+    "renters": "tenant",
+    "seller": "seller",
+    "sellers": "seller",
+    "investor": "investor",
+    "investors": "investor",
+    "landlord": "landlord",
+    "landlords": "landlord",
+}
+PROPERTY_TYPE_ALIASES = {
+    "condos": "condo",
+    "apts": "apartment",
+    "apartments": "apartment",
+    "townhome": "townhouse",
+    "townhomes": "townhouse",
+    "town house": "townhouse",
+    "semi detached": "semi-detached",
+    "semi detached house": "semi-detached",
+    "houses": "house",
+}
 
 
 def _model_dump(value: Any) -> Any:
@@ -186,6 +211,153 @@ def _safe_json_dict(raw: str | None) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         return {}
     return parsed
+
+
+def _split_loose_text_values(raw: Any) -> list[str]:
+    text = _clean_text(raw)
+    if text is None:
+        return []
+    return [part for part in re.split(r"[,;/|\n]+", text) if _clean_text(part)]
+
+
+def _normalized_string_list(raw: Any) -> list[str]:
+    values: list[str]
+    if isinstance(raw, list):
+        values = [str(item) for item in raw if _clean_text(item)]
+    else:
+        values = _split_loose_text_values(raw)
+    return _dedupe_clean_list(values)
+
+
+def _normalize_client_type_token(value: str | None) -> str | None:
+    token = _normalize_match_text(value)
+    if not token:
+        return None
+    return CLIENT_TYPE_ALIASES.get(token, token)
+
+
+def _normalize_property_type_token(value: str | None) -> str | None:
+    token = _normalize_match_text(value)
+    if not token:
+        return None
+    return PROPERTY_TYPE_ALIASES.get(token, token)
+
+
+def _contact_preferred_area_tokens(contact: crm_models.Contact) -> set[str]:
+    raw = getattr(contact, "preferred_areas", None)
+    values = _safe_json_list(raw)
+    if not values:
+        text = _clean_text(raw)
+        if text and not text.startswith(("[", "{")):
+            values = _normalized_string_list(text)
+    return {
+        _normalize_match_text(value)
+        for value in values
+        if _normalize_match_text(value)
+    }
+
+
+def _contact_property_preferences(
+    contact: crm_models.Contact,
+) -> dict[str, list[str]]:
+    raw = getattr(contact, "property_preferences", None)
+    parsed = _safe_json_dict(raw)
+    types: set[str] = set()
+    for value in _normalized_string_list(parsed.get("types")):
+        normalized = _normalize_property_type_token(value)
+        if normalized:
+            types.add(normalized)
+    property_type_value = _clean_text(parsed.get("property_type"))
+    if property_type_value:
+        normalized = _normalize_property_type_token(property_type_value)
+        if normalized:
+            types.add(normalized)
+    if not types:
+        text = _clean_text(raw)
+        if text and not text.startswith("{"):
+            for value in _normalized_string_list(text):
+                normalized = _normalize_property_type_token(value)
+                if normalized:
+                    types.add(normalized)
+
+    return {
+        "types": sorted(types),
+        "must_haves": _normalized_string_list(parsed.get("must_haves")),
+        "deal_breakers": _normalized_string_list(parsed.get("deal_breakers")),
+    }
+
+
+def _contact_missing_criteria(contact: crm_models.Contact) -> list[str]:
+    missing: list[str] = []
+    if not _client_type_tokens(contact):
+        missing.append("client_type")
+    if not _contact_preferred_area_tokens(contact):
+        missing.append("preferred_areas")
+    if not _contact_property_preferences(contact)["types"]:
+        missing.append("property_preferences.types")
+    if (
+        getattr(contact, "budget_min", None) is None
+        and getattr(contact, "budget_max", None) is None
+    ):
+        missing.append("budget_range")
+    return missing
+
+
+def _dedupe_text_list(values: list[str]) -> list[str]:
+    return _dedupe_clean_list(values)
+
+
+def _build_candidate_contact_diagnostic(
+    *,
+    contact: crm_models.Contact,
+    stage: str,
+    score: float | None = None,
+    matched_on: list[str] | None = None,
+    missing_criteria: list[str] | None = None,
+    failed_checks: list[str] | None = None,
+    representation_intent: agent_schemas.ListingAlertRepresentationIntent | None = None,
+) -> agent_schemas.ListingAlertCandidateContactDiagnostic:
+    return agent_schemas.ListingAlertCandidateContactDiagnostic(
+        contact_id=contact.id,
+        contact_name=contact.name,
+        stage=stage,
+        score=score,
+        matched_on=_dedupe_text_list(matched_on or []),
+        missing_criteria=_dedupe_text_list(missing_criteria or []),
+        failed_checks=_dedupe_text_list(failed_checks or []),
+        representation_intent=representation_intent,
+    )
+
+
+def _aggregate_candidate_contact_ids(
+    candidate_contacts: list[agent_schemas.ListingAlertCandidateContactDiagnostic],
+) -> list[int]:
+    ids: list[int] = []
+    seen: set[int] = set()
+    for candidate in candidate_contacts:
+        if candidate.contact_id in seen:
+            continue
+        seen.add(candidate.contact_id)
+        ids.append(candidate.contact_id)
+    return ids
+
+
+def _aggregate_candidate_missing_criteria(
+    candidate_contacts: list[agent_schemas.ListingAlertCandidateContactDiagnostic],
+) -> list[str]:
+    values: list[str] = []
+    for candidate in candidate_contacts:
+        values.extend(candidate.missing_criteria)
+    return _dedupe_text_list(values)
+
+
+def _aggregate_candidate_failed_checks(
+    candidate_contacts: list[agent_schemas.ListingAlertCandidateContactDiagnostic],
+) -> list[str]:
+    values: list[str] = []
+    for candidate in candidate_contacts:
+        values.extend(candidate.failed_checks)
+    return _dedupe_text_list(values)
 
 
 def _parse_price(value: str | None) -> float | None:
@@ -520,8 +692,8 @@ def _client_type_tokens(contact: crm_models.Contact) -> set[str]:
     raw = _clean_text(getattr(contact, "client_type", None))
     if raw is None:
         return tokens
-    for token in raw.split(","):
-        cleaned = token.strip().lower()
+    for token in _split_loose_text_values(raw):
+        cleaned = _normalize_client_type_token(token)
         if cleaned:
             tokens.add(cleaned)
     return tokens
@@ -577,13 +749,30 @@ def _association_response_for_contact(
     market_type: agent_schemas.ListingAlertMarketType,
     confidence: float,
     override_intent: agent_schemas.ListingAlertRepresentationIntent | None = None,
+    failed_checks: list[str] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> agent_schemas.ListingAlertClientAssociationResponse:
+    missing_criteria = _contact_missing_criteria(contact)
+    diagnostic_payload = {
+        "market_type": market_type,
+        "match_stage": method,
+        **(diagnostics or {}),
+    }
     intent, error = _resolve_contact_intent(
         contact,
         market_type,
         override_intent=override_intent,
     )
     if error == "buyer_vs_renter_intent_ambiguous":
+        failed = _dedupe_text_list([*(failed_checks or []), error])
+        candidate = _build_candidate_contact_diagnostic(
+            contact=contact,
+            stage=method,
+            score=confidence,
+            matched_on=matched_on,
+            missing_criteria=missing_criteria,
+            failed_checks=failed,
+        )
         return agent_schemas.ListingAlertClientAssociationResponse(
             status="blocked_ambiguous_intent",
             method="blocked",
@@ -592,8 +781,21 @@ def _association_response_for_contact(
             matched_on=matched_on,
             blocked_reason=error,
             candidate_contact_ids=[contact.id],
+            diagnostics=diagnostic_payload,
+            candidate_contacts=[candidate],
+            missing_criteria=missing_criteria,
+            failed_checks=failed,
         )
     if error is not None:
+        failed = _dedupe_text_list([*(failed_checks or []), error])
+        candidate = _build_candidate_contact_diagnostic(
+            contact=contact,
+            stage=method,
+            score=confidence,
+            matched_on=matched_on,
+            missing_criteria=missing_criteria,
+            failed_checks=failed,
+        )
         return agent_schemas.ListingAlertClientAssociationResponse(
             status="blocked_intent_mismatch",
             method="blocked",
@@ -602,6 +804,10 @@ def _association_response_for_contact(
             matched_on=matched_on,
             blocked_reason=error,
             candidate_contact_ids=[contact.id],
+            diagnostics=diagnostic_payload,
+            candidate_contacts=[candidate],
+            missing_criteria=missing_criteria,
+            failed_checks=failed,
         )
     return agent_schemas.ListingAlertClientAssociationResponse(
         status="matched",
@@ -611,6 +817,9 @@ def _association_response_for_contact(
         representation_intent=intent,
         confidence=confidence,
         matched_on=matched_on,
+        diagnostics=diagnostic_payload,
+        missing_criteria=missing_criteria,
+        failed_checks=_dedupe_text_list(failed_checks or []),
     )
 
 
@@ -619,12 +828,35 @@ def _blocked_association(
     reason: str,
     *,
     candidate_contact_ids: list[int] | None = None,
+    diagnostics: dict[str, Any] | None = None,
+    candidate_contacts: list[
+        agent_schemas.ListingAlertCandidateContactDiagnostic
+    ] | None = None,
+    missing_criteria: list[str] | None = None,
+    failed_checks: list[str] | None = None,
 ) -> agent_schemas.ListingAlertClientAssociationResponse:
+    resolved_candidate_contacts = candidate_contacts or []
     return agent_schemas.ListingAlertClientAssociationResponse(
         status=status,
         method="blocked",
         blocked_reason=reason,
-        candidate_contact_ids=candidate_contact_ids or [],
+        candidate_contact_ids=(
+            candidate_contact_ids
+            if candidate_contact_ids is not None
+            else _aggregate_candidate_contact_ids(resolved_candidate_contacts)
+        ),
+        diagnostics=diagnostics or {},
+        candidate_contacts=resolved_candidate_contacts,
+        missing_criteria=(
+            missing_criteria
+            if missing_criteria is not None
+            else _aggregate_candidate_missing_criteria(resolved_candidate_contacts)
+        ),
+        failed_checks=(
+            failed_checks
+            if failed_checks is not None
+            else _aggregate_candidate_failed_checks(resolved_candidate_contacts)
+        ),
     )
 
 
@@ -689,7 +921,13 @@ def _find_contact_by_id(
 def _deterministic_metadata_matches(
     db: Session,
     message: agent_schemas.ListingAlertGmailMessageInput,
-) -> list[tuple[crm_models.Contact, list[str]]]:
+) -> list[
+    tuple[
+        crm_models.Contact,
+        list[str],
+        agent_schemas.ListingAlertCandidateContactDiagnostic,
+    ]
+]:
     searchable_fields = [
         message.subject,
         message.snippet,
@@ -698,7 +936,14 @@ def _deterministic_metadata_matches(
     ]
     searchable_text = " ".join(field for field in searchable_fields if field)
     normalized_search = f" {_normalize_match_text(searchable_text)} "
-    matches: list[tuple[crm_models.Contact, list[str]]] = []
+    lower_search_text = searchable_text.lower()
+    matches: list[
+        tuple[
+            crm_models.Contact,
+            list[str],
+            agent_schemas.ListingAlertCandidateContactDiagnostic,
+        ]
+    ] = []
 
     for contact in _active_contacts(db):
         reasons: list[str] = []
@@ -710,12 +955,26 @@ def _deterministic_metadata_matches(
             }
             if email_token in addresses:
                 reasons.append(f"contact_email:{email_token}")
+            elif email_token and email_token in lower_search_text:
+                reasons.append(f"contact_email_text:{email_token}")
         for name_value in (contact.name, getattr(contact, "name_zh", None)):
             name_token = _normalize_match_text(name_value)
             if name_token and f" {name_token} " in normalized_search:
                 reasons.append(f"contact_name:{name_token}")
         if reasons:
-            matches.append((contact, reasons))
+            matches.append(
+                (
+                    contact,
+                    reasons,
+                    _build_candidate_contact_diagnostic(
+                        contact=contact,
+                        stage="deterministic_metadata",
+                        score=0.95,
+                        matched_on=reasons,
+                        missing_criteria=_contact_missing_criteria(contact),
+                    ),
+                )
+            )
 
     return matches
 
@@ -742,23 +1001,28 @@ def _listing_summary(
 def _heuristic_candidate_score(
     contact: crm_models.Contact,
     listings: list[agent_schemas.ListingAlertNormalizedListing],
-) -> tuple[float, list[str], agent_schemas.ListingAlertRepresentationIntent | None, str | None]:
+) -> dict[str, Any]:
     summary = _listing_summary(listings)
     market_type = summary["market_type"]
+    missing_criteria = _contact_missing_criteria(contact)
+    failed_checks: list[str] = []
     intent, intent_error = _resolve_contact_intent(contact, market_type)
     if intent_error is not None:
-        if intent_error == "buyer_vs_renter_intent_ambiguous":
-            return 0.0, [], None, intent_error
-        return 0.0, [], None, intent_error
+        failed_checks.append(intent_error)
+        return {
+            "contact": contact,
+            "score": 0.0,
+            "matched_on": [],
+            "representation_intent": None,
+            "intent_error": intent_error,
+            "missing_criteria": missing_criteria,
+            "failed_checks": failed_checks,
+        }
 
     score = 0.0
     reasons: list[str] = []
 
-    preferred_areas = {
-        _normalize_match_text(area)
-        for area in _safe_json_list(getattr(contact, "preferred_areas", None))
-        if _normalize_match_text(area)
-    }
+    preferred_areas = _contact_preferred_area_tokens(contact)
     listing_area_matches = sorted(
         {
             area
@@ -772,82 +1036,164 @@ def _heuristic_candidate_score(
     if listing_area_matches:
         score += 2.0 + min(len(listing_area_matches) - 1, 1) * 0.5
         reasons.append(f"preferred_areas:{', '.join(listing_area_matches[:2])}")
+    elif preferred_areas and summary["neighborhoods"]:
+        failed_checks.append("preferred_areas_no_overlap")
 
-    property_preferences = _safe_json_dict(
-        getattr(contact, "property_preferences", None)
-    )
-    preferred_types = {
-        _normalize_match_text(item)
-        for item in property_preferences.get("types", [])
-        if _normalize_match_text(item)
-    }
-    if not preferred_types and _clean_text(property_preferences.get("property_type")):
-        preferred_types.add(
-            _normalize_match_text(str(property_preferences["property_type"]))
-        )
+    property_preferences = _contact_property_preferences(contact)
+    preferred_types = set(property_preferences["types"])
     listing_types = {
-        _normalize_match_text(property_type)
+        _normalize_property_type_token(property_type)
         for property_type in summary["property_types"]
-        if _normalize_match_text(property_type)
+        if _normalize_property_type_token(property_type)
     }
     type_matches = sorted(preferred_types & listing_types)
     if type_matches:
         score += 1.0
         reasons.append(f"property_type:{', '.join(type_matches[:2])}")
+    elif preferred_types and listing_types:
+        failed_checks.append("property_type_no_overlap")
 
     budget_min = getattr(contact, "budget_min", None)
     budget_max = getattr(contact, "budget_max", None)
     min_price = summary["min_price"]
     max_price = summary["max_price"]
-    if min_price is not None and max_price is not None and budget_max is not None:
-        if budget_min is not None and max_price >= budget_min and min_price <= budget_max:
+    if min_price is not None and max_price is not None:
+        if (
+            budget_min is not None
+            and budget_max is not None
+            and max_price >= budget_min
+            and min_price <= budget_max
+        ):
             score += 1.5
             reasons.append("budget_overlap")
-        elif budget_min is None and min_price <= budget_max:
+        elif budget_min is None and budget_max is not None and min_price <= budget_max:
             score += 1.0
             reasons.append("budget_ceiling_fit")
+        elif budget_min is not None and budget_max is None and max_price >= budget_min:
+            score += 1.0
+            reasons.append("budget_floor_fit")
+        elif budget_min is not None or budget_max is not None:
+            failed_checks.append("budget_out_of_range")
 
-    return score, reasons, intent, None
+    return {
+        "contact": contact,
+        "score": score,
+        "matched_on": reasons,
+        "representation_intent": intent,
+        "intent_error": None,
+        "missing_criteria": missing_criteria,
+        "failed_checks": failed_checks,
+    }
 
 
 def _heuristic_fallback_match(
     db: Session,
     listings: list[agent_schemas.ListingAlertNormalizedListing],
 ) -> agent_schemas.ListingAlertClientAssociationResponse:
-    scored: list[tuple[float, crm_models.Contact, list[str], agent_schemas.ListingAlertRepresentationIntent | None, str | None]] = []
-    ambiguous_intent_ids: list[int] = []
+    scored: list[dict[str, Any]] = []
+    candidate_diagnostics: list[agent_schemas.ListingAlertCandidateContactDiagnostic] = []
+    ambiguous_intent_diagnostics: list[
+        agent_schemas.ListingAlertCandidateContactDiagnostic
+    ] = []
     for contact in _active_contacts(db):
-        score, reasons, intent, error = _heuristic_candidate_score(contact, listings)
+        evaluation = _heuristic_candidate_score(contact, listings)
+        score = float(evaluation["score"])
+        reasons = list(evaluation["matched_on"])
+        intent = evaluation["representation_intent"]
+        error = evaluation["intent_error"]
+        missing_criteria = list(evaluation["missing_criteria"])
+        failed_checks = list(evaluation["failed_checks"])
+        candidate_diagnostic = _build_candidate_contact_diagnostic(
+            contact=contact,
+            stage="heuristic_fallback",
+            score=round(score, 2),
+            matched_on=reasons,
+            missing_criteria=missing_criteria,
+            failed_checks=failed_checks,
+            representation_intent=intent,
+        )
+        candidate_diagnostics.append(candidate_diagnostic)
         if error == "buyer_vs_renter_intent_ambiguous":
-            ambiguous_intent_ids.append(contact.id)
+            ambiguous_intent_diagnostics.append(candidate_diagnostic)
             continue
         if score <= 0.0 or not reasons or intent is None:
             continue
-        scored.append((score, contact, reasons, intent, error))
+        scored.append(
+            {
+                "score": score,
+                "contact": contact,
+                "matched_on": reasons,
+                "representation_intent": intent,
+                "candidate_diagnostic": candidate_diagnostic,
+            }
+        )
 
     if not scored:
-        if ambiguous_intent_ids:
+        if ambiguous_intent_diagnostics:
             return _blocked_association(
                 "blocked_ambiguous_intent",
                 "buyer_vs_renter_intent_ambiguous",
-                candidate_contact_ids=ambiguous_intent_ids,
+                diagnostics={
+                    "match_stage": "heuristic_fallback",
+                    "market_type": _listing_summary(listings)["market_type"],
+                    "evaluated_contact_count": len(candidate_diagnostics),
+                },
+                candidate_contacts=ambiguous_intent_diagnostics,
             )
-        return _blocked_association("blocked_no_match", "no_safe_contact_match")
+        return _blocked_association(
+            "blocked_no_match",
+            "no_safe_contact_match",
+            diagnostics={
+                "match_stage": "heuristic_fallback",
+                "market_type": _listing_summary(listings)["market_type"],
+                "evaluated_contact_count": len(candidate_diagnostics),
+            },
+            candidate_contacts=sorted(
+                candidate_diagnostics,
+                key=lambda candidate: (-(candidate.score or 0.0), candidate.contact_id),
+            )[:3],
+        )
 
-    scored.sort(key=lambda item: (-item[0], item[1].id))
-    top_score, top_contact, top_reasons, top_intent, _ = scored[0]
+    scored.sort(key=lambda item: (-item["score"], item["contact"].id))
+    top_score = float(scored[0]["score"])
+    top_contact = scored[0]["contact"]
+    top_reasons = scored[0]["matched_on"]
+    top_intent = scored[0]["representation_intent"]
     close_competitors = [
-        candidate[1].id
+        candidate["contact"].id
         for candidate in scored
-        if candidate[1].id != top_contact.id and (top_score - candidate[0]) < 1.5
+        if candidate["contact"].id != top_contact.id
+        and (top_score - float(candidate["score"])) < 1.5
     ]
     if top_score < 3.0:
-        return _blocked_association("blocked_no_match", "no_safe_contact_match")
+        return _blocked_association(
+            "blocked_no_match",
+            "no_safe_contact_match",
+            diagnostics={
+                "match_stage": "heuristic_fallback",
+                "market_type": _listing_summary(listings)["market_type"],
+                "evaluated_contact_count": len(candidate_diagnostics),
+                "top_score": round(top_score, 2),
+            },
+            candidate_contacts=[
+                candidate["candidate_diagnostic"] for candidate in scored[:3]
+            ],
+        )
     if close_competitors:
         return _blocked_association(
             "blocked_ambiguous",
             "multiple_contacts_match_same_listing_profile",
-            candidate_contact_ids=[top_contact.id, *close_competitors],
+            diagnostics={
+                "match_stage": "heuristic_fallback",
+                "market_type": _listing_summary(listings)["market_type"],
+                "evaluated_contact_count": len(candidate_diagnostics),
+                "top_score": round(top_score, 2),
+            },
+            candidate_contacts=[
+                candidate["candidate_diagnostic"]
+                for candidate in scored
+                if candidate["contact"].id in [top_contact.id, *close_competitors]
+            ],
         )
 
     return agent_schemas.ListingAlertClientAssociationResponse(
@@ -858,6 +1204,12 @@ def _heuristic_fallback_match(
         representation_intent=top_intent,
         confidence=round(min(top_score / 5.0, 0.89), 2),
         matched_on=top_reasons,
+        diagnostics={
+            "market_type": _listing_summary(listings)["market_type"],
+            "match_stage": "heuristic_fallback",
+            "top_score": round(top_score, 2),
+        },
+        missing_criteria=_contact_missing_criteria(top_contact),
     )
 
 
@@ -875,6 +1227,12 @@ def resolve_client_association(
             return _blocked_association(
                 "blocked_no_match",
                 "expected_contact_id_not_found",
+                diagnostics={
+                    "market_type": market_type,
+                    "match_stage": "expected_contact_id",
+                    "operator_override": True,
+                },
+                failed_checks=["expected_contact_id_not_found"],
             )
         return _association_response_for_contact(
             contact=contact,
@@ -882,6 +1240,7 @@ def resolve_client_association(
             matched_on=["expected_contact_id_override"],
             market_type=market_type,
             confidence=1.0,
+            diagnostics={"operator_override": True},
         )
 
     explicit_matches: list[
@@ -901,7 +1260,21 @@ def resolve_client_association(
             return _blocked_association(
                 "blocked_ambiguous",
                 "multiple_explicit_mappings_matched",
-                candidate_contact_ids=unique_contact_ids,
+                diagnostics={
+                    "market_type": market_type,
+                    "match_stage": "explicit_mapping",
+                    "operator_override": True,
+                },
+                candidate_contacts=[
+                    _build_candidate_contact_diagnostic(
+                        contact=contact,
+                        stage="explicit_mapping",
+                        score=0.99,
+                        matched_on=["explicit_mapping"],
+                        missing_criteria=_contact_missing_criteria(contact),
+                    )
+                    for contact, _ in explicit_matches
+                ],
             )
         contact, mapping = explicit_matches[0]
         matched_on: list[str] = ["explicit_mapping"]
@@ -922,18 +1295,27 @@ def resolve_client_association(
             market_type=market_type,
             confidence=0.99,
             override_intent=mapping.representation_intent,
+            diagnostics={"operator_override": True},
         )
 
     deterministic_matches = _deterministic_metadata_matches(db, message)
     if deterministic_matches:
-        unique_contact_ids = sorted({contact.id for contact, _ in deterministic_matches})
+        unique_contact_ids = sorted(
+            {contact.id for contact, _, _ in deterministic_matches}
+        )
         if len(unique_contact_ids) > 1:
             return _blocked_association(
                 "blocked_ambiguous",
                 "multiple_contacts_matched_alert_metadata",
-                candidate_contact_ids=unique_contact_ids,
+                diagnostics={
+                    "market_type": market_type,
+                    "match_stage": "deterministic_metadata",
+                },
+                candidate_contacts=[
+                    diagnostic for _, _, diagnostic in deterministic_matches
+                ],
             )
-        contact, reasons = deterministic_matches[0]
+        contact, reasons, _ = deterministic_matches[0]
         return _association_response_for_contact(
             contact=contact,
             method="deterministic_metadata",

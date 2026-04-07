@@ -399,6 +399,25 @@ export interface ListingAlertNormalizedListing {
     match_notes: string[];
 }
 
+export interface ListingAlertAssociationDiagnostics {
+    match_stage?: string;
+    market_type?: ListingAlertMarketType | null;
+    operator_override?: boolean;
+    evaluated_contact_count?: number;
+    top_score?: number;
+}
+
+export interface ListingAlertCandidateContactDiagnostic {
+    contact_id: number;
+    contact_name?: string | null;
+    stage: string;
+    score?: number | null;
+    matched_on: string[];
+    missing_criteria: string[];
+    failed_checks: string[];
+    representation_intent?: ListingAlertRepresentationIntent | null;
+}
+
 export interface ListingAlertClientAssociationResponse {
     status: ListingAlertAssociationStatus;
     method: ListingAlertAssociationMethod;
@@ -409,6 +428,10 @@ export interface ListingAlertClientAssociationResponse {
     matched_on: string[];
     blocked_reason?: string | null;
     candidate_contact_ids: number[];
+    diagnostics?: ListingAlertAssociationDiagnostics;
+    candidate_contacts?: ListingAlertCandidateContactDiagnostic[];
+    missing_criteria?: string[];
+    failed_checks?: string[];
 }
 
 export interface ListingAlertManualReviewPacket {
@@ -1779,6 +1802,53 @@ const normalizeListingAlertGmailOAuthStart = (
     };
 };
 
+const normalizeListingAlertAssociationDiagnostics = (
+    value: Partial<ListingAlertAssociationDiagnostics> | null | undefined,
+): ListingAlertAssociationDiagnostics | undefined => {
+    if (!value || typeof value !== 'object') {
+        return undefined;
+    }
+
+    return {
+        match_stage: typeof value.match_stage === 'string' ? value.match_stage : undefined,
+        market_type:
+            value.market_type === 'sale' ||
+            value.market_type === 'rent' ||
+            value.market_type === 'unknown'
+                ? value.market_type
+                : null,
+        operator_override:
+            typeof value.operator_override === 'boolean'
+                ? value.operator_override
+                : undefined,
+        evaluated_contact_count:
+            typeof value.evaluated_contact_count === 'number'
+                ? value.evaluated_contact_count
+                : undefined,
+        top_score: typeof value.top_score === 'number' ? value.top_score : undefined,
+    };
+};
+
+const normalizeListingAlertCandidateContactDiagnostic = (
+    value: Partial<ListingAlertCandidateContactDiagnostic> | null | undefined,
+): ListingAlertCandidateContactDiagnostic => {
+    return {
+        contact_id: typeof value?.contact_id === 'number' ? value.contact_id : 0,
+        contact_name:
+            typeof value?.contact_name === 'string' ? value.contact_name : null,
+        stage: typeof value?.stage === 'string' ? value.stage : 'unknown',
+        score: typeof value?.score === 'number' ? value.score : null,
+        matched_on: ensureArray<string>(value?.matched_on),
+        missing_criteria: ensureArray<string>(value?.missing_criteria),
+        failed_checks: ensureArray<string>(value?.failed_checks),
+        representation_intent:
+            value?.representation_intent === 'buyer_purchase' ||
+            value?.representation_intent === 'renter_representation'
+                ? value.representation_intent
+                : null,
+    };
+};
+
 const normalizeListingAlertAssociation = (
     value: Partial<ListingAlertClientAssociationResponse> | null | undefined,
 ): ListingAlertClientAssociationResponse => {
@@ -1813,6 +1883,12 @@ const normalizeListingAlertAssociation = (
         candidate_contact_ids: ensureArray<number>(value?.candidate_contact_ids).filter(
             (item) => typeof item === 'number',
         ),
+        diagnostics: normalizeListingAlertAssociationDiagnostics(value?.diagnostics),
+        candidate_contacts: ensureArray<Partial<ListingAlertCandidateContactDiagnostic>>(
+            value?.candidate_contacts,
+        ).map(normalizeListingAlertCandidateContactDiagnostic),
+        missing_criteria: ensureArray<string>(value?.missing_criteria),
+        failed_checks: ensureArray<string>(value?.failed_checks),
     };
 };
 

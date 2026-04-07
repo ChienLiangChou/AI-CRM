@@ -369,6 +369,8 @@ class ListingAlertRecommendationStepOneTests(unittest.TestCase):
         self.assertEqual(result["execution_status"], "blocked_ambiguous_client_match")
         self.assertIsNone(result["manual_review_packet"])
         self.assertEqual(result["association"]["status"], "blocked_ambiguous")
+        self.assertEqual(result["association"]["diagnostics"]["match_stage"], "heuristic_fallback")
+        self.assertEqual(len(result["association"]["candidate_contacts"]), 2)
 
     def test_ambiguous_buyer_vs_renter_intent_blocks_safely(self):
         contact = self.create_contact(
@@ -391,6 +393,126 @@ class ListingAlertRecommendationStepOneTests(unittest.TestCase):
             result["association"]["blocked_reason"],
             "buyer_vs_renter_intent_ambiguous",
         )
+        self.assertIn(
+            "buyer_vs_renter_intent_ambiguous",
+            result["association"]["failed_checks"],
+        )
+
+    def test_blocked_no_client_match_reports_missing_criteria_diagnostics(self):
+        contact = self.create_contact(
+            name="Sparse Buyer",
+            email="sparse@example.com",
+            budget_min=None,
+            budget_max=None,
+            preferred_areas="[]",
+            property_preferences="{}",
+        )
+        request = self.build_request(
+            gmail_alert=self.sale_alert_message(subject="Toronto MLS Alert for Unknown Client"),
+        )
+
+        run = listing_alert_recommendation.run_listing_alert_manual_packet_once(
+            self.db,
+            request,
+        )
+        result = json.loads(run.result)
+
+        self.assertEqual(result["execution_status"], "blocked_no_client_match")
+        self.assertEqual(result["association"]["status"], "blocked_no_match")
+        self.assertEqual(result["association"]["blocked_reason"], "no_safe_contact_match")
+        self.assertEqual(result["association"]["diagnostics"]["match_stage"], "heuristic_fallback")
+        self.assertIn("preferred_areas", result["association"]["missing_criteria"])
+        self.assertIn("property_preferences.types", result["association"]["missing_criteria"])
+        self.assertIn("budget_range", result["association"]["missing_criteria"])
+        self.assertEqual(result["association"]["candidate_contacts"][0]["contact_id"], contact.id)
+
+    def test_blocked_no_client_match_reports_failed_checks_for_mismatched_criteria(self):
+        contact = self.create_contact(
+            name="Mismatch Buyer",
+            email="mismatch@example.com",
+            budget_min=1_500_000,
+            budget_max=1_800_000,
+            preferred_areas=json.dumps(["North York"]),
+            property_preferences=json.dumps({"types": ["detached"]}),
+        )
+        request = self.build_request(
+            gmail_alert=self.sale_alert_message(subject="Toronto MLS Alert for Unknown Client"),
+        )
+
+        run = listing_alert_recommendation.run_listing_alert_manual_packet_once(
+            self.db,
+            request,
+        )
+        result = json.loads(run.result)
+
+        self.assertEqual(result["execution_status"], "blocked_no_client_match")
+        self.assertEqual(result["association"]["status"], "blocked_no_match")
+        self.assertIn("preferred_areas_no_overlap", result["association"]["failed_checks"])
+        self.assertIn("property_type_no_overlap", result["association"]["failed_checks"])
+        self.assertIn("budget_out_of_range", result["association"]["failed_checks"])
+        self.assertEqual(result["association"]["candidate_contacts"][0]["contact_id"], contact.id)
+
+    def test_expected_contact_id_recovers_from_otherwise_blocked_no_match(self):
+        contact = self.create_contact(
+            name="Manual Override Buyer",
+            email="override@example.com",
+            budget_min=None,
+            budget_max=None,
+            preferred_areas="[]",
+            property_preferences="{}",
+        )
+        request_without_override = self.build_request(
+            gmail_alert=self.sale_alert_message(subject="Toronto MLS Alert for Unknown Client"),
+        )
+        blocked_run = listing_alert_recommendation.run_listing_alert_manual_packet_once(
+            self.db,
+            request_without_override,
+        )
+        blocked_result = json.loads(blocked_run.result)
+        self.assertEqual(blocked_result["execution_status"], "blocked_no_client_match")
+
+        recovered_request = self.build_request(
+            gmail_alert=self.sale_alert_message(subject="Toronto MLS Alert for Unknown Client"),
+            expected_contact_id=contact.id,
+        )
+        recovered_run = listing_alert_recommendation.run_listing_alert_manual_packet_once(
+            self.db,
+            recovered_request,
+        )
+        recovered_result = json.loads(recovered_run.result)
+
+        self.assertEqual(recovered_result["execution_status"], "packet_ready")
+        self.assertEqual(recovered_result["association"]["method"], "expected_contact_id")
+        self.assertEqual(recovered_result["association"]["contact_id"], contact.id)
+        self.assertTrue(recovered_result["association"]["diagnostics"]["operator_override"])
+        self.assertIn("budget_range", recovered_result["association"]["missing_criteria"])
+
+    def test_expected_contact_id_intent_mismatch_reports_diagnostics(self):
+        contact = self.create_contact(
+            name="Tenant Contact",
+            client_type="tenant",
+            email="tenant@example.com",
+        )
+        request = self.build_request(expected_contact_id=contact.id)
+
+        run = listing_alert_recommendation.run_listing_alert_manual_packet_once(
+            self.db,
+            request,
+        )
+        result = json.loads(run.result)
+
+        self.assertEqual(result["execution_status"], "blocked_intent_mismatch")
+        self.assertEqual(result["association"]["status"], "blocked_intent_mismatch")
+        self.assertEqual(
+            result["association"]["blocked_reason"],
+            "contact_not_configured_for_sale_alerts",
+        )
+        self.assertTrue(result["association"]["diagnostics"]["operator_override"])
+        self.assertIn(
+            "contact_not_configured_for_sale_alerts",
+            result["association"]["failed_checks"],
+        )
+        self.assertEqual(result["association"]["candidate_contacts"][0]["contact_id"], contact.id)
 
     def test_extraction_caps_candidates_at_ten(self):
         contact = self.create_contact()

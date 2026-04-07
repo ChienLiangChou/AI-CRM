@@ -520,6 +520,17 @@ class ListingAlertNormalizedListing(BaseModel):
     match_notes: list[str] = []
 
 
+class ListingAlertCandidateContactDiagnostic(BaseModel):
+    contact_id: int
+    contact_name: Optional[str] = None
+    stage: str
+    score: Optional[float] = None
+    matched_on: list[str] = []
+    missing_criteria: list[str] = []
+    failed_checks: list[str] = []
+    representation_intent: Optional[ListingAlertRepresentationIntent] = None
+
+
 class ListingAlertClientAssociationResponse(BaseModel):
     status: ListingAlertAssociationStatus
     method: ListingAlertAssociationMethod = "blocked"
@@ -530,6 +541,10 @@ class ListingAlertClientAssociationResponse(BaseModel):
     matched_on: list[str] = []
     blocked_reason: Optional[str] = None
     candidate_contact_ids: list[int] = []
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+    candidate_contacts: list[ListingAlertCandidateContactDiagnostic] = []
+    missing_criteria: list[str] = []
+    failed_checks: list[str] = []
 
 
 class ListingAlertManualReviewPacket(BaseModel):

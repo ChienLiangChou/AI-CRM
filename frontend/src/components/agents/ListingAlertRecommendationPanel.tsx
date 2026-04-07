@@ -186,6 +186,13 @@ const humanizeEnum = (value?: string | null) => {
         .join(' ');
 };
 
+const renderInlineList = (values: string[]) => {
+    if (values.length === 0) {
+        return 'n/a';
+    }
+    return values.join(' | ');
+};
+
 const isPacketResult = (
     result: ListingAlertRecommendationRunReportResponse['result'] | ListingAlertRecommendationLatestResponse['result'],
 ): result is ListingAlertManualPacketResultResponse => {
@@ -641,6 +648,21 @@ const ListingAlertRecommendationPanel = () => {
             ...current,
             [key]: value,
         }));
+    };
+
+    const applyExpectedContactOverride = (contactId: number) => {
+        const value = String(contactId);
+        setGmailFetchForm((current) => ({
+            ...current,
+            expectedContactId: value,
+        }));
+        setPacketForm((current) => ({
+            ...current,
+            expectedContactId: value,
+        }));
+        setGmailStatusNotice(
+            `Expected contact ID override set to #${contactId}. Import or packet prep will use it only when you rerun manually.`,
+        );
     };
 
     const handleRefreshGmailOAuthStatus = async () => {
@@ -1115,24 +1137,8 @@ const ListingAlertRecommendationPanel = () => {
                     </div>
                 </div>
 
-                <div className={`rounded border px-3 py-2 text-sm ${getAssociationTone(packet.association)}`}>
-                    Association status: {humanizeEnum(packet.association.status)}
-                    {packet.association.blocked_reason && (
-                        <div className="mt-1 text-xs text-amber-50">
-                            Blocked reason: {packet.association.blocked_reason}
-                        </div>
-                    )}
-                    {packet.association.contact_name && (
-                        <div className="mt-1 text-xs text-current">
-                            Matched contact: {packet.association.contact_name} (#{packet.association.contact_id})
-                        </div>
-                    )}
-                    {packet.association.representation_intent && (
-                        <div className="mt-1 text-xs text-current">
-                            Representation intent: {humanizeEnum(packet.association.representation_intent)}
-                        </div>
-                    )}
-                </div>
+                {renderAssociationSummary(packet.association)}
+                {renderAssociationDiagnostics(packet.association)}
 
                 <div className="grid gap-4 lg:grid-cols-2">
                     <div className="rounded border border-white/10 bg-white/5 p-3 space-y-2">
@@ -1282,19 +1288,8 @@ const ListingAlertRecommendationPanel = () => {
                     )}
                 </div>
 
-                <div className={`rounded border px-3 py-2 text-sm ${getAssociationTone(result.association)}`}>
-                    Association status: {humanizeEnum(result.association.status)}
-                    {result.association.contact_name && (
-                        <div className="mt-1 text-xs text-current">
-                            Contact: {result.association.contact_name} (#{result.association.contact_id})
-                        </div>
-                    )}
-                    {result.association.representation_intent && (
-                        <div className="mt-1 text-xs text-current">
-                            Intent: {humanizeEnum(result.association.representation_intent)}
-                        </div>
-                    )}
-                </div>
+                {renderAssociationSummary(result.association)}
+                {renderAssociationDiagnostics(result.association)}
 
                 <div className="rounded border border-white/10 bg-white/5 p-3 space-y-2">
                     <div className="font-medium text-sm">Shortlist</div>
@@ -1376,6 +1371,161 @@ const ListingAlertRecommendationPanel = () => {
                         ))
                     )}
                 </div>
+            </div>
+        );
+    };
+
+    const renderAssociationSummary = (association: ListingAlertClientAssociationResponse) => (
+        <div className={`rounded border px-3 py-2 text-sm ${getAssociationTone(association)}`}>
+            Association status: {humanizeEnum(association.status)}
+            {association.blocked_reason && (
+                <div className="mt-1 text-xs text-amber-50">
+                    Blocked reason: {association.blocked_reason}
+                </div>
+            )}
+            {association.contact_name && (
+                <div className="mt-1 text-xs text-current">
+                    Matched contact: {association.contact_name} (#{association.contact_id})
+                </div>
+            )}
+            {association.representation_intent && (
+                <div className="mt-1 text-xs text-current">
+                    Representation intent: {humanizeEnum(association.representation_intent)}
+                </div>
+            )}
+            {association.status !== 'matched' && (
+                <div className="mt-2 grid gap-1 text-xs text-current md:grid-cols-3">
+                    <div>
+                        Match stage: {humanizeEnum(association.diagnostics?.match_stage ?? null)}
+                    </div>
+                    <div>
+                        Market type: {humanizeEnum(association.diagnostics?.market_type ?? null)}
+                    </div>
+                    <div>
+                        Operator override:{' '}
+                        {association.diagnostics?.operator_override ? 'Yes' : 'No'}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+
+    const renderAssociationDiagnostics = (
+        association: ListingAlertClientAssociationResponse,
+    ) => {
+        const candidateContacts = association.candidate_contacts ?? [];
+        const missingCriteria = association.missing_criteria ?? [];
+        const failedChecks = association.failed_checks ?? [];
+        const hasBlockedDiagnostics =
+            association.status !== 'matched' ||
+            candidateContacts.length > 0 ||
+            missingCriteria.length > 0 ||
+            failedChecks.length > 0;
+
+        if (!hasBlockedDiagnostics) {
+            return null;
+        }
+
+        return (
+            <div className="rounded border border-white/10 bg-white/5 p-3 space-y-3">
+                <div>
+                    <div className="font-medium text-sm">Association Diagnostics</div>
+                    <div className="text-xs text-gray-400">
+                        Use these signals to understand why association blocked and whether an Expected contact ID override is appropriate.
+                    </div>
+                </div>
+
+                <div className="grid gap-2 text-xs text-gray-200 md:grid-cols-3">
+                    <div>
+                        <div className="font-semibold text-gray-300">Match stage</div>
+                        <div>{humanizeEnum(association.diagnostics?.match_stage ?? null)}</div>
+                    </div>
+                    <div>
+                        <div className="font-semibold text-gray-300">Market type</div>
+                        <div>{humanizeEnum(association.diagnostics?.market_type ?? null)}</div>
+                    </div>
+                    <div>
+                        <div className="font-semibold text-gray-300">Operator override</div>
+                        <div>{association.diagnostics?.operator_override ? 'Yes' : 'No'}</div>
+                    </div>
+                </div>
+
+                {(missingCriteria.length > 0 || failedChecks.length > 0) && (
+                    <div className="grid gap-3 md:grid-cols-2">
+                        <div className="rounded border border-white/10 bg-black/10 p-3 text-xs">
+                            <div className="font-semibold text-gray-300">Missing criteria</div>
+                            <div className="mt-1 text-gray-200">
+                                {renderInlineList(missingCriteria)}
+                            </div>
+                        </div>
+                        <div className="rounded border border-white/10 bg-black/10 p-3 text-xs">
+                            <div className="font-semibold text-gray-300">Failed checks</div>
+                            <div className="mt-1 text-gray-200">
+                                {renderInlineList(failedChecks)}
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {candidateContacts.length > 0 && (
+                    <div className="space-y-2">
+                        <div className="font-semibold text-sm">Candidate Contacts</div>
+                        <div className="space-y-2">
+                            {candidateContacts.map((candidate) => (
+                                <div
+                                    key={`${candidate.stage}-${candidate.contact_id}`}
+                                    className="rounded border border-white/10 bg-black/10 p-3 text-xs text-gray-200 space-y-2"
+                                >
+                                    <div className="flex items-start justify-between gap-3">
+                                        <div>
+                                            <div className="font-medium text-sm text-white">
+                                                {candidate.contact_name || 'Unnamed contact'} (#{candidate.contact_id})
+                                            </div>
+                                            <div className="text-gray-400">
+                                                Stage: {humanizeEnum(candidate.stage)} · Score:{' '}
+                                                {typeof candidate.score === 'number'
+                                                    ? candidate.score.toFixed(2)
+                                                    : 'n/a'}
+                                                {' '}· Intent:{' '}
+                                                {humanizeEnum(candidate.representation_intent ?? null)}
+                                            </div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => applyExpectedContactOverride(candidate.contact_id)}
+                                            className="px-2 py-1 rounded border border-sky-500/30 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20"
+                                        >
+                                            Use #{candidate.contact_id}
+                                        </button>
+                                    </div>
+
+                                    <div>
+                                        <div className="font-semibold text-gray-300">Matched on</div>
+                                        <div>{renderInlineList(candidate.matched_on)}</div>
+                                    </div>
+
+                                    {(candidate.missing_criteria.length > 0 ||
+                                        candidate.failed_checks.length > 0) && (
+                                        <div className="grid gap-2 md:grid-cols-2">
+                                            <div>
+                                                <div className="font-semibold text-gray-300">
+                                                    Missing criteria
+                                                </div>
+                                                <div>{renderInlineList(candidate.missing_criteria)}</div>
+                                            </div>
+                                            <div>
+                                                <div className="font-semibold text-gray-300">
+                                                    Failed checks
+                                                </div>
+                                                <div>{renderInlineList(candidate.failed_checks)}</div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
             </div>
         );
     };
@@ -1582,8 +1732,11 @@ const ListingAlertRecommendationPanel = () => {
                                     value={gmailFetchForm.expectedContactId}
                                     onChange={(event) => updateGmailFetchField('expectedContactId', event.target.value)}
                                     className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
-                                    placeholder="Applied at import only"
+                                    placeholder="Recovery override for a known CRM contact"
                                 />
+                                <div className="text-xs text-gray-500">
+                                    Use this when association blocks and you already know the correct CRM buyer or renter contact. It is only applied when you import the selected message.
+                                </div>
                             </label>
                             <label className="space-y-1 text-sm md:col-span-2">
                                 <div className="text-gray-300">Operator notes</div>
@@ -1894,8 +2047,11 @@ const ListingAlertRecommendationPanel = () => {
                                     value={packetForm.expectedContactId}
                                     onChange={(event) => updatePacketField('expectedContactId', event.target.value)}
                                     className="w-full rounded border border-white/10 bg-black/20 px-3 py-2"
-                                    placeholder="Optional"
+                                    placeholder="Recovery override for a known CRM contact"
                                 />
+                                <div className="text-xs text-gray-500">
+                                    If association blocked earlier, set the correct CRM contact ID here and rerun packet prep manually.
+                                </div>
                             </label>
                             <label className="space-y-1 text-sm">
                                 <div className="text-gray-300">Message ID</div>
@@ -2072,9 +2228,13 @@ const ListingAlertRecommendationPanel = () => {
                                         {selectedReport.result.manual_review_packet ? (
                                             renderPacketDetails(selectedReport.result.manual_review_packet)
                                         ) : (
-                                            <div className="rounded border border-white/10 bg-white/5 p-3 text-sm text-gray-300">
-                                                This packet-prep run was stored without a manual review packet.
-                                                Blocked or ambiguous states are still preserved above.
+                                            <div className="space-y-3">
+                                                {renderAssociationSummary(selectedReport.result.association)}
+                                                {renderAssociationDiagnostics(selectedReport.result.association)}
+                                                <div className="rounded border border-white/10 bg-white/5 p-3 text-sm text-gray-300">
+                                                    This packet-prep run was stored without a manual review packet.
+                                                    Blocked or ambiguous states are still preserved above.
+                                                </div>
                                             </div>
                                         )}
                                     </div>
