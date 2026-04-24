@@ -17,12 +17,12 @@ INTERNAL_ONLY_OPERATOR_NOTE = (
     " approved for external use."
 )
 REVIEW_ONLY_OPERATOR_NOTE = (
-    "This layer is manual or simulated only in v1. It does not auto-send,"
-    " auto-contact, or autonomously publish outputs."
+    "This layer stays internal-only in v1. Scheduled watchlists may auto-run,"
+    " but the system does not auto-send, auto-contact, or autonomously publish outputs."
 )
 PROVIDER_ABSTRACTION_NOTE = (
-    "Provider modeling is contract-only in this step. Real retrieval, browser"
-    " automation, and scheduling are not enabled."
+    "Authenticated MLS browser remains contract-only in this step. Automatic"
+    " watchlists reuse the same constrained provider behavior available to manual runs."
 )
 SCOPE_CONSTRAINED_RISK_FLAG = "scan_scope_constrained_to_v1_limit"
 NO_PROVIDERS_AVAILABLE_RISK_FLAG = "no_providers_available"
@@ -972,6 +972,9 @@ def run_daily_market_scan_once(
     authenticated_mls_browser_auth_state: agent_schemas.DailyMarketScanProviderAuthState = "unauthenticated",
     authenticated_mls_browser_availability: agent_schemas.DailyMarketScanProviderAvailability = "limited",
     public_availability: agent_schemas.DailyMarketScanProviderAvailability = "available",
+    task_subject_type: str = "scan_request",
+    task_subject_id: int | None = None,
+    summary: str = "Daily Market Scan run (MVP)",
 ) -> models.AgentRun:
     payload_json = _safe_task_payload_json(request)
     try:
@@ -982,8 +985,8 @@ def run_daily_market_scan_once(
     task = service.create_task(
         db,
         agent_type="daily_market_scan",
-        subject_type="scan_request",
-        subject_id=None,
+        subject_type=task_subject_type,
+        subject_id=task_subject_id,
         payload=payload_json,
         priority=(
             _priority_from_run_mode(normalized_request.run_mode)
@@ -994,7 +997,7 @@ def run_daily_market_scan_once(
     run = service.create_run(
         db,
         task=task,
-        summary="Daily Market Scan run (MVP)",
+        summary=summary,
     )
 
     now = datetime.utcnow()

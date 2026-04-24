@@ -54,7 +54,6 @@ class AgentTask(AgentTaskBase):
     updated_at: datetime
 
     class Config:
-        orm_mode = True
         from_attributes = True
 
 
@@ -78,7 +77,6 @@ class AgentRun(AgentRunBase):
     finished_at: Optional[datetime] = None
 
     class Config:
-        orm_mode = True
         from_attributes = True
 
 
@@ -103,7 +101,6 @@ class AgentApproval(AgentApprovalBase):
     created_at: datetime
 
     class Config:
-        orm_mode = True
         from_attributes = True
 
 
@@ -124,7 +121,6 @@ class AgentAuditLog(AgentAuditLogBase):
     created_at: datetime
 
     class Config:
-        orm_mode = True
         from_attributes = True
 
 
@@ -549,6 +545,33 @@ class ListingAlertAutomaticBatchResult(BaseModel):
     outcomes: list[ListingAlertAutomaticMessageOutcomeSummary] = []
 
 
+ListingAlertFitStrength = Literal["strong", "moderate", "limited"]
+ListingAlertCriterionVerdict = Literal[
+    "match",
+    "exceeds",
+    "mismatch",
+    "over_budget",
+    "under_budget",
+    "unknown",
+]
+
+
+class ListingAlertFitCriterionComparison(BaseModel):
+    criterion: str
+    client: Optional[str] = None
+    listing: Optional[str] = None
+    verdict: ListingAlertCriterionVerdict = "unknown"
+
+
+class ListingAlertFitAnalysis(BaseModel):
+    listing_ref: str
+    fit_score: float
+    fit_strength: ListingAlertFitStrength = "limited"
+    why_it_fits: list[str] = []
+    tradeoffs: list[str] = []
+    criteria_comparison: list[ListingAlertFitCriterionComparison] = []
+
+
 class ListingAlertNormalizedListing(BaseModel):
     listing_ref: str
     address: str
@@ -561,6 +584,7 @@ class ListingAlertNormalizedListing(BaseModel):
     listing_url: Optional[str] = None
     source_excerpt: str
     match_notes: list[str] = []
+    fit_analysis: Optional[ListingAlertFitAnalysis] = None
 
 
 class ListingAlertCandidateContactDiagnostic(BaseModel):
@@ -590,6 +614,26 @@ class ListingAlertClientAssociationResponse(BaseModel):
     failed_checks: list[str] = []
 
 
+class ListingAlertAutoReviewShortlistItem(BaseModel):
+    listing_ref: str
+    rank: int
+    why_selected: list[str] = []
+
+
+class ListingAlertAutoReviewDraft(BaseModel):
+    variant: str = "shortlist_summary"
+    subject: str
+    body: str
+
+
+class ListingAlertAutoReviewResult(BaseModel):
+    shortlist: list[ListingAlertAutoReviewShortlistItem] = []
+    tradeoff_notes: list[str] = []
+    recommendation_reasoning: str = ""
+    client_facing_drafts: list[ListingAlertAutoReviewDraft] = []
+    operator_notes: list[str] = []
+
+
 class ListingAlertManualReviewPacket(BaseModel):
     packet_version: str = "listing_alert_manual_review_v1"
     workflow_mode: Literal["manual"] = "manual"
@@ -605,6 +649,7 @@ class ListingAlertManualReviewPacket(BaseModel):
     draft_constraints: list[str] = []
     recommended_prompt_context: list[str] = []
     return_contract: dict[str, Any] = Field(default_factory=dict)
+    auto_review: Optional[ListingAlertAutoReviewResult] = None
 
 
 class ListingAlertManualPacketResultResponse(BaseModel):
@@ -635,6 +680,17 @@ class ListingAlertManualReviewSubmissionRequest(BaseModel):
     recommendation_reasoning: str
     client_facing_drafts: list[ListingAlertClientDraftSubmissionItem] = []
     operator_notes: list[str] = []
+
+
+class ListingAlertReviseReviewRequest(BaseModel):
+    source_approval_id: int
+    revision_instructions: str
+    override_shortlist: Optional[list[ListingAlertReviewedShortlistSubmissionItem]] = None
+    override_tradeoff_notes: Optional[list[str]] = None
+    override_recommendation_reasoning: Optional[str] = None
+    override_draft_subject: Optional[str] = None
+    override_draft_body: Optional[str] = None
+    override_operator_notes: Optional[list[str]] = None
 
 
 class ListingAlertReviewedShortlistResultItem(BaseModel):
@@ -785,7 +841,11 @@ DailyMarketScanMode = Literal[
     "competitor_watch",
     "full_daily_scan",
 ]
-DailyMarketScanRunMode = Literal["manual_preview", "simulated_preview"]
+DailyMarketScanRunMode = Literal[
+    "manual_preview",
+    "simulated_preview",
+    "scheduled_monitor",
+]
 DailyMarketScanSourcePreference = Literal[
     "auto",
     "authenticated_mls_browser_first",
@@ -964,6 +1024,45 @@ class DailyMarketScanLatestResponse(BaseModel):
     status: Optional[RunStatus] = None
     error: Optional[str] = None
     result: Optional[DailyMarketScanResultResponse] = None
+
+
+class DailyMarketScanWatchlistUpsertRequest(BaseModel):
+    name: str
+    enabled: bool = True
+    schedule_interval_minutes: int = 60
+    run_request: DailyMarketScanRunRequest
+    operator_notes: list[str] = []
+
+
+class DailyMarketScanWatchlist(BaseModel):
+    id: int
+    name: str
+    enabled: bool
+    schedule_interval_minutes: int
+    run_request: DailyMarketScanRunRequest
+    operator_notes: list[str] = []
+    next_run_at: Optional[datetime] = None
+    last_run_id: Optional[int] = None
+    last_run_status: Optional[RunStatus] = None
+    last_run_error: Optional[str] = None
+    last_run_started_at: Optional[datetime] = None
+    last_run_finished_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DailyMarketScanWatchlistSchedulerStatusResponse(BaseModel):
+    scheduler_key: str
+    poll_interval_seconds: int
+    enabled_watchlist_count: int = 0
+    due_watchlist_count: int = 0
+    next_due_at: Optional[datetime] = None
+    last_sweep_started_at: Optional[datetime] = None
+    last_sweep_finished_at: Optional[datetime] = None
+    last_status: str = "idle"
+    last_error: Optional[str] = None
+    last_due_count: int = 0
+    last_triggered_count: int = 0
 
 
 StrategyCoordinationSourceType = Literal["external", "internal"]

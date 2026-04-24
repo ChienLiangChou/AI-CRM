@@ -414,7 +414,7 @@ class DailyMarketScanContractTests(unittest.TestCase):
             result.operator_notes,
         )
         self.assertIn(
-            "This layer is manual or simulated only in v1. It does not auto-send, auto-contact, or autonomously publish outputs.",
+            "This layer stays internal-only in v1. Scheduled watchlists may auto-run, but the system does not auto-send, auto-contact, or autonomously publish outputs.",
             result.operator_notes,
         )
         self.assertIn(daily_market_scan.SCOPE_CONSTRAINED_RISK_FLAG, result.risk_flags)

@@ -126,14 +126,17 @@ class ListingAlertRecommendationGmailOAuthTests(unittest.TestCase):
         self.assertEqual(payload["connection_key"], "listing_alert_primary")
         self.assertEqual(
             payload["requested_scopes"],
-            [gmail_oauth.LISTING_ALERT_GMAIL_READ_SCOPE],
+            list(gmail_oauth.LISTING_ALERT_GMAIL_REQUESTED_SCOPES),
         )
 
         parsed = urlparse(payload["authorization_url"])
         params = parse_qs(parsed.query)
         self.assertEqual(params["client_id"], ["gmail-client-id"])
         self.assertEqual(params["redirect_uri"], [os.environ["GMAIL_OAUTH_REDIRECT_URI"]])
-        self.assertEqual(params["scope"], [gmail_oauth.LISTING_ALERT_GMAIL_READ_SCOPE])
+        self.assertEqual(
+            params["scope"],
+            [" ".join(gmail_oauth.LISTING_ALERT_GMAIL_REQUESTED_SCOPES)],
+        )
         self.assertEqual(params["access_type"], ["offline"])
         self.assertEqual(params["prompt"], ["consent"])
 

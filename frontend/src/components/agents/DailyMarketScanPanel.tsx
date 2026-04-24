@@ -9,6 +9,8 @@ import type {
     DailyMarketScanResultResponse,
     DailyMarketScanRunRequest,
     DailyMarketScanSourceAttempt,
+    DailyMarketScanWatchlist,
+    DailyMarketScanWatchlistSchedulerStatusResponse,
 } from '../../services/agents';
 
 const EMPTY_LATEST: DailyMarketScanLatestResponse = {
@@ -16,6 +18,20 @@ const EMPTY_LATEST: DailyMarketScanLatestResponse = {
     status: null,
     error: null,
     result: null,
+};
+
+const EMPTY_SCHEDULER_STATUS: DailyMarketScanWatchlistSchedulerStatusResponse = {
+    scheduler_key: 'daily_market_scan_watchlist_scheduler',
+    poll_interval_seconds: 300,
+    enabled_watchlist_count: 0,
+    due_watchlist_count: 0,
+    next_due_at: null,
+    last_sweep_started_at: null,
+    last_sweep_finished_at: null,
+    last_status: 'idle',
+    last_error: null,
+    last_due_count: 0,
+    last_triggered_count: 0,
 };
 
 type OutputLanguagePreference = 'english' | 'traditional_chinese' | 'both';
@@ -78,6 +94,27 @@ const parseListingLines = (value: string) => {
         })
         .filter(Boolean) as DailyMarketScanRunRequest['listing_refs'];
 };
+
+const serializeCsvIds = (values: number[]) => values.join(', ');
+
+const serializeListingLines = (
+    values: DailyMarketScanRunRequest['listing_refs'],
+) =>
+    values
+        .map((item) => {
+            const segments = [item.listing_ref];
+            if (typeof item.property_id === 'number') {
+                segments.push(String(item.property_id));
+            }
+            if (item.label) {
+                if (segments.length === 1) {
+                    segments.push('');
+                }
+                segments.push(item.label);
+            }
+            return segments.join(' | ');
+        })
+        .join('\n');
 
 const readSessionValue = <T,>(key: string, fallback: T) => {
     if (typeof window === 'undefined') {
@@ -201,6 +238,7 @@ const formatAvailabilityValue = (
         public_only: ['Public Only', '僅公開來源'],
         queued: ['Queued', '已排隊'],
         running: ['Running', '執行中'],
+        scheduled_monitor: ['Scheduled Monitor', '排程監控'],
         simulated_preview: ['Simulated Preview', '模擬預覽'],
         summary_only: ['Summary Only', '僅摘要'],
         unauthenticated: ['Unauthenticated', '未驗證'],
@@ -630,21 +668,69 @@ const DailyMarketScanPanel = () => {
 
     const [runs, setRuns] = useState<AgentRun[]>([]);
     const [latest, setLatest] = useState<DailyMarketScanLatestResponse>(EMPTY_LATEST);
+    const [watchlists, setWatchlists] = useState<DailyMarketScanWatchlist[]>([]);
+    const [schedulerStatus, setSchedulerStatus] = useState<DailyMarketScanWatchlistSchedulerStatusResponse>(
+        EMPTY_SCHEDULER_STATUS,
+    );
     const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
     const [selectedReport, setSelectedReport] = useState<DailyMarketScanResultResponse | null>(null);
     const [auditLogs, setAuditLogs] = useState<AgentAuditLog[]>([]);
+    const [watchlistName, setWatchlistName] = useState('');
+    const [watchlistIntervalMinutes, setWatchlistIntervalMinutes] = useState('60');
+    const [watchlistEnabled, setWatchlistEnabled] = useState(true);
+    const [watchlistOperatorNotes, setWatchlistOperatorNotes] = useState('');
+    const [editingWatchlistId, setEditingWatchlistId] = useState<number | null>(null);
 
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [triggering, setTriggering] = useState(false);
     const [reportLoading, setReportLoading] = useState(false);
     const [auditLoading, setAuditLoading] = useState(false);
+    const [watchlistActionLoading, setWatchlistActionLoading] = useState(false);
 
     const [error, setError] = useState<string | null>(null);
     const [reportError, setReportError] = useState<string | null>(null);
     const [auditError, setAuditError] = useState<string | null>(null);
+    const [watchlistError, setWatchlistError] = useState<string | null>(null);
 
     const isBusy = loading || refreshing;
+
+    const buildCurrentRunRequest = (): DailyMarketScanRunRequest => ({
+        scan_mode: scanMode,
+        run_mode: 'scheduled_monitor',
+        source_preference: sourcePreference,
+        contact_ids: parseCsvIds(contactIds),
+        property_ids: parseCsvIds(propertyIds),
+        listing_refs: parseListingLines(listingRefs),
+        max_subjects: maxSubjects.trim() ? Number(maxSubjects) : undefined,
+    });
+
+    const resetWatchlistForm = () => {
+        setEditingWatchlistId(null);
+        setWatchlistName('');
+        setWatchlistIntervalMinutes('60');
+        setWatchlistEnabled(true);
+        setWatchlistOperatorNotes('');
+    };
+
+    const loadFormFromWatchlist = (watchlist: DailyMarketScanWatchlist) => {
+        setEditingWatchlistId(watchlist.id);
+        setWatchlistName(watchlist.name);
+        setWatchlistIntervalMinutes(String(watchlist.schedule_interval_minutes));
+        setWatchlistEnabled(watchlist.enabled);
+        setWatchlistOperatorNotes(watchlist.operator_notes.join('\n'));
+        setScanMode(watchlist.run_request.scan_mode || 'full_daily_scan');
+        setRunMode(
+            watchlist.run_request.run_mode === 'simulated_preview'
+                ? 'simulated_preview'
+                : 'manual_preview',
+        );
+        setSourcePreference(watchlist.run_request.source_preference || 'auto');
+        setContactIds(serializeCsvIds(watchlist.run_request.contact_ids));
+        setPropertyIds(serializeCsvIds(watchlist.run_request.property_ids));
+        setListingRefs(serializeListingLines(watchlist.run_request.listing_refs));
+        setMaxSubjects(String(watchlist.run_request.max_subjects || 25));
+    };
 
     const loadSelectedRunData = async (runId: number) => {
         setReportLoading(true);
@@ -696,12 +782,16 @@ const DailyMarketScanPanel = () => {
         setError(null);
 
         try {
-            const [runsData, latestData] = await Promise.all([
+            const [runsData, latestData, watchlistsData, schedulerStatusData] = await Promise.all([
                 agentsService.getDailyMarketScanRuns(),
                 agentsService.getLatestDailyMarketScanResult(),
+                agentsService.getDailyMarketScanWatchlists(),
+                agentsService.getDailyMarketScanWatchlistSchedulerStatus(),
             ]);
             setRuns(runsData);
             setLatest(latestData);
+            setWatchlists(watchlistsData);
+            setSchedulerStatus(schedulerStatusData);
 
             const preferredRunId = runsData.some((run) => run.id === selectedRunId)
                 ? selectedRunId
@@ -782,6 +872,98 @@ const DailyMarketScanPanel = () => {
         }
     };
 
+    const handleSaveWatchlist = async () => {
+        const normalizedName = watchlistName.trim();
+        if (!normalizedName) {
+            setWatchlistError('Watchlist name is required.');
+            return;
+        }
+
+        const interval = Number(watchlistIntervalMinutes.trim() || '60');
+        if (!Number.isFinite(interval) || interval <= 0) {
+            setWatchlistError('Schedule interval must be a positive number of minutes.');
+            return;
+        }
+
+        setWatchlistActionLoading(true);
+        setWatchlistError(null);
+
+        try {
+            const payload = {
+                name: normalizedName,
+                enabled: watchlistEnabled,
+                schedule_interval_minutes: Math.trunc(interval),
+                run_request: buildCurrentRunRequest(),
+                operator_notes: watchlistOperatorNotes
+                    .split('\n')
+                    .map((item) => item.trim())
+                    .filter(Boolean),
+            };
+
+            if (editingWatchlistId === null) {
+                await agentsService.createDailyMarketScanWatchlist(payload);
+            } else {
+                await agentsService.updateDailyMarketScanWatchlist(editingWatchlistId, payload);
+            }
+
+            resetWatchlistForm();
+            await loadData('refresh');
+        } catch (watchlistActionError) {
+            setWatchlistError(
+                getApiErrorMessage(
+                    watchlistActionError,
+                    'Failed to save Daily Market Scan watchlist.',
+                ),
+            );
+        } finally {
+            setWatchlistActionLoading(false);
+        }
+    };
+
+    const handleDeleteWatchlist = async (watchlistId: number) => {
+        setWatchlistActionLoading(true);
+        setWatchlistError(null);
+        try {
+            await agentsService.deleteDailyMarketScanWatchlist(watchlistId);
+            if (editingWatchlistId === watchlistId) {
+                resetWatchlistForm();
+            }
+            await loadData('refresh');
+        } catch (watchlistActionError) {
+            setWatchlistError(
+                getApiErrorMessage(
+                    watchlistActionError,
+                    'Failed to delete Daily Market Scan watchlist.',
+                ),
+            );
+        } finally {
+            setWatchlistActionLoading(false);
+        }
+    };
+
+    const handleRunWatchlistNow = async (watchlistId: number) => {
+        setWatchlistActionLoading(true);
+        setWatchlistError(null);
+        try {
+            const run = await agentsService.triggerDailyMarketScanWatchlistRunNow(watchlistId);
+            setRunLanguagePreferences((current) => ({
+                ...current,
+                [run.id]: outputLanguagePreference,
+            }));
+            setSelectedRunId(run.id);
+            await loadData('refresh');
+        } catch (watchlistActionError) {
+            setWatchlistError(
+                getApiErrorMessage(
+                    watchlistActionError,
+                    'Failed to trigger Daily Market Scan watchlist.',
+                ),
+            );
+        } finally {
+            setWatchlistActionLoading(false);
+        }
+    };
+
     const selectedRun = runs.find((run) => run.id === selectedRunId) ?? null;
     const getRunLanguagePreference = (runId?: number | null): OutputLanguagePreference => {
         if (!runId) {
@@ -802,15 +984,15 @@ const DailyMarketScanPanel = () => {
                     <div className="text-sm text-gray-300">
                         {localizeText(
                             outputLanguagePreference,
-                            'Internal-only market scan workspace. Manual or simulated only. No auto-send. No hidden automation.',
-                            '僅供內部使用的市場掃描工作區。僅限手動或模擬模式。不自動發送。沒有隱藏自動化。',
+                            'Internal-only market scan workspace. Manual runs and scheduled watchlists are supported. No auto-send and no auto-contact.',
+                            '僅供內部使用的市場掃描工作區。支援手動執行與排程 watchlist。不自動發送，也不自動聯絡客戶。',
                         )}
                     </div>
                     <div className="text-xs text-gray-400">
                         {localizeText(
                             outputLanguagePreference,
-                            'This panel does not perform real provider retrieval, browser automation, CRM writeback, or TRREB integration yet.',
-                            '此面板目前不執行真實提供者擷取、瀏覽器自動化、CRM 回寫或 TRREB 整合。',
+                            'Scheduled watchlists reuse the same constrained provider behavior as manual runs. Authenticated MLS browser, CRM writeback, and TRREB integration remain out of scope.',
+                            '排程 watchlist 會重用與手動執行相同的受限 provider 行為。已驗證 MLS 瀏覽器、CRM 回寫與 TRREB 整合仍未納入。',
                         )}
                     </div>
                     <div className="text-xs text-amber-200">
@@ -837,6 +1019,196 @@ const DailyMarketScanPanel = () => {
                     {error}
                 </div>
             )}
+
+            <div className="border rounded p-3 bg-white/5 space-y-3">
+                <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                    <div>
+                        <div className="text-sm font-medium">
+                            {localizeText(outputLanguagePreference, 'Watchlists & Scheduler', 'Watchlist 與排程器')}
+                        </div>
+                        <div className="text-xs text-gray-400">
+                            {localizeText(
+                                outputLanguagePreference,
+                                'Save the current scan scope as a persisted watchlist. The background worker will trigger due watchlists automatically and still stay internal-only.',
+                                '把目前掃描範圍儲存成持久化 watchlist。背景 worker 會自動觸發到期 watchlist，但仍維持僅供內部使用。',
+                            )}
+                        </div>
+                    </div>
+                    <div className="text-xs text-gray-300">
+                        {localizeText(outputLanguagePreference, 'Poll cadence', '輪詢週期')}:{' '}
+                        {schedulerStatus.poll_interval_seconds}s
+                    </div>
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-3">
+                    <div className="rounded border border-white/10 bg-black/10 p-3 text-sm">
+                        <div className="text-gray-400">{localizeText(outputLanguagePreference, 'Enabled watchlists', '啟用中的 watchlist')}</div>
+                        <div className="mt-1 text-lg font-medium text-white">{schedulerStatus.enabled_watchlist_count}</div>
+                    </div>
+                    <div className="rounded border border-white/10 bg-black/10 p-3 text-sm">
+                        <div className="text-gray-400">{localizeText(outputLanguagePreference, 'Due now', '目前到期')}</div>
+                        <div className="mt-1 text-lg font-medium text-white">{schedulerStatus.due_watchlist_count}</div>
+                        <div className="mt-1 text-xs text-gray-500">
+                            {localizeText(outputLanguagePreference, 'Next due', '下一次到期')}: {formatTimestamp(schedulerStatus.next_due_at)}
+                        </div>
+                    </div>
+                    <div className="rounded border border-white/10 bg-black/10 p-3 text-sm">
+                        <div className="text-gray-400">{localizeText(outputLanguagePreference, 'Last sweep', '最近一次掃描')}</div>
+                        <div className="mt-1 text-sm font-medium text-white">
+                            {formatAvailabilityValue(outputLanguagePreference, schedulerStatus.last_status)}
+                        </div>
+                        <div className="mt-1 text-xs text-gray-500">
+                            {formatTimestamp(schedulerStatus.last_sweep_finished_at)}
+                        </div>
+                        <div className="mt-1 text-xs text-gray-500">
+                            {localizeText(outputLanguagePreference, 'Triggered', '觸發數')}: {schedulerStatus.last_triggered_count}
+                        </div>
+                    </div>
+                </div>
+
+                {schedulerStatus.last_error && (
+                    <div className="rounded border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
+                        {localizeText(outputLanguagePreference, 'Scheduler error', '排程器錯誤')}: {schedulerStatus.last_error}
+                    </div>
+                )}
+
+                {watchlistError && (
+                    <div className="rounded border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
+                        {watchlistError}
+                    </div>
+                )}
+
+                <div className="grid gap-3 md:grid-cols-[1fr_180px_140px]">
+                    <label className="space-y-1 text-sm">
+                        <div className="text-gray-300">{localizeText(outputLanguagePreference, 'Watchlist name', 'Watchlist 名稱')}</div>
+                        <input
+                            value={watchlistName}
+                            onChange={(event) => setWatchlistName(event.target.value)}
+                            className="w-full rounded border border-white/10 bg-black/20 px-3 py-2 text-white outline-none focus:border-cyan-400"
+                            placeholder={localizeText(outputLanguagePreference, 'Use current scan scope', '使用目前掃描範圍')}
+                        />
+                    </label>
+
+                    <label className="space-y-1 text-sm">
+                        <div className="text-gray-300">{localizeText(outputLanguagePreference, 'Interval (minutes)', '間隔（分鐘）')}</div>
+                        <input
+                            value={watchlistIntervalMinutes}
+                            onChange={(event) => setWatchlistIntervalMinutes(event.target.value)}
+                            className="w-full rounded border border-white/10 bg-black/20 px-3 py-2 text-white outline-none focus:border-cyan-400"
+                            inputMode="numeric"
+                            placeholder="60"
+                        />
+                    </label>
+
+                    <label className="flex items-end gap-2 text-sm text-gray-300">
+                        <input
+                            type="checkbox"
+                            checked={watchlistEnabled}
+                            onChange={(event) => setWatchlistEnabled(event.target.checked)}
+                            className="rounded border border-white/10 bg-black/20"
+                        />
+                        <span>{localizeText(outputLanguagePreference, 'Enabled', '啟用')}</span>
+                    </label>
+                </div>
+
+                <label className="space-y-1 text-sm">
+                    <div className="text-gray-300">{localizeText(outputLanguagePreference, 'Operator notes', '操作員備註')}</div>
+                    <textarea
+                        value={watchlistOperatorNotes}
+                        onChange={(event) => setWatchlistOperatorNotes(event.target.value)}
+                        rows={3}
+                        className="w-full rounded border border-white/10 bg-black/20 px-3 py-2 text-white outline-none focus:border-cyan-400"
+                        placeholder={localizeText(
+                            outputLanguagePreference,
+                            'One note per line. Scope comes from the current scan form below.',
+                            '每行一則備註。範圍會直接使用下方目前的掃描表單。',
+                        )}
+                    />
+                </label>
+
+                <div className="flex flex-wrap gap-2">
+                    <button
+                        onClick={() => void handleSaveWatchlist()}
+                        className="px-3 py-2 text-sm rounded bg-cyan-500 text-slate-950 font-medium hover:bg-cyan-400 disabled:opacity-60"
+                        disabled={watchlistActionLoading || triggering || isBusy}
+                    >
+                        {watchlistActionLoading
+                            ? localizeText(outputLanguagePreference, 'Saving...', '儲存中...')
+                            : editingWatchlistId === null
+                              ? localizeText(outputLanguagePreference, 'Save Current Scope as Watchlist', '將目前範圍儲存成 watchlist')
+                              : localizeText(outputLanguagePreference, 'Update Watchlist', '更新 watchlist')}
+                    </button>
+                    {editingWatchlistId !== null && (
+                        <button
+                            onClick={resetWatchlistForm}
+                            className="px-3 py-2 text-sm rounded border border-white/10 bg-white/5 text-white hover:bg-white/10"
+                            disabled={watchlistActionLoading}
+                        >
+                            {localizeText(outputLanguagePreference, 'Cancel Edit', '取消編輯')}
+                        </button>
+                    )}
+                </div>
+
+                {watchlists.length === 0 ? (
+                    <div className="text-sm text-gray-500">
+                        {localizeText(outputLanguagePreference, 'No persisted watchlists yet.', '目前還沒有已儲存的 watchlist。')}
+                    </div>
+                ) : (
+                    <div className="space-y-2">
+                        {watchlists.map((watchlist) => (
+                            <div key={watchlist.id} className="rounded border border-white/10 bg-black/10 p-3 space-y-2">
+                                <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                                    <div>
+                                        <div className="font-medium text-white">{watchlist.name}</div>
+                                        <div className="text-xs text-gray-400">
+                                            {localizeText(outputLanguagePreference, 'Mode', '模式')}: {formatAvailabilityValue(outputLanguagePreference, watchlist.run_request.scan_mode)} ·{' '}
+                                            {localizeText(outputLanguagePreference, 'Source', '來源')}: {formatAvailabilityValue(outputLanguagePreference, watchlist.run_request.source_preference)} ·{' '}
+                                            {localizeText(outputLanguagePreference, 'Interval', '間隔')}: {watchlist.schedule_interval_minutes}m
+                                        </div>
+                                        <div className="text-xs text-gray-500">
+                                            {localizeText(outputLanguagePreference, 'Next run', '下一次執行')}: {formatTimestamp(watchlist.next_run_at)} ·{' '}
+                                            {localizeText(outputLanguagePreference, 'Last status', '最近狀態')}: {watchlist.last_run_status ? formatAvailabilityValue(outputLanguagePreference, watchlist.last_run_status) : localizeText(outputLanguagePreference, 'n/a', '未提供')}
+                                        </div>
+                                    </div>
+                                    <div className="flex flex-wrap gap-2">
+                                        <button
+                                            onClick={() => loadFormFromWatchlist(watchlist)}
+                                            className="px-2 py-1 text-xs rounded border border-white/10 bg-white/5 text-white hover:bg-white/10"
+                                            disabled={watchlistActionLoading}
+                                        >
+                                            {localizeText(outputLanguagePreference, 'Edit', '編輯')}
+                                        </button>
+                                        <button
+                                            onClick={() => void handleRunWatchlistNow(watchlist.id)}
+                                            className="px-2 py-1 text-xs rounded border border-cyan-500/40 bg-cyan-500/10 text-cyan-100 hover:bg-cyan-500/20"
+                                            disabled={watchlistActionLoading || triggering}
+                                        >
+                                            {localizeText(outputLanguagePreference, 'Run Now', '立即執行')}
+                                        </button>
+                                        <button
+                                            onClick={() => void handleDeleteWatchlist(watchlist.id)}
+                                            className="px-2 py-1 text-xs rounded border border-rose-500/30 bg-rose-500/10 text-rose-100 hover:bg-rose-500/20"
+                                            disabled={watchlistActionLoading}
+                                        >
+                                            {localizeText(outputLanguagePreference, 'Delete', '刪除')}
+                                        </button>
+                                    </div>
+                                </div>
+                                {watchlist.operator_notes.length > 0 && (
+                                    <div className="text-xs text-gray-300">
+                                        {watchlist.operator_notes.join(' | ')}
+                                    </div>
+                                )}
+                                {watchlist.last_run_error && (
+                                    <div className="text-xs text-rose-200">
+                                        {localizeText(outputLanguagePreference, 'Last error', '最近錯誤')}: {watchlist.last_run_error}
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
 
             <div className="border rounded p-3 bg-white/5 space-y-3">
                 <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">

@@ -28,7 +28,6 @@ class Interaction(InteractionBase):
     generated_response_status: Optional[str] = None
 
     class Config:
-        orm_mode = True
         from_attributes = True
 
 # Contact Schemas
@@ -72,7 +71,6 @@ class Contact(ContactBase):
     interactions: List[Interaction] = []
 
     class Config:
-        orm_mode = True
         from_attributes = True
 
 # Property Schemas
@@ -116,7 +114,6 @@ class Property(PropertyBase):
     updated_at: datetime
 
     class Config:
-        orm_mode = True
         from_attributes = True
 
 # Pipeline Stage Schemas
@@ -132,7 +129,6 @@ class PipelineStage(PipelineStageBase):
     contacts: List[Contact] = []
 
     class Config:
-        orm_mode = True
         from_attributes = True
 
 # Search Result Schema

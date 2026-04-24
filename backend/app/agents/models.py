@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from ..database import Base
@@ -168,3 +168,45 @@ class ListingAlertGmailOAuthState(Base):
     expires_at = Column(DateTime, index=True)
     used_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class DailyMarketScanWatchlist(Base):
+    """Persisted watchlist configuration for scheduled Daily Market Scan runs."""
+
+    __tablename__ = "daily_market_scan_watchlists"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    enabled = Column(Boolean, default=True, index=True)
+    schedule_interval_minutes = Column(Integer, default=60)
+    request_payload = Column(Text, nullable=False)
+    operator_notes = Column(Text, nullable=True)
+    next_run_at = Column(DateTime, nullable=True, index=True)
+    last_run_id = Column(Integer, ForeignKey("agent_runs.id"), nullable=True)
+    last_run_status = Column(String, nullable=True, index=True)
+    last_run_error = Column(Text, nullable=True)
+    last_run_started_at = Column(DateTime, nullable=True)
+    last_run_finished_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class DailyMarketScanWatchlistSchedulerState(Base):
+    """Singleton-style persisted heartbeat for the watchlist scheduler loop."""
+
+    __tablename__ = "daily_market_scan_watchlist_scheduler_states"
+
+    id = Column(Integer, primary_key=True, index=True)
+    scheduler_key = Column(String, unique=True, index=True)
+    last_sweep_started_at = Column(DateTime, nullable=True)
+    last_sweep_finished_at = Column(DateTime, nullable=True)
+    last_status = Column(String, default="idle")
+    last_error = Column(Text, nullable=True)
+    last_due_count = Column(Integer, default=0)
+    last_triggered_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )

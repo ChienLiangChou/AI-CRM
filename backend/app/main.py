@@ -12,6 +12,7 @@ from . import crud, models, schemas
 from .database import engine, get_db, SessionLocal
 from .agents import router as agents_router
 from .agents import models as agent_models
+from .agents import daily_market_scan_watchlists
 
 logger = logging.getLogger(__name__)
 
@@ -42,15 +43,30 @@ async def _nudge_loop():
 
 async def _agent_worker_loop():
     """
-    Background task placeholder for agent processing.
+    Conservative background worker for scheduled agent housekeeping.
 
-    In this MVP phase, the worker is intentionally conservative and does not
-    perform any external side effects. It can be extended in later phases
-    to manage queued/failed agent runs if needed.
+    The current production use is Daily Market Scan watchlist scheduling. Runs
+    remain internal-only and do not auto-send or auto-contact.
     """
     while True:
-        # Sleep for a while; future phases can add lightweight maintenance here.
-        await asyncio.sleep(300)
+        db = None
+        try:
+            db = SessionLocal()
+            result = daily_market_scan_watchlists.run_due_watchlists_once(db)
+            if result["triggered_count"]:
+                logger.info(
+                    "Triggered %s Daily Market Scan watchlist run(s): %s",
+                    result["triggered_count"],
+                    result["triggered_watchlist_ids"],
+                )
+        except Exception as e:
+            logger.error(f"Agent worker loop error: {e}")
+        finally:
+            if db is not None:
+                db.close()
+        await asyncio.sleep(
+            daily_market_scan_watchlists.WATCHLIST_SCHEDULER_POLL_INTERVAL_SECONDS
+        )
 
 
 @asynccontextmanager

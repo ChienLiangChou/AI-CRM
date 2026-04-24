@@ -7,10 +7,12 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from .. import models as crm_models
 from . import (
     buyer_match,
     conversation_closer,
     daily_market_scan,
+    daily_market_scan_watchlists,
     event_strategy_review,
     gmail_oauth,
     listing_alert_recommendation,
@@ -40,6 +42,28 @@ def _listing_alert_recommendation_http_error_from_value_error(
 ) -> HTTPException:
     if str(error) == "source_packet_run_not_found":
         return HTTPException(status_code=404, detail="Source run not found")
+    if str(error) == "revision_source_approval_not_found":
+        return HTTPException(status_code=404, detail="Approval not found")
+    if str(error) == "revision_source_approval_not_rejected":
+        return HTTPException(
+            status_code=409,
+            detail="Approval is not in rejected state; cannot revise",
+        )
+    if str(error) in {
+        "revision_source_run_missing",
+        "revision_source_run_wrong_agent",
+        "previous_review_result_missing",
+        "previous_review_result_invalid",
+    }:
+        return HTTPException(
+            status_code=409,
+            detail="Rejected review run cannot be revised",
+        )
+    if str(error) == "revision_instructions_missing":
+        return HTTPException(
+            status_code=400,
+            detail="revision_instructions is required",
+        )
     if str(error) == "gmail_api_http_error_401":
         return HTTPException(status_code=401, detail="Gmail access token rejected")
     if str(error) == "gmail_api_http_error_403":
@@ -113,6 +137,15 @@ def _listing_alert_gmail_oauth_http_error_from_value_error(
             status_code=409,
             detail="Stored Gmail refresh token is invalid; reconnect required",
         )
+    return _bad_request_from_value_error(error)
+
+
+def _daily_market_scan_watchlist_http_error_from_value_error(
+    error: ValueError,
+) -> HTTPException:
+    error_code = str(error)
+    if error_code == "daily_market_scan_watchlist_not_found":
+        return HTTPException(status_code=404, detail="Watchlist not found")
     return _bad_request_from_value_error(error)
 
 
@@ -768,6 +801,101 @@ def list_daily_market_scan_run_audit_logs(
 
 
 @router.get(
+    "/daily-market-scan/watchlists",
+    response_model=List[agent_schemas.DailyMarketScanWatchlist],
+    summary="List persisted Daily Market Scan watchlists.",
+)
+def list_daily_market_scan_watchlists(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    return daily_market_scan_watchlists.list_watchlists(db, limit=limit)
+
+
+@router.post(
+    "/daily-market-scan/watchlists",
+    response_model=agent_schemas.DailyMarketScanWatchlist,
+    summary="Create a persisted Daily Market Scan watchlist.",
+)
+def create_daily_market_scan_watchlist(
+    request: agent_schemas.DailyMarketScanWatchlistUpsertRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        return daily_market_scan_watchlists.create_watchlist(db, request)
+    except (TypeError, ValueError) as error:
+        raise _daily_market_scan_watchlist_http_error_from_value_error(
+            ValueError(str(error))
+        ) from error
+
+
+@router.put(
+    "/daily-market-scan/watchlists/{watchlist_id}",
+    response_model=agent_schemas.DailyMarketScanWatchlist,
+    summary="Update a persisted Daily Market Scan watchlist.",
+)
+def update_daily_market_scan_watchlist(
+    watchlist_id: int,
+    request: agent_schemas.DailyMarketScanWatchlistUpsertRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        return daily_market_scan_watchlists.update_watchlist(
+            db,
+            watchlist_id,
+            request,
+        )
+    except (TypeError, ValueError) as error:
+        raise _daily_market_scan_watchlist_http_error_from_value_error(
+            ValueError(str(error))
+        ) from error
+
+
+@router.delete(
+    "/daily-market-scan/watchlists/{watchlist_id}",
+    status_code=204,
+    summary="Delete a persisted Daily Market Scan watchlist.",
+)
+def delete_daily_market_scan_watchlist(
+    watchlist_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        daily_market_scan_watchlists.delete_watchlist(db, watchlist_id)
+    except ValueError as error:
+        raise _daily_market_scan_watchlist_http_error_from_value_error(error) from error
+
+
+@router.post(
+    "/daily-market-scan/watchlists/{watchlist_id}/run-now",
+    response_model=agent_schemas.AgentRun,
+    summary="Trigger one Daily Market Scan run from a persisted watchlist.",
+)
+def trigger_daily_market_scan_watchlist_run_now(
+    watchlist_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return daily_market_scan_watchlists.trigger_watchlist_run_now(
+            db,
+            watchlist_id,
+        )
+    except ValueError as error:
+        raise _daily_market_scan_watchlist_http_error_from_value_error(error) from error
+
+
+@router.get(
+    "/daily-market-scan/watchlists/scheduler-status",
+    response_model=agent_schemas.DailyMarketScanWatchlistSchedulerStatusResponse,
+    summary="Get persisted status for the Daily Market Scan watchlist scheduler.",
+)
+def get_daily_market_scan_watchlist_scheduler_status(
+    db: Session = Depends(get_db),
+):
+    return daily_market_scan_watchlists.get_scheduler_status(db)
+
+
+@router.get(
     "/follow-up/recommendations",
     response_model=agent_schemas.FollowUpRecommendationsResponse,
     summary="Get latest Follow-up Agent recommendations.",
@@ -1145,6 +1273,27 @@ def submit_listing_alert_manual_review(
             )
         )
         return listing_alert_recommendation.submit_listing_alert_manual_review(
+            db,
+            normalized_request,
+        )
+    except ValueError as error:
+        raise _listing_alert_recommendation_http_error_from_value_error(error) from error
+
+
+@router.post(
+    "/listing-alert-recommendation/revise-review",
+    response_model=agent_schemas.AgentRun,
+    summary="Revise a rejected listing alert review and create a new approval.",
+)
+def revise_listing_alert_review(
+    request: agent_schemas.ListingAlertReviseReviewRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        normalized_request = (
+            listing_alert_recommendation.normalize_revise_review_request(request)
+        )
+        return listing_alert_recommendation.revise_listing_alert_review(
             db,
             normalized_request,
         )
@@ -2341,8 +2490,10 @@ def approve_agent_action(
     """
     Mark an AgentApproval as approved.
 
-    This endpoint only updates the approval record; it does NOT send emails
-    or push notifications in this MVP phase.
+    For listing-alert recommendation draft approvals this also creates a
+    Gmail draft in Kevin's inbox (compose scope) so he can review and send
+    it manually. For other action types this endpoint only updates the
+    approval record; it does not send emails or push notifications.
     """
     approval = db.query(models.AgentApproval).filter(
         models.AgentApproval.id == approval_id
@@ -2378,8 +2529,103 @@ def approve_agent_action(
             "approved_by": updated.approved_by,
         },
     )
+
+    if updated.action_type == listing_alert_recommendation.LISTING_ALERT_DRAFT_APPROVAL_ACTION:
+        _create_listing_alert_gmail_draft_from_approval(db, approval=updated)
+
     service.sync_run_review_state(db, run=updated.run)
     return updated
+
+
+def _create_listing_alert_gmail_draft_from_approval(
+    db: Session,
+    *,
+    approval: models.AgentApproval,
+) -> None:
+    """Create a Gmail draft for an approved listing-alert recommendation.
+
+    Failures here are recorded in the audit log but do not roll back the
+    approval record. Kevin's manual review already said "approved"; the
+    draft creation is a delivery step that can be retried separately.
+    """
+    payload_raw = approval.payload or ""
+    try:
+        payload = json.loads(payload_raw) if payload_raw else {}
+    except json.JSONDecodeError:
+        payload = {}
+    contact_id = payload.get("contact_id")
+    subject = payload.get("subject")
+    body = payload.get("body")
+    if not isinstance(subject, str) or not isinstance(body, str) or contact_id is None:
+        service.log_approval_decision(
+            db,
+            approval=approval,
+            actor_type="system",
+            action="listing_alert_gmail_draft_skipped",
+            details={
+                "approval_id": approval.id,
+                "reason": "approval_payload_incomplete",
+            },
+        )
+        return
+
+    contact = (
+        db.query(crm_models.Contact).filter(crm_models.Contact.id == contact_id).first()
+    )
+    recipient = getattr(contact, "email", None) if contact else None
+    if not isinstance(recipient, str) or not recipient.strip():
+        service.log_approval_decision(
+            db,
+            approval=approval,
+            actor_type="system",
+            action="listing_alert_gmail_draft_skipped",
+            details={
+                "approval_id": approval.id,
+                "reason": "contact_email_missing",
+                "contact_id": contact_id,
+            },
+        )
+        return
+
+    try:
+        draft_response = gmail_oauth.create_listing_alert_gmail_draft(
+            db,
+            to_email=recipient.strip(),
+            subject=subject,
+            body=body,
+        )
+    except ValueError as error:
+        service.log_approval_decision(
+            db,
+            approval=approval,
+            actor_type="system",
+            action="listing_alert_gmail_draft_failed",
+            details={
+                "approval_id": approval.id,
+                "contact_id": contact_id,
+                "error": str(error),
+            },
+        )
+        return
+
+    draft_id = draft_response.get("id") if isinstance(draft_response, dict) else None
+    message = (
+        draft_response.get("message") if isinstance(draft_response, dict) else None
+    )
+    message_id = message.get("id") if isinstance(message, dict) else None
+    service.log_approval_decision(
+        db,
+        approval=approval,
+        actor_type="system",
+        action="listing_alert_gmail_draft_created",
+        details={
+            "approval_id": approval.id,
+            "contact_id": contact_id,
+            "recipient": recipient.strip(),
+            "gmail_draft_id": draft_id,
+            "gmail_message_id": message_id,
+        },
+    )
 
 
 @router.post(

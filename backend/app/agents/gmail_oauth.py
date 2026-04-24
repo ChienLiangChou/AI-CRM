@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from email.message import EmailMessage
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -20,9 +22,15 @@ from . import models, schemas as agent_schemas
 LISTING_ALERT_GMAIL_CONNECTION_KEY = "listing_alert_primary"
 LISTING_ALERT_GMAIL_USER_ID = "me"
 LISTING_ALERT_GMAIL_READ_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+LISTING_ALERT_GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose"
+LISTING_ALERT_GMAIL_REQUESTED_SCOPES = (
+    LISTING_ALERT_GMAIL_READ_SCOPE,
+    LISTING_ALERT_GMAIL_COMPOSE_SCOPE,
+)
 GOOGLE_OAUTH_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GMAIL_PROFILE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
+GMAIL_DRAFTS_URL = "https://gmail.googleapis.com/gmail/v1/users/me/drafts"
 OAUTH_STATE_TTL_MINUTES = 10
 
 
@@ -369,6 +377,7 @@ def start_listing_alert_gmail_oauth(
 ) -> agent_schemas.ListingAlertGmailOAuthStartResponse:
     config = _load_oauth_config()
     raw_state, expires_at = _create_state_record(db)
+    scope_text = " ".join(LISTING_ALERT_GMAIL_REQUESTED_SCOPES)
     authorization_url = (
         f"{GOOGLE_OAUTH_AUTHORIZE_URL}?"
         + urlencode(
@@ -376,7 +385,7 @@ def start_listing_alert_gmail_oauth(
                 "client_id": config.client_id,
                 "redirect_uri": config.redirect_uri,
                 "response_type": "code",
-                "scope": LISTING_ALERT_GMAIL_READ_SCOPE,
+                "scope": scope_text,
                 "access_type": "offline",
                 "include_granted_scopes": "true",
                 "prompt": "consent",
@@ -388,7 +397,7 @@ def start_listing_alert_gmail_oauth(
         connection_key=LISTING_ALERT_GMAIL_CONNECTION_KEY,
         authorization_url=authorization_url,
         state_expires_at=expires_at,
-        requested_scopes=[LISTING_ALERT_GMAIL_READ_SCOPE],
+        requested_scopes=list(LISTING_ALERT_GMAIL_REQUESTED_SCOPES),
     )
 
 
@@ -507,3 +516,105 @@ def refresh_listing_alert_gmail_access_token(
         gmail_user_id=connection.gmail_user_id or LISTING_ALERT_GMAIL_USER_ID,
         expires_at=expires_at,
     )
+
+
+def _post_json_with_bearer(
+    url: str,
+    *,
+    access_token: str,
+    payload: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    request = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request) as response:
+            return response.status, _parse_json_object(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        raw = exc.read().decode("utf-8")
+        try:
+            parsed = _parse_json_object(raw)
+        except ValueError:
+            parsed = {"raw_error": raw}
+        return exc.code, parsed
+    except URLError as exc:
+        raise ValueError("gmail_oauth_network_error") from exc
+
+
+def _encode_mime_message(
+    *,
+    to_email: str,
+    from_email: str,
+    subject: str,
+    body: str,
+) -> str:
+    message = EmailMessage()
+    message["To"] = to_email
+    message["From"] = from_email
+    message["Subject"] = subject
+    message.set_content(body)
+    raw_bytes = message.as_bytes()
+    return base64.urlsafe_b64encode(raw_bytes).decode("utf-8")
+
+
+def create_listing_alert_gmail_draft(
+    db: Session,
+    *,
+    to_email: str,
+    subject: str,
+    body: str,
+) -> dict[str, Any]:
+    """Create a Gmail draft in the connected mailbox using gmail.compose scope.
+
+    Returns Gmail's draft object (at least `id` and `message.id`) on success.
+    Raises ValueError with a stable code for expected failure modes.
+    """
+    recipient = _clean_text(to_email)
+    if recipient is None:
+        raise ValueError("gmail_draft_recipient_missing")
+    draft_subject = _clean_text(subject)
+    if draft_subject is None:
+        raise ValueError("gmail_draft_subject_missing")
+    draft_body = body.strip() if isinstance(body, str) else ""
+    if not draft_body:
+        raise ValueError("gmail_draft_body_missing")
+
+    connection = _get_connection(db)
+    if connection is None or connection.account_email is None:
+        raise ValueError("gmail_oauth_connection_not_ready")
+
+    granted_scopes: list[str] = []
+    if connection.granted_scopes:
+        try:
+            granted_scopes = _parse_scopes(json.loads(connection.granted_scopes))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            granted_scopes = []
+    if LISTING_ALERT_GMAIL_COMPOSE_SCOPE not in granted_scopes:
+        raise ValueError("gmail_draft_compose_scope_missing")
+
+    grant = refresh_listing_alert_gmail_access_token(db)
+    encoded = _encode_mime_message(
+        to_email=recipient,
+        from_email=connection.account_email,
+        subject=draft_subject,
+        body=draft_body,
+    )
+    status_code, response = _post_json_with_bearer(
+        GMAIL_DRAFTS_URL,
+        access_token=grant.access_token,
+        payload={"message": {"raw": encoded}},
+    )
+    if status_code == 401:
+        raise ValueError("gmail_oauth_access_token_rejected")
+    if status_code == 403:
+        raise ValueError("gmail_draft_compose_scope_missing")
+    if status_code >= 400:
+        raise ValueError("gmail_draft_create_failed")
+    return response

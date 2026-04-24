@@ -1375,11 +1375,501 @@ def _contact_context(
     }
 
 
+def _format_price_label(value: Any) -> str | None:
+    if value is None:
+        return None
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f"${amount:,.0f}"
+
+
+def _budget_label(budget_min: Any, budget_max: Any) -> str | None:
+    min_label = _format_price_label(budget_min)
+    max_label = _format_price_label(budget_max)
+    if min_label and max_label:
+        return f"{min_label}-{max_label}"
+    return min_label or max_label
+
+
+def _normalize_area_token(value: Any) -> str:
+    text = _clean_text(value)
+    return text.lower() if text else ""
+
+
+def _extract_property_type_preferences(prefs: dict[str, Any]) -> tuple[str | None, list[str]]:
+    primary = _clean_text(prefs.get("property_type"))
+    type_list_raw = prefs.get("types")
+    types: list[str] = []
+    if isinstance(type_list_raw, list):
+        for item in type_list_raw:
+            text = _clean_text(item)
+            if text:
+                types.append(text)
+    if primary is None and types:
+        primary = types[0]
+    return primary, types
+
+
+def _analyze_listing_fit(
+    listing: agent_schemas.ListingAlertNormalizedListing,
+    contact_context: dict[str, Any],
+) -> agent_schemas.ListingAlertFitAnalysis:
+    """Deterministic per-listing fit scoring against stored client criteria.
+
+    Mirrors the weight scheme from buyer_match._score_candidate so the
+    surfaces produce consistent match-strength labels for operators.
+    """
+    score = 0.0
+    why_it_fits: list[str] = []
+    tradeoffs: list[str] = []
+    comparisons: list[agent_schemas.ListingAlertFitCriterionComparison] = []
+
+    budget_min = contact_context.get("budget_min")
+    budget_max = contact_context.get("budget_max")
+    budget_label = _budget_label(budget_min, budget_max)
+    listing_price_label = _format_price_label(listing.price)
+
+    if listing.price is not None and (budget_min is not None or budget_max is not None):
+        in_range_low = budget_min is None or listing.price >= float(budget_min)
+        in_range_high = budget_max is None or listing.price <= float(budget_max)
+        if in_range_low and in_range_high:
+            score += 2.0
+            why_it_fits.append("Priced within the client's stated budget range.")
+            verdict: agent_schemas.ListingAlertCriterionVerdict = "match"
+        elif budget_max is not None and listing.price > float(budget_max):
+            tradeoffs.append("Priced above the stated budget range.")
+            verdict = "over_budget"
+        else:
+            tradeoffs.append("Priced below the stated range, so fit depends on flexibility.")
+            verdict = "under_budget"
+        comparisons.append(
+            agent_schemas.ListingAlertFitCriterionComparison(
+                criterion="budget",
+                client=budget_label,
+                listing=listing_price_label,
+                verdict=verdict,
+            )
+        )
+    elif listing.price is None and (budget_min is not None or budget_max is not None):
+        tradeoffs.append("Listing price was not extracted, so a budget check is incomplete.")
+        comparisons.append(
+            agent_schemas.ListingAlertFitCriterionComparison(
+                criterion="budget",
+                client=budget_label,
+                listing=None,
+                verdict="unknown",
+            )
+        )
+
+    preferred_areas_raw = contact_context.get("preferred_areas") or []
+    preferred_areas: list[str] = []
+    if isinstance(preferred_areas_raw, list):
+        for item in preferred_areas_raw:
+            cleaned = _clean_text(item)
+            if cleaned:
+                preferred_areas.append(cleaned)
+    preferred_area_tokens = {
+        _normalize_area_token(area) for area in preferred_areas if _normalize_area_token(area)
+    }
+    listing_area_sources = [listing.neighborhood, listing.address]
+    listing_area_tokens = {
+        _normalize_area_token(src) for src in listing_area_sources if _normalize_area_token(src)
+    }
+    if preferred_area_tokens:
+        match_found = False
+        for preferred in preferred_area_tokens:
+            if any(preferred in token or token in preferred for token in listing_area_tokens):
+                match_found = True
+                break
+        listing_area_label = _clean_text(listing.neighborhood) or _clean_text(listing.address)
+        if match_found:
+            score += 1.5
+            why_it_fits.append("Matches the client's preferred area list.")
+            verdict = "match"
+        else:
+            tradeoffs.append("Location is outside the stated preferred areas.")
+            verdict = "mismatch"
+        comparisons.append(
+            agent_schemas.ListingAlertFitCriterionComparison(
+                criterion="area",
+                client=", ".join(preferred_areas) if preferred_areas else None,
+                listing=listing_area_label,
+                verdict=verdict,
+            )
+        )
+
+    property_prefs = contact_context.get("property_preferences") or {}
+    if not isinstance(property_prefs, dict):
+        property_prefs = {}
+    preferred_primary_type, preferred_types = _extract_property_type_preferences(property_prefs)
+    listing_type = _clean_text(listing.property_type)
+    if preferred_primary_type:
+        preferred_lower = {t.lower() for t in preferred_types or [preferred_primary_type]}
+        if listing_type and listing_type.lower() in preferred_lower:
+            score += 1.0
+            why_it_fits.append("Matches the preferred property type.")
+            verdict = "match"
+        elif listing_type:
+            tradeoffs.append(
+                f"Property type is {listing_type}, not the preferred {preferred_primary_type}."
+            )
+            verdict = "mismatch"
+        else:
+            tradeoffs.append("Property type was not extracted, so a type check is incomplete.")
+            verdict = "unknown"
+        comparisons.append(
+            agent_schemas.ListingAlertFitCriterionComparison(
+                criterion="property_type",
+                client=", ".join(preferred_types) if preferred_types else preferred_primary_type,
+                listing=listing_type,
+                verdict=verdict,
+            )
+        )
+
+    bedrooms_min = property_prefs.get("bedrooms_min")
+    if bedrooms_min is not None:
+        try:
+            min_beds = float(bedrooms_min)
+        except (TypeError, ValueError):
+            min_beds = None
+        if min_beds is not None:
+            if listing.bedrooms is None:
+                tradeoffs.append("Bedroom count was not extracted.")
+                verdict = "unknown"
+            elif listing.bedrooms >= min_beds:
+                score += 1.0
+                if listing.bedrooms > min_beds:
+                    why_it_fits.append(
+                        f"Exceeds the {int(min_beds)}+ bedroom target with {int(listing.bedrooms)} beds."
+                    )
+                    verdict = "exceeds"
+                else:
+                    why_it_fits.append(f"Meets the {int(min_beds)}+ bedroom target.")
+                    verdict = "match"
+            else:
+                tradeoffs.append(
+                    f"Has {int(listing.bedrooms)} beds, fewer than the {int(min_beds)}+ target."
+                )
+                verdict = "mismatch"
+            comparisons.append(
+                agent_schemas.ListingAlertFitCriterionComparison(
+                    criterion="bedrooms",
+                    client=f"{int(min_beds)}+",
+                    listing=(
+                        None if listing.bedrooms is None else f"{int(listing.bedrooms)}"
+                    ),
+                    verdict=verdict,
+                )
+            )
+
+    bathrooms_min = property_prefs.get("bathrooms_min")
+    if bathrooms_min is not None:
+        try:
+            min_baths = float(bathrooms_min)
+        except (TypeError, ValueError):
+            min_baths = None
+        if min_baths is not None:
+            if listing.bathrooms is None:
+                tradeoffs.append("Bathroom count was not extracted.")
+                verdict = "unknown"
+            elif listing.bathrooms >= min_baths:
+                score += 0.75
+                why_it_fits.append(f"Meets the {int(min_baths)}+ bathroom target.")
+                verdict = "match" if listing.bathrooms == min_baths else "exceeds"
+            else:
+                tradeoffs.append(
+                    f"Has {int(listing.bathrooms)} baths, fewer than the {int(min_baths)}+ target."
+                )
+                verdict = "mismatch"
+            comparisons.append(
+                agent_schemas.ListingAlertFitCriterionComparison(
+                    criterion="bathrooms",
+                    client=f"{int(min_baths)}+",
+                    listing=(
+                        None if listing.bathrooms is None else f"{int(listing.bathrooms)}"
+                    ),
+                    verdict=verdict,
+                )
+            )
+
+    if not why_it_fits:
+        why_it_fits.append("Review required to decide fit from available context.")
+
+    fit_strength: agent_schemas.ListingAlertFitStrength
+    if score >= 4.5:
+        fit_strength = "strong"
+    elif score >= 2.5:
+        fit_strength = "moderate"
+    else:
+        fit_strength = "limited"
+
+    return agent_schemas.ListingAlertFitAnalysis(
+        listing_ref=listing.listing_ref,
+        fit_score=round(score, 2),
+        fit_strength=fit_strength,
+        why_it_fits=why_it_fits[:3],
+        tradeoffs=tradeoffs[:3],
+        criteria_comparison=comparisons,
+    )
+
+
+def _attach_fit_analysis(
+    listings: list[agent_schemas.ListingAlertNormalizedListing],
+    contact_context: dict[str, Any],
+) -> list[agent_schemas.ListingAlertNormalizedListing]:
+    if not contact_context:
+        return listings
+    updated: list[agent_schemas.ListingAlertNormalizedListing] = []
+    for listing in listings:
+        analysis = _analyze_listing_fit(listing, contact_context)
+        updated.append(listing.model_copy(update={"fit_analysis": analysis}))
+    return updated
+
+
+def _auto_draft_from_analysis(
+    contact_context: dict[str, Any],
+    shortlist: list[agent_schemas.ListingAlertNormalizedListing],
+) -> agent_schemas.ListingAlertAutoReviewDraft | None:
+    if not shortlist:
+        return None
+    contact_name = _clean_text(contact_context.get("contact_name")) or "there"
+    top = shortlist[0]
+    analysis = top.fit_analysis
+    lines: list[str] = [f"Hi {contact_name},", ""]
+    if len(shortlist) == 1:
+        lines.append(
+            "I came across a newly listed property that looked worth flagging for you:"
+        )
+    else:
+        lines.append(
+            f"I came across {len(shortlist)} newly listed properties that looked worth flagging for you:"
+        )
+    lines.append("")
+    for idx, listing in enumerate(shortlist, start=1):
+        price_text = _format_price_label(listing.price) or "Price TBC"
+        type_text = _clean_text(listing.property_type) or "Residential"
+        beds = (
+            f"{int(listing.bedrooms)} bed" if listing.bedrooms is not None else "beds TBC"
+        )
+        baths = (
+            f"{int(listing.bathrooms)} bath"
+            if listing.bathrooms is not None
+            else "baths TBC"
+        )
+        ref_text = listing.listing_ref
+        header = f"{idx}. {listing.address}"
+        meta = f"   * {price_text} - {type_text} - {beds}, {baths} - MLS#{ref_text}"
+        lines.append(header)
+        lines.append(meta)
+        if listing.fit_analysis and listing.fit_analysis.why_it_fits:
+            lines.append(
+                f"   * Why it fits: {listing.fit_analysis.why_it_fits[0]}"
+            )
+        if listing.fit_analysis and listing.fit_analysis.tradeoffs:
+            lines.append(
+                f"   * Tradeoff to note: {listing.fit_analysis.tradeoffs[0]}"
+            )
+        lines.append("")
+    lines.append("Let me know which ones you'd like to look at more closely, or whether I should keep searching for different fits.")
+    lines.append("")
+    lines.append("Best regards,")
+    lines.append("Kevin Chou")
+    lines.append("SKC Realty Team")
+    body = "\n".join(lines)
+    subject_suffix = (
+        top.address if len(shortlist) == 1 else f"{len(shortlist)} properties to review"
+    )
+    strength = analysis.fit_strength if analysis else "limited"
+    prefix = "New Listing Alert" if strength != "limited" else "Worth a Look"
+    subject = f"{prefix}: {subject_suffix}"
+    return agent_schemas.ListingAlertAutoReviewDraft(
+        variant="shortlist_summary",
+        subject=subject,
+        body=body,
+    )
+
+
+# Criteria whose mismatch is considered a hard disqualifier for auto-shortlist.
+# A limited-fit listing with a verdict in this set on a critical criterion should
+# never auto-advance to a client-facing draft; operator must review manually.
+_HARD_MISMATCH_CRITERIA = {"area", "property_type"}
+_HARD_MISMATCH_VERDICTS = {"mismatch", "over_budget"}
+
+
+def _listing_auto_shortlist_rejection_reason(
+    listing: agent_schemas.ListingAlertNormalizedListing,
+) -> str | None:
+    """Return a reason string if the listing must not be auto-shortlisted.
+
+    The gate only fires when fit is ``limited``. Stronger fits always pass —
+    the operator still gets the full tradeoff list per listing.
+    """
+    analysis = listing.fit_analysis
+    if analysis is None:
+        return "no_fit_analysis"
+    if analysis.fit_strength != "limited":
+        return None
+
+    disqualifiers: list[str] = []
+    budget_overrun = any(
+        cc.criterion == "budget" and cc.verdict == "over_budget"
+        for cc in analysis.criteria_comparison
+    )
+    if budget_overrun:
+        disqualifiers.append("over_budget")
+    for cc in analysis.criteria_comparison:
+        if cc.criterion in _HARD_MISMATCH_CRITERIA and cc.verdict in _HARD_MISMATCH_VERDICTS:
+            disqualifiers.append(f"{cc.criterion}_{cc.verdict}")
+    if disqualifiers:
+        return ",".join(disqualifiers)
+    return None
+
+
+def _auto_generate_review(
+    listings: list[agent_schemas.ListingAlertNormalizedListing],
+    association: agent_schemas.ListingAlertClientAssociationResponse,
+    contact_context: dict[str, Any],
+) -> agent_schemas.ListingAlertAutoReviewResult:
+    if not listings or not contact_context or association.status != "matched":
+        return agent_schemas.ListingAlertAutoReviewResult(
+            recommendation_reasoning=(
+                "Auto-analysis skipped: contact context or association was incomplete."
+            ),
+            operator_notes=[
+                "Revise the shortlist manually before sending any client-facing content.",
+            ],
+        )
+
+    contact_name = _clean_text(contact_context.get("contact_name")) or "the client"
+    budget_label = _budget_label(
+        contact_context.get("budget_min"), contact_context.get("budget_max")
+    )
+    preferred_areas = contact_context.get("preferred_areas") or []
+    area_label = (
+        ", ".join(preferred_areas)
+        if isinstance(preferred_areas, list) and preferred_areas
+        else "their stated areas"
+    )
+
+    scored = [listing for listing in listings if listing.fit_analysis is not None]
+    scored.sort(
+        key=lambda item: item.fit_analysis.fit_score if item.fit_analysis else 0.0,
+        reverse=True,
+    )
+
+    qualified: list[agent_schemas.ListingAlertNormalizedListing] = []
+    rejection_notes: list[str] = []
+    for listing in scored:
+        reason = _listing_auto_shortlist_rejection_reason(listing)
+        if reason is None:
+            qualified.append(listing)
+        else:
+            rejection_notes.append(
+                f"Skipped {listing.listing_ref} ({listing.address}): {reason.replace(',', ', ')}"
+            )
+        if len(qualified) >= MAX_SHORTLIST:
+            break
+
+    if not qualified:
+        skipped_count = len(scored)
+        reasoning_parts = [
+            f"Auto-analysis declined to shortlist any of the {skipped_count} extracted listing(s) "
+            f"for {contact_name}.",
+            f"Client criteria: budget {budget_label or 'not set'}, areas: {area_label}.",
+            "Every candidate failed the hard-fit gate (over-budget, wrong area, or wrong property type "
+            "on a limited-fit listing), so no client-facing draft was generated.",
+        ]
+        operator_notes = [
+            "Auto-analysis found no qualified listings; manual review required before any client outreach.",
+        ]
+        if rejection_notes:
+            operator_notes.extend(rejection_notes[:MAX_SHORTLIST])
+        return agent_schemas.ListingAlertAutoReviewResult(
+            shortlist=[],
+            tradeoff_notes=[],
+            recommendation_reasoning=" ".join(reasoning_parts),
+            client_facing_drafts=[],
+            operator_notes=operator_notes,
+        )
+
+    top_shortlist = qualified
+    shortlist_items: list[agent_schemas.ListingAlertAutoReviewShortlistItem] = []
+    tradeoff_notes: list[str] = []
+    for rank, listing in enumerate(top_shortlist, start=1):
+        analysis = listing.fit_analysis
+        why = list(analysis.why_it_fits) if analysis else []
+        shortlist_items.append(
+            agent_schemas.ListingAlertAutoReviewShortlistItem(
+                listing_ref=listing.listing_ref,
+                rank=rank,
+                why_selected=why[:3],
+            )
+        )
+        if analysis:
+            for tradeoff in analysis.tradeoffs:
+                if tradeoff not in tradeoff_notes:
+                    tradeoff_notes.append(tradeoff)
+
+    strengths = [
+        s.fit_analysis.fit_strength for s in top_shortlist if s.fit_analysis is not None
+    ]
+    top_strength = strengths[0] if strengths else "limited"
+    reasoning = (
+        f"Auto-analysis ranked {len(shortlist_items)} listing(s) against {contact_name}'s stored criteria "
+        f"(budget {budget_label or 'not set'}, areas: {area_label}). "
+        f"Top match fit-strength: {top_strength}. "
+        "Kevin should verify the reasoning and tradeoffs before approving the client-facing draft."
+    )
+
+    draft = _auto_draft_from_analysis(contact_context, top_shortlist)
+    drafts = [draft] if draft else []
+
+    operator_notes: list[str] = [
+        "Auto-analysis pre-filled the shortlist and draft; Kevin approval still required.",
+    ]
+    if any(
+        s.fit_analysis and s.fit_analysis.fit_strength == "limited"
+        for s in top_shortlist
+    ):
+        operator_notes.append(
+            "At least one shortlisted listing has limited fit strength; revise or reject if it does not hold up."
+        )
+    if rejection_notes:
+        operator_notes.append(
+            "Skipped candidates with hard mismatches:"
+        )
+        operator_notes.extend(rejection_notes[:MAX_SHORTLIST])
+
+    return agent_schemas.ListingAlertAutoReviewResult(
+        shortlist=shortlist_items,
+        tradeoff_notes=tradeoff_notes[:5],
+        recommendation_reasoning=reasoning,
+        client_facing_drafts=drafts,
+        operator_notes=operator_notes,
+    )
+
+
 def _comparison_frame(
     listings: list[agent_schemas.ListingAlertNormalizedListing],
     association: agent_schemas.ListingAlertClientAssociationResponse,
 ) -> dict[str, Any]:
     summary = _listing_summary(listings)
+    per_listing_fit: list[dict[str, Any]] = []
+    for listing in listings:
+        if listing.fit_analysis is None:
+            continue
+        per_listing_fit.append(
+            {
+                "listing_ref": listing.listing_ref,
+                "address": listing.address,
+                "fit_score": listing.fit_analysis.fit_score,
+                "fit_strength": listing.fit_analysis.fit_strength,
+                "why_it_fits": listing.fit_analysis.why_it_fits,
+                "tradeoffs": listing.fit_analysis.tradeoffs,
+            }
+        )
     return {
         "workflow_goal": "manual_review_packet_preparation",
         "representation_intent": association.representation_intent,
@@ -1387,10 +1877,11 @@ def _comparison_frame(
         "candidate_count": len(listings),
         "shortlist_cap": MAX_SHORTLIST,
         "draft_output_cap": MAX_DRAFT_OUTPUTS,
+        "per_listing_fit": per_listing_fit,
         "review_questions": [
-            "Which listings best fit the client's stated budget and area preferences?",
-            "Which tradeoffs need to be explained clearly before Kevin approves a client-facing draft?",
-            "Is there enough signal to recommend up to 3 listings, or should the result stay blocked?",
+            "Does the auto-generated shortlist correctly rank the best-fit listings?",
+            "Are the auto-extracted tradeoffs accurate and sufficient for client context?",
+            "Is the drafted subject and body tone appropriate, or does it need revision?",
         ],
     }
 
@@ -1478,31 +1969,42 @@ def build_manual_review_packet_result(
             ],
         )
 
+    contact_context = _contact_context(db, association)
+    listings_with_analysis = _attach_fit_analysis(listings, contact_context)
+    auto_review = _auto_generate_review(listings_with_analysis, association, contact_context)
     packet = agent_schemas.ListingAlertManualReviewPacket(
         packet_version=MANUAL_PACKET_VERSION,
         manual_reasoning_surface=request.manual_reasoning_surface
         or "chatgpt_pro_gpt_5_4",
         source_message=request.gmail_alert,
         association=association,
-        contact_context=_contact_context(db, association),
-        comparison_frame=_comparison_frame(listings, association),
-        extracted_listing_count=len(listings),
-        extracted_listings=listings,
+        contact_context=contact_context,
+        comparison_frame=_comparison_frame(listings_with_analysis, association),
+        extracted_listing_count=len(listings_with_analysis),
+        extracted_listings=listings_with_analysis,
         shortlist_cap=MAX_SHORTLIST,
         draft_output_cap=MAX_DRAFT_OUTPUTS,
         draft_constraints=_draft_constraints(),
         recommended_prompt_context=_recommended_prompt_context(association),
         return_contract=_return_contract(),
+        auto_review=auto_review,
     )
+    risk_flags = ["manual_review_required"]
+    operator_notes = [
+        "Auto-analysis pre-filled a shortlist and draft; Kevin approval still gates any client delivery.",
+    ]
+    if auto_review is not None and not auto_review.shortlist:
+        risk_flags.append("auto_review_no_qualified_matches")
+        operator_notes.append(
+            "Auto-analysis found no listings that cleared the hard-fit gate; no client-facing draft was auto-generated."
+        )
     return agent_schemas.ListingAlertManualPacketResultResponse(
         execution_status="packet_ready",
         association=association,
-        extracted_listings=listings,
+        extracted_listings=listings_with_analysis,
         manual_review_packet=packet,
-        risk_flags=["manual_review_required"],
-        operator_notes=[
-            "This Step 1 packet is for manual reasoning only and does not create drafts, approvals, or send actions.",
-        ],
+        risk_flags=risk_flags,
+        operator_notes=operator_notes,
     )
 
 
@@ -2592,3 +3094,221 @@ def submit_listing_alert_manual_review(
             ),
         )
         return run
+
+
+def normalize_revise_review_request(
+    raw: Any,
+) -> agent_schemas.ListingAlertReviseReviewRequest:
+    if isinstance(raw, agent_schemas.ListingAlertReviseReviewRequest):
+        return raw
+    return agent_schemas.ListingAlertReviseReviewRequest(**_request_to_dict(raw))
+
+
+def _load_previous_review_result(
+    run: models.AgentRun,
+) -> agent_schemas.ListingAlertReviewedSubmissionResultResponse:
+    if not run.result:
+        raise ValueError("previous_review_result_missing")
+    try:
+        parsed = json.loads(run.result)
+    except json.JSONDecodeError as exc:
+        raise ValueError("previous_review_result_invalid") from exc
+    return agent_schemas.ListingAlertReviewedSubmissionResultResponse(**parsed)
+
+
+def _find_source_packet_run_for_review(
+    db: Session,
+    previous_review: agent_schemas.ListingAlertReviewedSubmissionResultResponse,
+) -> models.AgentRun:
+    return _load_source_packet_run(db, previous_review.source_run_id)
+
+
+def revise_listing_alert_review(
+    db: Session,
+    request: Any,
+) -> models.AgentRun:
+    """Create a fresh review run by revising a previously rejected submission.
+
+    The rejected approval must belong to a listing alert review run whose
+    status is waiting_approval (the run has not yet been finalized). We
+    synthesize a new submission using provided overrides or re-apply the
+    previous structured data with the operator's revision instructions.
+    """
+    revision = normalize_revise_review_request(request)
+    revision_notes = _clean_text(revision.revision_instructions)
+    if revision_notes is None:
+        raise ValueError("revision_instructions_missing")
+
+    approval = (
+        db.query(models.AgentApproval)
+        .filter(models.AgentApproval.id == revision.source_approval_id)
+        .first()
+    )
+    if approval is None:
+        raise ValueError("revision_source_approval_not_found")
+    if approval.status != "rejected":
+        raise ValueError("revision_source_approval_not_rejected")
+    previous_run = approval.run
+    if previous_run is None:
+        raise ValueError("revision_source_run_missing")
+    if previous_run.task is None:
+        raise ValueError("source_task_missing")
+    if previous_run.task.agent_type != AGENT_TYPE:
+        raise ValueError("revision_source_run_wrong_agent")
+
+    previous_review_result = _load_previous_review_result(previous_run)
+    packet_run = _find_source_packet_run_for_review(db, previous_review_result)
+    packet_result = _load_manual_packet_result(packet_run)
+    packet = packet_result.manual_review_packet
+    if packet is None or packet_result.execution_status != "packet_ready":
+        raise ValueError("source_packet_not_reviewable")
+
+    task = previous_run.task
+
+    new_run = service.create_run(
+        db,
+        task=task,
+        summary="Listing alert manual review revision",
+    )
+    service.update_task_status(db, task, status="executing")
+    new_run = service.update_run_status(
+        db,
+        new_run,
+        status="planning",
+        plan=_json_dumps(
+            {
+                "source_run_id": packet_run.id,
+                "source_task_id": task.id,
+                "rejected_approval_id": approval.id,
+                "rejected_run_id": previous_run.id,
+                "submission_type": "manual_review_revision",
+            }
+        ),
+        started_at=datetime.utcnow(),
+    )
+
+    try:
+        shortlist_items: list[agent_schemas.ListingAlertReviewedShortlistSubmissionItem]
+        if revision.override_shortlist is not None:
+            shortlist_items = list(revision.override_shortlist)
+        else:
+            shortlist_items = [
+                agent_schemas.ListingAlertReviewedShortlistSubmissionItem(
+                    listing_ref=item.listing_ref,
+                    rank=item.rank,
+                    why_selected=list(item.why_selected),
+                )
+                for item in previous_review_result.shortlisted_listings
+            ]
+
+        tradeoff_notes = (
+            list(revision.override_tradeoff_notes)
+            if revision.override_tradeoff_notes is not None
+            else list(previous_review_result.tradeoff_notes)
+        )
+
+        recommendation_reasoning_base = (
+            _clean_text(revision.override_recommendation_reasoning)
+            if revision.override_recommendation_reasoning is not None
+            else _clean_text(previous_review_result.recommendation_reasoning)
+        ) or ""
+        recommendation_reasoning = (
+            f"{recommendation_reasoning_base}\n\n[Revision instructions]: {revision_notes}"
+            if recommendation_reasoning_base
+            else f"[Revision instructions]: {revision_notes}"
+        )
+
+        previous_drafts = previous_review_result.client_facing_drafts
+        previous_draft = previous_drafts[0] if previous_drafts else None
+        draft_subject = (
+            _clean_text(revision.override_draft_subject)
+            if revision.override_draft_subject is not None
+            else (_clean_text(previous_draft.subject) if previous_draft else None)
+        )
+        draft_body = (
+            revision.override_draft_body
+            if revision.override_draft_body is not None
+            else (previous_draft.body if previous_draft else None)
+        )
+
+        client_drafts: list[agent_schemas.ListingAlertClientDraftSubmissionItem] = []
+        if draft_subject and draft_body and shortlist_items:
+            client_drafts.append(
+                agent_schemas.ListingAlertClientDraftSubmissionItem(
+                    variant=previous_draft.variant if previous_draft else "shortlist_summary",
+                    subject=draft_subject,
+                    body=draft_body,
+                )
+            )
+
+        operator_notes = (
+            list(revision.override_operator_notes)
+            if revision.override_operator_notes is not None
+            else list(previous_review_result.operator_notes)
+        )
+        operator_notes.insert(
+            0,
+            f"Revision applied from rejected approval #{approval.id}: {revision_notes}",
+        )
+
+        submission = agent_schemas.ListingAlertManualReviewSubmissionRequest(
+            source_run_id=packet_run.id,
+            shortlisted_listings=shortlist_items,
+            tradeoff_notes=tradeoff_notes,
+            recommendation_reasoning=recommendation_reasoning,
+            client_facing_drafts=client_drafts,
+            operator_notes=operator_notes,
+        )
+
+        service.write_audit_log(
+            db,
+            run=new_run,
+            task=task,
+            action="listing_alert_manual_review_revision_submitted",
+            details=_json_dumps(
+                {
+                    "rejected_approval_id": approval.id,
+                    "rejected_run_id": previous_run.id,
+                    "source_run_id": packet_run.id,
+                    "revision_instructions": revision_notes[:500],
+                    "shortlisted_listing_count": len(submission.shortlisted_listings),
+                    "draft_count": len(submission.client_facing_drafts),
+                }
+            ),
+        )
+
+        reviewed_result = _build_reviewed_submission_result(packet_result, submission)
+        reviewed_result.source_task_id = task.id
+
+        return _persist_listing_alert_review_run(
+            db,
+            run=new_run,
+            task=task,
+            source_run=packet_run,
+            result=reviewed_result,
+            approval_created_action="listing_alert_manual_review_revision_approval_created",
+            completed_no_draft_action="listing_alert_manual_review_revision_completed_no_draft",
+            review_mode="manual_revision",
+        )
+    except Exception as exc:
+        new_run = service.update_run_status(
+            db,
+            new_run,
+            status="failed",
+            error=str(exc),
+            finished_at=datetime.utcnow(),
+        )
+        service.update_task_status(db, task, status="failed")
+        service.write_audit_log(
+            db,
+            run=new_run,
+            task=task,
+            action="listing_alert_manual_review_revision_failed",
+            details=_json_dumps(
+                {
+                    "rejected_approval_id": approval.id,
+                    "error": str(exc),
+                }
+            ),
+        )
+        return new_run

@@ -1618,5 +1618,156 @@ class ListingAlertRecommendationStepOneTests(unittest.TestCase):
         self.assertEqual(history[0].run_id, automatic_batch.outcomes[0].review_run_id)
 
 
+class AutoGenerateReviewShortlistGateTests(unittest.TestCase):
+    """Verify the hard-fit gate in ``_auto_generate_review``.
+
+    These tests isolate the gate itself and do not go through the database.
+    """
+
+    def _make_association(self) -> agent_schemas.ListingAlertClientAssociationResponse:
+        return agent_schemas.ListingAlertClientAssociationResponse(
+            status="matched",
+            method="expected_contact_id",
+            contact_id=99,
+            contact_name="Julia Tsai",
+        )
+
+    def _make_contact_context(self) -> dict:
+        return {
+            "contact_name": "Julia Tsai",
+            "budget_min": 500000,
+            "budget_max": 700000,
+            "preferred_areas": ["Midtown", "Yonge-Eglinton"],
+            "preferred_property_types": ["condo", "condo_apartment"],
+        }
+
+    def _make_listing(
+        self,
+        *,
+        listing_ref: str,
+        fit_strength: agent_schemas.ListingAlertFitStrength,
+        criteria: list[tuple[str, agent_schemas.ListingAlertCriterionVerdict]],
+        fit_score: float = 1.0,
+    ) -> agent_schemas.ListingAlertNormalizedListing:
+        return agent_schemas.ListingAlertNormalizedListing(
+            listing_ref=listing_ref,
+            address=f"{listing_ref} Test Lane",
+            price=899000.0,
+            market_type="sale",
+            property_type="detached",
+            source_excerpt="test",
+            fit_analysis=agent_schemas.ListingAlertFitAnalysis(
+                listing_ref=listing_ref,
+                fit_score=fit_score,
+                fit_strength=fit_strength,
+                why_it_fits=["exceeds 1+ bedroom target with 2 beds"],
+                tradeoffs=["over budget", "outside preferred area"],
+                criteria_comparison=[
+                    agent_schemas.ListingAlertFitCriterionComparison(
+                        criterion=crit,
+                        verdict=verdict,
+                    )
+                    for crit, verdict in criteria
+                ],
+            ),
+        )
+
+    def test_limited_fit_with_hard_mismatches_is_excluded(self):
+        listing = self._make_listing(
+            listing_ref="L1",
+            fit_strength="limited",
+            criteria=[
+                ("budget", "over_budget"),
+                ("area", "mismatch"),
+                ("property_type", "mismatch"),
+            ],
+        )
+        result = listing_alert_recommendation._auto_generate_review(
+            [listing],
+            self._make_association(),
+            self._make_contact_context(),
+        )
+        self.assertEqual(result.shortlist, [])
+        self.assertEqual(result.client_facing_drafts, [])
+        reasoning_lower = result.recommendation_reasoning.lower()
+        self.assertIn("declined to shortlist", reasoning_lower)
+        self.assertIn("no client-facing draft", reasoning_lower)
+        self.assertTrue(
+            any("manual review" in note.lower() for note in result.operator_notes),
+            result.operator_notes,
+        )
+
+    def test_limited_fit_with_over_budget_only_is_excluded(self):
+        listing = self._make_listing(
+            listing_ref="L2",
+            fit_strength="limited",
+            criteria=[
+                ("budget", "over_budget"),
+                ("area", "match"),
+                ("property_type", "match"),
+            ],
+        )
+        result = listing_alert_recommendation._auto_generate_review(
+            [listing],
+            self._make_association(),
+            self._make_contact_context(),
+        )
+        self.assertEqual(result.shortlist, [])
+        self.assertEqual(result.client_facing_drafts, [])
+
+    def test_strong_fit_with_mismatch_still_shortlists(self):
+        # Stronger fits are trusted; gate only applies to limited.
+        listing = self._make_listing(
+            listing_ref="L3",
+            fit_strength="strong",
+            fit_score=3.0,
+            criteria=[
+                ("budget", "match"),
+                ("area", "mismatch"),
+                ("property_type", "match"),
+            ],
+        )
+        result = listing_alert_recommendation._auto_generate_review(
+            [listing],
+            self._make_association(),
+            self._make_contact_context(),
+        )
+        self.assertEqual(len(result.shortlist), 1)
+        self.assertEqual(result.shortlist[0].listing_ref, "L3")
+        self.assertEqual(len(result.client_facing_drafts), 1)
+
+    def test_qualifying_listing_passes_even_when_others_are_rejected(self):
+        bad = self._make_listing(
+            listing_ref="BAD",
+            fit_strength="limited",
+            fit_score=1.0,
+            criteria=[
+                ("budget", "over_budget"),
+                ("area", "mismatch"),
+                ("property_type", "mismatch"),
+            ],
+        )
+        good = self._make_listing(
+            listing_ref="GOOD",
+            fit_strength="moderate",
+            fit_score=2.5,
+            criteria=[
+                ("budget", "match"),
+                ("area", "match"),
+                ("property_type", "match"),
+            ],
+        )
+        result = listing_alert_recommendation._auto_generate_review(
+            [bad, good],
+            self._make_association(),
+            self._make_contact_context(),
+        )
+        self.assertEqual([item.listing_ref for item in result.shortlist], ["GOOD"])
+        self.assertTrue(
+            any("skipped candidates" in note.lower() for note in result.operator_notes),
+            result.operator_notes,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

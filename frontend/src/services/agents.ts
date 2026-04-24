@@ -864,7 +864,10 @@ export type DailyMarketScanMode =
     | 'client_match'
     | 'competitor_watch'
     | 'full_daily_scan';
-export type DailyMarketScanRunMode = 'manual_preview' | 'simulated_preview';
+export type DailyMarketScanRunMode =
+    | 'manual_preview'
+    | 'simulated_preview'
+    | 'scheduled_monitor';
 export type DailyMarketScanSourcePreference =
     | 'auto'
     | 'authenticated_mls_browser_first'
@@ -1022,6 +1025,45 @@ export interface DailyMarketScanLatestResponse {
     status: string | null;
     error: string | null;
     result: DailyMarketScanResultResponse | null;
+}
+
+export interface DailyMarketScanWatchlistUpsertRequest {
+    name: string;
+    enabled?: boolean;
+    schedule_interval_minutes?: number;
+    run_request: DailyMarketScanRunRequest;
+    operator_notes?: string[];
+}
+
+export interface DailyMarketScanWatchlist {
+    id: number;
+    name: string;
+    enabled: boolean;
+    schedule_interval_minutes: number;
+    run_request: DailyMarketScanRunRequest;
+    operator_notes: string[];
+    next_run_at: string | null;
+    last_run_id: number | null;
+    last_run_status: string | null;
+    last_run_error: string | null;
+    last_run_started_at: string | null;
+    last_run_finished_at: string | null;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface DailyMarketScanWatchlistSchedulerStatusResponse {
+    scheduler_key: string;
+    poll_interval_seconds: number;
+    enabled_watchlist_count: number;
+    due_watchlist_count: number;
+    next_due_at: string | null;
+    last_sweep_started_at: string | null;
+    last_sweep_finished_at: string | null;
+    last_status: string;
+    last_error: string | null;
+    last_due_count: number;
+    last_triggered_count: number;
 }
 
 export interface StrategyCoordinationListingReference {
@@ -2668,6 +2710,50 @@ const normalizeDailyMarketScanFailureMetadata = (
     };
 };
 
+const normalizeDailyMarketScanListingReference = (
+    value: Partial<DailyMarketScanListingReference> | null | undefined,
+): DailyMarketScanListingReference => {
+    return {
+        listing_ref: typeof value?.listing_ref === 'string' ? value.listing_ref : 'unknown',
+        property_id: typeof value?.property_id === 'number' ? value.property_id : null,
+        label: typeof value?.label === 'string' ? value.label : null,
+    };
+};
+
+const normalizeDailyMarketScanRunRequest = (
+    value: Partial<DailyMarketScanRunRequest> | null | undefined,
+): DailyMarketScanRunRequest => {
+    return {
+        scan_mode:
+            value?.scan_mode === 'client_match' ||
+            value?.scan_mode === 'competitor_watch'
+                ? value.scan_mode
+                : 'full_daily_scan',
+        run_mode:
+            value?.run_mode === 'simulated_preview' || value?.run_mode === 'scheduled_monitor'
+                ? value.run_mode
+                : 'manual_preview',
+        source_preference:
+            value?.source_preference === 'authenticated_mls_browser_first' ||
+            value?.source_preference === 'public_only'
+                ? value.source_preference
+                : 'auto',
+        contact_ids: ensureArray<number>(value?.contact_ids).filter(
+            (item): item is number => typeof item === 'number' && Number.isInteger(item) && item > 0,
+        ),
+        property_ids: ensureArray<number>(value?.property_ids).filter(
+            (item): item is number => typeof item === 'number' && Number.isInteger(item) && item > 0,
+        ),
+        listing_refs: ensureArray<Partial<DailyMarketScanListingReference>>(
+            value?.listing_refs,
+        ).map(normalizeDailyMarketScanListingReference),
+        max_subjects:
+            typeof value?.max_subjects === 'number' && Number.isFinite(value.max_subjects)
+                ? value.max_subjects
+                : 25,
+    };
+};
+
 const normalizeDailyMarketScanSourceAttempt = (
     value: Partial<DailyMarketScanSourceAttempt> | null | undefined,
 ): DailyMarketScanSourceAttempt => {
@@ -2857,7 +2943,10 @@ const normalizeDailyMarketScanSummary = (
             value?.scan_mode === 'competitor_watch'
                 ? value.scan_mode
                 : 'full_daily_scan',
-        run_mode: value?.run_mode === 'simulated_preview' ? 'simulated_preview' : 'manual_preview',
+        run_mode:
+            value?.run_mode === 'simulated_preview' || value?.run_mode === 'scheduled_monitor'
+                ? value.run_mode
+                : 'manual_preview',
         scope: normalizeDailyMarketScanScopeSummary(value?.scope),
         provider_order: ensureArray<DailyMarketScanProviderKey>(value?.provider_order).filter(
             (item): item is DailyMarketScanProviderKey =>
@@ -2901,6 +2990,69 @@ const normalizeDailyMarketScanLatest = (
         status: typeof value?.status === 'string' ? value.status : null,
         error: typeof value?.error === 'string' ? value.error : null,
         result: normalizeDailyMarketScanResult(value?.result),
+    };
+};
+
+const normalizeDailyMarketScanWatchlist = (
+    value: Partial<DailyMarketScanWatchlist> | null | undefined,
+): DailyMarketScanWatchlist => {
+    return {
+        id: typeof value?.id === 'number' ? value.id : 0,
+        name: typeof value?.name === 'string' ? value.name : 'Untitled watchlist',
+        enabled: value?.enabled !== false,
+        schedule_interval_minutes:
+            typeof value?.schedule_interval_minutes === 'number'
+                ? value.schedule_interval_minutes
+                : 60,
+        run_request: normalizeDailyMarketScanRunRequest(value?.run_request),
+        operator_notes: ensureArray<string>(value?.operator_notes),
+        next_run_at: typeof value?.next_run_at === 'string' ? value.next_run_at : null,
+        last_run_id: typeof value?.last_run_id === 'number' ? value.last_run_id : null,
+        last_run_status:
+            typeof value?.last_run_status === 'string' ? value.last_run_status : null,
+        last_run_error:
+            typeof value?.last_run_error === 'string' ? value.last_run_error : null,
+        last_run_started_at:
+            typeof value?.last_run_started_at === 'string' ? value.last_run_started_at : null,
+        last_run_finished_at:
+            typeof value?.last_run_finished_at === 'string' ? value.last_run_finished_at : null,
+        created_at: typeof value?.created_at === 'string' ? value.created_at : '',
+        updated_at: typeof value?.updated_at === 'string' ? value.updated_at : '',
+    };
+};
+
+const normalizeDailyMarketScanWatchlistSchedulerStatus = (
+    value: Partial<DailyMarketScanWatchlistSchedulerStatusResponse> | null | undefined,
+): DailyMarketScanWatchlistSchedulerStatusResponse => {
+    return {
+        scheduler_key:
+            typeof value?.scheduler_key === 'string'
+                ? value.scheduler_key
+                : 'daily_market_scan_watchlist_scheduler',
+        poll_interval_seconds:
+            typeof value?.poll_interval_seconds === 'number'
+                ? value.poll_interval_seconds
+                : 300,
+        enabled_watchlist_count:
+            typeof value?.enabled_watchlist_count === 'number'
+                ? value.enabled_watchlist_count
+                : 0,
+        due_watchlist_count:
+            typeof value?.due_watchlist_count === 'number' ? value.due_watchlist_count : 0,
+        next_due_at: typeof value?.next_due_at === 'string' ? value.next_due_at : null,
+        last_sweep_started_at:
+            typeof value?.last_sweep_started_at === 'string'
+                ? value.last_sweep_started_at
+                : null,
+        last_sweep_finished_at:
+            typeof value?.last_sweep_finished_at === 'string'
+                ? value.last_sweep_finished_at
+                : null,
+        last_status: typeof value?.last_status === 'string' ? value.last_status : 'idle',
+        last_error: typeof value?.last_error === 'string' ? value.last_error : null,
+        last_due_count: typeof value?.last_due_count === 'number' ? value.last_due_count : 0,
+        last_triggered_count:
+            typeof value?.last_triggered_count === 'number' ? value.last_triggered_count : 0,
     };
 };
 
@@ -4196,6 +4348,81 @@ export const agentsService = {
             },
         );
         return ensureArray<AgentAuditLog>(res.data);
+    },
+
+    getDailyMarketScanWatchlists: async (
+        limit = 100,
+    ): Promise<DailyMarketScanWatchlist[]> => {
+        const res = await api.get<DailyMarketScanWatchlist[]>(
+            '/agents/daily-market-scan/watchlists',
+            {
+                params: { limit },
+            },
+        );
+        return ensureArray<Partial<DailyMarketScanWatchlist>>(res.data).map(
+            normalizeDailyMarketScanWatchlist,
+        );
+    },
+
+    createDailyMarketScanWatchlist: async (
+        payload: DailyMarketScanWatchlistUpsertRequest,
+    ): Promise<DailyMarketScanWatchlist> => {
+        const normalizedPayload: DailyMarketScanWatchlistUpsertRequest = {
+            name: payload.name.trim(),
+            enabled: payload.enabled !== false,
+            schedule_interval_minutes: Math.max(
+                1,
+                Math.trunc(payload.schedule_interval_minutes || 60),
+            ),
+            run_request: normalizeDailyMarketScanRunRequest(payload.run_request),
+            operator_notes: ensureArray<string>(payload.operator_notes).filter(Boolean),
+        };
+        const res = await api.post<DailyMarketScanWatchlist>(
+            '/agents/daily-market-scan/watchlists',
+            normalizedPayload,
+        );
+        return normalizeDailyMarketScanWatchlist(res.data);
+    },
+
+    updateDailyMarketScanWatchlist: async (
+        watchlistId: number,
+        payload: DailyMarketScanWatchlistUpsertRequest,
+    ): Promise<DailyMarketScanWatchlist> => {
+        const normalizedPayload: DailyMarketScanWatchlistUpsertRequest = {
+            name: payload.name.trim(),
+            enabled: payload.enabled !== false,
+            schedule_interval_minutes: Math.max(
+                1,
+                Math.trunc(payload.schedule_interval_minutes || 60),
+            ),
+            run_request: normalizeDailyMarketScanRunRequest(payload.run_request),
+            operator_notes: ensureArray<string>(payload.operator_notes).filter(Boolean),
+        };
+        const res = await api.put<DailyMarketScanWatchlist>(
+            `/agents/daily-market-scan/watchlists/${watchlistId}`,
+            normalizedPayload,
+        );
+        return normalizeDailyMarketScanWatchlist(res.data);
+    },
+
+    deleteDailyMarketScanWatchlist: async (watchlistId: number): Promise<void> => {
+        await api.delete(`/agents/daily-market-scan/watchlists/${watchlistId}`);
+    },
+
+    triggerDailyMarketScanWatchlistRunNow: async (
+        watchlistId: number,
+    ): Promise<AgentRun> => {
+        const res = await api.post<AgentRun>(
+            `/agents/daily-market-scan/watchlists/${watchlistId}/run-now`,
+        );
+        return res.data;
+    },
+
+    getDailyMarketScanWatchlistSchedulerStatus: async (): Promise<DailyMarketScanWatchlistSchedulerStatusResponse> => {
+        const res = await api.get<DailyMarketScanWatchlistSchedulerStatusResponse>(
+            '/agents/daily-market-scan/watchlists/scheduler-status',
+        );
+        return normalizeDailyMarketScanWatchlistSchedulerStatus(res.data);
     },
 
     triggerStrategyCoordinationRunOnce: async (
