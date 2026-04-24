@@ -8,7 +8,11 @@ import type {
     ListingAlertAutomaticBatchResult,
     ListingAlertAutomaticMessageOutcomeSummary,
     ListingAlertAutomaticReviewedResultResponse,
+    ListingAlertAutoReviewResult,
     ListingAlertClientAssociationResponse,
+    ListingAlertCriterionVerdict,
+    ListingAlertFitAnalysis,
+    ListingAlertFitStrength,
     ListingAlertGmailCandidateMessage,
     ListingAlertGmailFetchCandidatesResponse,
     ListingAlertGmailImportOutcome,
@@ -16,6 +20,7 @@ import type {
     ListingAlertManualPacketResultResponse,
     ListingAlertManualReviewPacket,
     ListingAlertManualReviewSubmissionRequest,
+    ListingAlertNormalizedListing,
     ListingAlertRecommendationLatestResponse,
     ListingAlertRecommendationRunReportResponse,
     ListingAlertReviewedSubmissionResultResponse,
@@ -222,6 +227,224 @@ const renderInlineList = (values: string[]) => {
         return 'n/a';
     }
     return values.join(' | ');
+};
+
+const FIT_STRENGTH_STYLES: Record<ListingAlertFitStrength, string> = {
+    strong: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-100',
+    moderate: 'border-amber-500/30 bg-amber-500/10 text-amber-100',
+    limited: 'border-rose-500/30 bg-rose-500/10 text-rose-100',
+    unknown: 'border-white/10 bg-white/5 text-gray-200',
+};
+
+const VERDICT_STYLES: Record<ListingAlertCriterionVerdict, string> = {
+    match: 'text-emerald-300',
+    exceeds: 'text-sky-300',
+    mismatch: 'text-rose-300',
+    over_budget: 'text-rose-300',
+    under_budget: 'text-amber-300',
+    unknown: 'text-gray-400',
+};
+
+const renderFitAnalysisBlock = (
+    fitAnalysis: ListingAlertFitAnalysis | null | undefined,
+) => {
+    if (!fitAnalysis) {
+        return null;
+    }
+    const strength = fitAnalysis.fit_strength;
+    const strengthClass = FIT_STRENGTH_STYLES[strength];
+    const fitScorePct = Math.round(
+        Math.max(0, Math.min(1, fitAnalysis.fit_score)) * 100,
+    );
+    return (
+        <div className="mt-3 space-y-2 rounded border border-white/10 bg-white/5 p-3 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+                <span
+                    className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${strengthClass}`}
+                >
+                    Fit: {humanizeEnum(strength)}
+                </span>
+                <span className="text-gray-400">Score: {fitScorePct}%</span>
+            </div>
+            {fitAnalysis.why_it_fits.length > 0 && (
+                <div>
+                    <div className="font-medium text-gray-200">Why it fits</div>
+                    <ul className="mt-1 list-disc space-y-0.5 pl-5 text-gray-300">
+                        {fitAnalysis.why_it_fits.map((item, index) => (
+                            <li key={`why-${index}`}>{item}</li>
+                        ))}
+                    </ul>
+                </div>
+            )}
+            {fitAnalysis.tradeoffs.length > 0 && (
+                <div>
+                    <div className="font-medium text-gray-200">Tradeoffs</div>
+                    <ul className="mt-1 list-disc space-y-0.5 pl-5 text-rose-200">
+                        {fitAnalysis.tradeoffs.map((item, index) => (
+                            <li key={`tradeoff-${index}`}>{item}</li>
+                        ))}
+                    </ul>
+                </div>
+            )}
+            {fitAnalysis.criteria_comparison.length > 0 && (
+                <div className="overflow-x-auto">
+                    <table className="w-full min-w-[420px] border-separate border-spacing-y-1">
+                        <thead>
+                            <tr className="text-left text-[11px] uppercase tracking-wide text-gray-400">
+                                <th className="pr-2 font-medium">Criterion</th>
+                                <th className="pr-2 font-medium">Client</th>
+                                <th className="pr-2 font-medium">Listing</th>
+                                <th className="font-medium">Verdict</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {fitAnalysis.criteria_comparison.map((row, index) => (
+                                <tr
+                                    key={`cmp-${row.criterion}-${index}`}
+                                    className="bg-black/20"
+                                >
+                                    <td className="rounded-l px-2 py-1 text-gray-200">
+                                        {humanizeEnum(row.criterion)}
+                                    </td>
+                                    <td className="px-2 py-1 text-gray-300">
+                                        {row.client ?? 'n/a'}
+                                    </td>
+                                    <td className="px-2 py-1 text-gray-300">
+                                        {row.listing ?? 'n/a'}
+                                    </td>
+                                    <td
+                                        className={`rounded-r px-2 py-1 font-medium ${VERDICT_STYLES[row.verdict]}`}
+                                    >
+                                        {humanizeEnum(row.verdict)}
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+        </div>
+    );
+};
+
+const findListingByRef = (
+    listings: ListingAlertNormalizedListing[],
+    listingRef: string,
+): ListingAlertNormalizedListing | undefined => {
+    return listings.find((listing) => listing.listing_ref === listingRef);
+};
+
+const renderAutoReviewBlock = (
+    autoReview: ListingAlertAutoReviewResult | null | undefined,
+    extractedListings: ListingAlertNormalizedListing[],
+    hasNoQualifiedMatchesFlag: boolean,
+) => {
+    if (!autoReview) {
+        return null;
+    }
+    const hasShortlist = autoReview.shortlist.length > 0;
+    return (
+        <div className="rounded border border-white/10 bg-white/5 p-3 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+                <div className="font-medium text-sm">Auto-Generated Review</div>
+                <div className="text-xs text-gray-400">
+                    {hasShortlist
+                        ? `${autoReview.shortlist.length} shortlisted`
+                        : 'No qualified matches'}
+                </div>
+            </div>
+            {hasNoQualifiedMatchesFlag && !hasShortlist && (
+                <div className="rounded border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-100">
+                    No listing passed the automatic fit gate. Review the extracted
+                    listings, then submit a manual shortlist or revise the auto review.
+                </div>
+            )}
+            {autoReview.recommendation_reasoning && (
+                <div className="text-xs text-gray-200 whitespace-pre-wrap">
+                    {autoReview.recommendation_reasoning}
+                </div>
+            )}
+            {hasShortlist && (
+                <div className="space-y-2">
+                    {autoReview.shortlist.map((item) => {
+                        const listing = findListingByRef(
+                            extractedListings,
+                            item.listing_ref,
+                        );
+                        return (
+                            <div
+                                key={`auto-${item.listing_ref}`}
+                                className="rounded border border-white/10 bg-black/10 p-2 text-xs"
+                            >
+                                <div className="flex items-center justify-between gap-2">
+                                    <div className="font-medium text-gray-100">
+                                        #{item.rank} {listing?.address ?? item.listing_ref}
+                                    </div>
+                                    <div className="text-gray-400">
+                                        {listing
+                                            ? `${formatCurrency(listing.price)} · ${humanizeEnum(listing.market_type)}`
+                                            : 'Unknown listing'}
+                                    </div>
+                                </div>
+                                {item.why_selected.length > 0 && (
+                                    <ul className="mt-1 list-disc space-y-0.5 pl-5 text-gray-300">
+                                        {item.why_selected.map((reason, index) => (
+                                            <li key={`why-sel-${index}`}>{reason}</li>
+                                        ))}
+                                    </ul>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+            {autoReview.tradeoff_notes.length > 0 && (
+                <div className="text-xs">
+                    <div className="font-medium text-gray-200">Tradeoffs</div>
+                    <ul className="mt-1 list-disc space-y-0.5 pl-5 text-rose-200">
+                        {autoReview.tradeoff_notes.map((note, index) => (
+                            <li key={`auto-tradeoff-${index}`}>{note}</li>
+                        ))}
+                    </ul>
+                </div>
+            )}
+            {autoReview.operator_notes.length > 0 && (
+                <div className="text-xs">
+                    <div className="font-medium text-gray-200">Operator notes</div>
+                    <ul className="mt-1 list-disc space-y-0.5 pl-5 text-gray-300">
+                        {autoReview.operator_notes.map((note, index) => (
+                            <li key={`auto-op-${index}`}>{note}</li>
+                        ))}
+                    </ul>
+                </div>
+            )}
+            {autoReview.client_facing_drafts.length > 0 && (
+                <div className="space-y-2">
+                    <div className="font-medium text-sm text-gray-200">
+                        Client-facing draft preview
+                    </div>
+                    {autoReview.client_facing_drafts.map((draft, index) => (
+                        <div
+                            key={`auto-draft-${index}`}
+                            className="rounded border border-white/10 bg-black/20 p-2 text-xs"
+                        >
+                            {draft.recipient_email && (
+                                <div className="text-gray-400">
+                                    To: {draft.recipient_email}
+                                </div>
+                            )}
+                            <div className="mt-1 font-medium text-gray-100">
+                                Subject: {draft.subject || '(no subject)'}
+                            </div>
+                            <pre className="mt-1 whitespace-pre-wrap break-words font-sans text-gray-200">
+                                {draft.body}
+                            </pre>
+                        </div>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
 };
 
 const isPacketResult = (
@@ -485,6 +708,12 @@ const ListingAlertRecommendationPanel = () => {
     const [automaticAuditError, setAutomaticAuditError] = useState<string | null>(null);
     const [automaticApprovalError, setAutomaticApprovalError] = useState<string | null>(null);
     const [reviewFormError, setReviewFormError] = useState<string | null>(null);
+    const [reviseOpenApprovalId, setReviseOpenApprovalId] = useState<number | null>(null);
+    const [reviseInstructions, setReviseInstructions] = useState<string>('');
+    const [reviseOperatorNotes, setReviseOperatorNotes] = useState<string>('');
+    const [reviseSubmittingApprovalId, setReviseSubmittingApprovalId] =
+        useState<number | null>(null);
+    const [reviseError, setReviseError] = useState<string | null>(null);
     const [gmailStatusNotice, setGmailStatusNotice] = useState<string | null>(null);
     const [showManualTokenFallback, setShowManualTokenFallback] = useState(false);
     const [manualTokenFallbackEnabled, setManualTokenFallbackEnabled] = useState(false);
@@ -1449,7 +1678,119 @@ const ListingAlertRecommendationPanel = () => {
         }
     };
 
-    const renderPacketDetails = (packet: ListingAlertManualReviewPacket) => {
+    const openReviseForm = (approvalId: number) => {
+        setReviseOpenApprovalId(approvalId);
+        setReviseInstructions('');
+        setReviseOperatorNotes('');
+        setReviseError(null);
+    };
+
+    const closeReviseForm = () => {
+        setReviseOpenApprovalId(null);
+        setReviseInstructions('');
+        setReviseOperatorNotes('');
+        setReviseError(null);
+    };
+
+    const handleReviseSubmit = async (approvalId: number) => {
+        const instructions = reviseInstructions.trim();
+        if (instructions.length === 0) {
+            setReviseError('Revision instructions are required.');
+            return;
+        }
+        const operatorNotes = reviseOperatorNotes.trim();
+        setReviseSubmittingApprovalId(approvalId);
+        setReviseError(null);
+        try {
+            const run = await agentsService.reviseListingAlertReview({
+                source_approval_id: approvalId,
+                revision_instructions: instructions,
+                operator_notes: operatorNotes.length > 0 ? operatorNotes : null,
+            });
+            closeReviseForm();
+            await refreshAllData(run.id, selectedAutomaticRunId);
+            setSelectedRunId(run.id);
+        } catch (submitError) {
+            setReviseError(
+                getErrorMessage(submitError, 'Failed to create revised review.'),
+            );
+        } finally {
+            setReviseSubmittingApprovalId(null);
+        }
+    };
+
+    const renderReviseForm = (approvalId: number) => {
+        const isOpen = reviseOpenApprovalId === approvalId;
+        const isSubmitting = reviseSubmittingApprovalId === approvalId;
+        if (!isOpen) {
+            return (
+                <div className="mt-2">
+                    <button
+                        type="button"
+                        onClick={() => openReviseForm(approvalId)}
+                        className="rounded border border-sky-500/40 bg-sky-500/10 px-3 py-1 text-xs text-sky-100 hover:bg-sky-500/20"
+                    >
+                        Revise with instructions
+                    </button>
+                </div>
+            );
+        }
+        return (
+            <div className="mt-2 space-y-2 rounded border border-sky-500/30 bg-sky-500/5 p-3">
+                <div className="text-xs font-medium text-sky-100">
+                    Revise review · Approval #{approvalId}
+                </div>
+                <label className="block text-xs text-gray-200">
+                    Revision instructions
+                    <textarea
+                        value={reviseInstructions}
+                        onChange={(event) => setReviseInstructions(event.target.value)}
+                        className="mt-1 min-h-24 w-full rounded border border-white/10 bg-black/20 px-3 py-2 text-sm"
+                        placeholder="e.g. Tighten the draft to focus on the 1+1 condo near Yonge & Eglinton; drop the over-budget listings."
+                        disabled={isSubmitting}
+                    />
+                </label>
+                <label className="block text-xs text-gray-200">
+                    Operator notes (optional)
+                    <textarea
+                        value={reviseOperatorNotes}
+                        onChange={(event) => setReviseOperatorNotes(event.target.value)}
+                        className="mt-1 min-h-16 w-full rounded border border-white/10 bg-black/20 px-3 py-2 text-sm"
+                        placeholder="Internal context for audit trail."
+                        disabled={isSubmitting}
+                    />
+                </label>
+                {reviseError && (
+                    <div className="rounded border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-xs text-rose-100">
+                        {reviseError}
+                    </div>
+                )}
+                <div className="flex items-center gap-2">
+                    <button
+                        type="button"
+                        onClick={() => handleReviseSubmit(approvalId)}
+                        disabled={isSubmitting || reviseInstructions.trim().length === 0}
+                        className="rounded bg-sky-500 px-3 py-1 text-xs font-medium text-white hover:bg-sky-400 disabled:opacity-60"
+                    >
+                        {isSubmitting ? 'Submitting…' : 'Submit revision'}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={closeReviseForm}
+                        disabled={isSubmitting}
+                        className="rounded border border-white/10 bg-white/5 px-3 py-1 text-xs text-gray-100 hover:bg-white/10 disabled:opacity-60"
+                    >
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        );
+    };
+
+    const renderPacketDetails = (
+        packet: ListingAlertManualReviewPacket,
+        riskFlags: string[] = [],
+    ) => {
         return (
             <div className="space-y-4">
                 <div className="rounded border border-white/10 bg-black/10 p-3 text-sm space-y-2">
@@ -1571,11 +1912,18 @@ const ListingAlertRecommendationPanel = () => {
                                             {listing.listing_url}
                                         </div>
                                     )}
+                                    {renderFitAnalysisBlock(listing.fit_analysis)}
                                 </div>
                             ))}
                         </div>
                     )}
                 </div>
+
+                {renderAutoReviewBlock(
+                    packet.auto_review,
+                    packet.extracted_listings,
+                    riskFlags.includes('auto_review_no_qualified_matches'),
+                )}
             </div>
         );
     };
@@ -1625,6 +1973,7 @@ const ListingAlertRecommendationPanel = () => {
                                 : ''}
                         </div>
                     )}
+                    {approval?.status === 'rejected' && renderReviseForm(approval.id)}
                 </div>
 
                 {renderAssociationSummary(result.association)}
@@ -2955,7 +3304,10 @@ const ListingAlertRecommendationPanel = () => {
                                             )}
                                         </div>
                                         {selectedReport.result.manual_review_packet ? (
-                                            renderPacketDetails(selectedReport.result.manual_review_packet)
+                                            renderPacketDetails(
+                                                selectedReport.result.manual_review_packet,
+                                                selectedReport.result.risk_flags,
+                                            )
                                         ) : (
                                             <div className="space-y-3">
                                                 {renderAssociationSummary(selectedReport.result.association)}
@@ -3106,6 +3458,7 @@ const ListingAlertRecommendationPanel = () => {
                                                             </label>
                                                         </div>
                                                     )}
+                                                    {renderFitAnalysisBlock(listing.fit_analysis)}
                                                 </div>
                                             );
                                         })
@@ -3410,6 +3763,8 @@ const ListingAlertRecommendationPanel = () => {
                                                 renderPacketDetails(
                                                     selectedAutomaticReport.result
                                                         .manual_review_packet,
+                                                    selectedAutomaticReport.result
+                                                        .risk_flags,
                                                 )
                                             ) : (
                                                 <div className="space-y-3">

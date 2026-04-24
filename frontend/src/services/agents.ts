@@ -384,6 +384,32 @@ export interface ListingAlertRunRequest {
     manual_reasoning_surface?: string | null;
 }
 
+export type ListingAlertFitStrength = 'strong' | 'moderate' | 'limited' | 'unknown';
+
+export type ListingAlertCriterionVerdict =
+    | 'match'
+    | 'exceeds'
+    | 'mismatch'
+    | 'over_budget'
+    | 'under_budget'
+    | 'unknown';
+
+export interface ListingAlertFitCriterionComparison {
+    criterion: string;
+    client?: string | null;
+    listing?: string | null;
+    verdict: ListingAlertCriterionVerdict;
+}
+
+export interface ListingAlertFitAnalysis {
+    listing_ref: string;
+    fit_score: number;
+    fit_strength: ListingAlertFitStrength;
+    why_it_fits: string[];
+    tradeoffs: string[];
+    criteria_comparison: ListingAlertFitCriterionComparison[];
+}
+
 export interface ListingAlertNormalizedListing {
     listing_ref: string;
     address: string;
@@ -396,6 +422,7 @@ export interface ListingAlertNormalizedListing {
     listing_url?: string | null;
     source_excerpt: string;
     match_notes: string[];
+    fit_analysis?: ListingAlertFitAnalysis | null;
 }
 
 export interface ListingAlertAssociationDiagnostics {
@@ -433,6 +460,26 @@ export interface ListingAlertClientAssociationResponse {
     failed_checks?: string[];
 }
 
+export interface ListingAlertAutoReviewShortlistItem {
+    listing_ref: string;
+    rank: number;
+    why_selected: string[];
+}
+
+export interface ListingAlertAutoReviewDraft {
+    recipient_email?: string | null;
+    subject: string;
+    body: string;
+}
+
+export interface ListingAlertAutoReviewResult {
+    shortlist: ListingAlertAutoReviewShortlistItem[];
+    tradeoff_notes: string[];
+    recommendation_reasoning: string;
+    client_facing_drafts: ListingAlertAutoReviewDraft[];
+    operator_notes: string[];
+}
+
 export interface ListingAlertManualReviewPacket {
     packet_version: string;
     workflow_mode: 'manual';
@@ -448,6 +495,15 @@ export interface ListingAlertManualReviewPacket {
     draft_constraints: string[];
     recommended_prompt_context: string[];
     return_contract: Record<string, unknown>;
+    auto_review?: ListingAlertAutoReviewResult | null;
+}
+
+export interface ListingAlertReviseReviewRequest {
+    source_approval_id: number;
+    revision_instructions: string;
+    operator_notes?: string | null;
+    override_shortlist?: ListingAlertReviewedShortlistSubmissionItem[] | null;
+    override_client_facing_draft?: ListingAlertClientDraftSubmissionItem | null;
 }
 
 export interface ListingAlertManualPacketResultResponse {
@@ -1982,6 +2038,65 @@ const normalizeListingAlertAssociation = (
     };
 };
 
+const normalizeListingAlertFitStrength = (
+    value: unknown,
+): ListingAlertFitStrength => {
+    if (
+        value === 'strong' ||
+        value === 'moderate' ||
+        value === 'limited' ||
+        value === 'unknown'
+    ) {
+        return value;
+    }
+    return 'unknown';
+};
+
+const normalizeListingAlertCriterionVerdict = (
+    value: unknown,
+): ListingAlertCriterionVerdict => {
+    if (
+        value === 'match' ||
+        value === 'exceeds' ||
+        value === 'mismatch' ||
+        value === 'over_budget' ||
+        value === 'under_budget' ||
+        value === 'unknown'
+    ) {
+        return value;
+    }
+    return 'unknown';
+};
+
+const normalizeListingAlertFitCriterionComparison = (
+    value: Partial<ListingAlertFitCriterionComparison> | null | undefined,
+): ListingAlertFitCriterionComparison => {
+    return {
+        criterion: typeof value?.criterion === 'string' ? value.criterion : '',
+        client: typeof value?.client === 'string' ? value.client : null,
+        listing: typeof value?.listing === 'string' ? value.listing : null,
+        verdict: normalizeListingAlertCriterionVerdict(value?.verdict),
+    };
+};
+
+const normalizeListingAlertFitAnalysis = (
+    value: Partial<ListingAlertFitAnalysis> | null | undefined,
+): ListingAlertFitAnalysis | null => {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+    return {
+        listing_ref: typeof value.listing_ref === 'string' ? value.listing_ref : '',
+        fit_score: typeof value.fit_score === 'number' ? value.fit_score : 0,
+        fit_strength: normalizeListingAlertFitStrength(value.fit_strength),
+        why_it_fits: ensureArray<string>(value.why_it_fits),
+        tradeoffs: ensureArray<string>(value.tradeoffs),
+        criteria_comparison: ensureArray<
+            Partial<ListingAlertFitCriterionComparison>
+        >(value.criteria_comparison).map(normalizeListingAlertFitCriterionComparison),
+    };
+};
+
 const normalizeListingAlertNormalizedListing = (
     value: Partial<ListingAlertNormalizedListing> | null | undefined,
 ): ListingAlertNormalizedListing => {
@@ -2006,6 +2121,50 @@ const normalizeListingAlertNormalizedListing = (
         source_excerpt:
             typeof value?.source_excerpt === 'string' ? value.source_excerpt : '',
         match_notes: ensureArray<string>(value?.match_notes),
+        fit_analysis: normalizeListingAlertFitAnalysis(value?.fit_analysis),
+    };
+};
+
+const normalizeListingAlertAutoReviewShortlistItem = (
+    value: Partial<ListingAlertAutoReviewShortlistItem> | null | undefined,
+): ListingAlertAutoReviewShortlistItem => {
+    return {
+        listing_ref: typeof value?.listing_ref === 'string' ? value.listing_ref : '',
+        rank: typeof value?.rank === 'number' ? value.rank : 0,
+        why_selected: ensureArray<string>(value?.why_selected),
+    };
+};
+
+const normalizeListingAlertAutoReviewDraft = (
+    value: Partial<ListingAlertAutoReviewDraft> | null | undefined,
+): ListingAlertAutoReviewDraft => {
+    return {
+        recipient_email:
+            typeof value?.recipient_email === 'string' ? value.recipient_email : null,
+        subject: typeof value?.subject === 'string' ? value.subject : '',
+        body: typeof value?.body === 'string' ? value.body : '',
+    };
+};
+
+const normalizeListingAlertAutoReviewResult = (
+    value: Partial<ListingAlertAutoReviewResult> | null | undefined,
+): ListingAlertAutoReviewResult | null => {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+    return {
+        shortlist: ensureArray<Partial<ListingAlertAutoReviewShortlistItem>>(
+            value.shortlist,
+        ).map(normalizeListingAlertAutoReviewShortlistItem),
+        tradeoff_notes: ensureArray<string>(value.tradeoff_notes),
+        recommendation_reasoning:
+            typeof value.recommendation_reasoning === 'string'
+                ? value.recommendation_reasoning
+                : '',
+        client_facing_drafts: ensureArray<Partial<ListingAlertAutoReviewDraft>>(
+            value.client_facing_drafts,
+        ).map(normalizeListingAlertAutoReviewDraft),
+        operator_notes: ensureArray<string>(value.operator_notes),
     };
 };
 
@@ -2043,6 +2202,7 @@ const normalizeListingAlertManualReviewPacket = (
         draft_constraints: ensureArray<string>(value.draft_constraints),
         recommended_prompt_context: ensureArray<string>(value.recommended_prompt_context),
         return_contract: isRecord(value.return_contract) ? value.return_contract : {},
+        auto_review: normalizeListingAlertAutoReviewResult(value.auto_review),
     };
 };
 
@@ -4099,6 +4259,16 @@ export const agentsService = {
     ): Promise<AgentRun> => {
         const res = await api.post<AgentRun>(
             '/agents/listing-alert-recommendation/submit-manual-review',
+            payload,
+        );
+        return res.data;
+    },
+
+    reviseListingAlertReview: async (
+        payload: ListingAlertReviseReviewRequest,
+    ): Promise<AgentRun> => {
+        const res = await api.post<AgentRun>(
+            '/agents/listing-alert-recommendation/revise-review',
             payload,
         );
         return res.data;
