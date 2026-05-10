@@ -263,6 +263,97 @@ export interface AgentBridgeExecutionResponse {
     result_payload: Record<string, unknown>;
 }
 
+export interface AgentBridgeMemoryEntry {
+    memory_id: string;
+    run_id?: string;
+    automation_id?: string;
+    source_kind: string;
+    event_type: string;
+    workflow: string;
+    summary: string;
+    evidence_payload: Record<string, unknown>;
+    decision_status: string;
+    human_review_required: boolean;
+    created_at: string;
+}
+
+export interface AgentBridgeMemoryResponse {
+    entries: AgentBridgeMemoryEntry[];
+}
+
+export interface AgentBridgeAuditDashboardResponse {
+    direct_external_actions: boolean;
+    execution_count: number;
+    memory_event_count: number;
+    active_automation_count: number;
+    due_automation_count: number;
+    waiting_approval_count: number;
+    completed_count: number;
+    blocked_count: number;
+    needs_review_count: number;
+    next_due_at?: string;
+    guardrails: string[];
+    recent_memory: AgentBridgeMemoryEntry[];
+}
+
+export type AgentBridgeAutomationCadence = 'manual' | 'daily' | 'weekly';
+export type AgentBridgeAutomationStatus = 'active' | 'paused';
+
+export interface AgentBridgeAutomationCreateRequest {
+    name: string;
+    workflow: string;
+    target: AgentBridgeTarget;
+    execution_profile?: string;
+    source_context: string;
+    requested_outcome?: string;
+    cadence: AgentBridgeAutomationCadence;
+    status: AgentBridgeAutomationStatus;
+    max_retries: number;
+    operator_notes?: string;
+}
+
+export interface AgentBridgeAutomationResponse {
+    automation_id: string;
+    name: string;
+    workflow: string;
+    target: AgentBridgeTarget;
+    target_label: string;
+    execution_profile: string;
+    cadence: AgentBridgeAutomationCadence;
+    status: AgentBridgeAutomationStatus;
+    source_context: string;
+    requested_outcome?: string;
+    operator_notes?: string;
+    approval_required: boolean;
+    direct_external_actions: boolean;
+    max_retries: number;
+    retry_count: number;
+    next_due_at?: string;
+    last_checked_at?: string;
+    last_run_id?: string;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface AgentBridgeAutomationListResponse {
+    automations: AgentBridgeAutomationResponse[];
+}
+
+export interface AgentBridgeAutomationTickResponse {
+    checked_at: string;
+    generated_execution_count: number;
+    generated_executions: AgentBridgeExecutionResponse[];
+    skipped: string[];
+    direct_external_actions: boolean;
+}
+
+export interface AgentBridgeAutomationRetryResponse {
+    automation_id: string;
+    retry_count: number;
+    generated_execution: AgentBridgeExecutionResponse;
+    direct_external_actions: boolean;
+}
+
 export const crmService = {
     // --- Contacts ---
     getContacts: async () => {
@@ -407,6 +498,36 @@ export const crmService = {
 
     recordAgentBridgeExecutionResult: async (runId: string, data: AgentBridgeExecutionResultRequest) => {
         const response = await api.post<AgentBridgeExecutionResponse>(`/integrations/agent-bridge/executions/${runId}/result`, data);
+        return response.data;
+    },
+
+    listAgentBridgeMemory: async () => {
+        const response = await api.get<AgentBridgeMemoryResponse>('/integrations/agent-bridge/memory');
+        return response.data;
+    },
+
+    getAgentBridgeAuditDashboard: async () => {
+        const response = await api.get<AgentBridgeAuditDashboardResponse>('/integrations/agent-bridge/audit-dashboard');
+        return response.data;
+    },
+
+    listAgentBridgeAutomations: async () => {
+        const response = await api.get<AgentBridgeAutomationListResponse>('/integrations/agent-bridge/automations');
+        return response.data;
+    },
+
+    createAgentBridgeAutomation: async (data: AgentBridgeAutomationCreateRequest) => {
+        const response = await api.post<AgentBridgeAutomationResponse>('/integrations/agent-bridge/automations', data);
+        return response.data;
+    },
+
+    runDueAgentBridgeAutomations: async () => {
+        const response = await api.post<AgentBridgeAutomationTickResponse>('/integrations/agent-bridge/automations/run-due');
+        return response.data;
+    },
+
+    retryAgentBridgeAutomation: async (automationId: string) => {
+        const response = await api.post<AgentBridgeAutomationRetryResponse>(`/integrations/agent-bridge/automations/${automationId}/retry`);
         return response.data;
     },
 };

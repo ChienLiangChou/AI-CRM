@@ -318,7 +318,7 @@ class AgentBridgeExecutionApproveRequest(BaseModel):
 class AgentBridgeExecutionResultRequest(BaseModel):
     status: Literal["completed", "blocked", "needs_review"] = "completed"
     result_summary: str = Field(..., min_length=3)
-    result_payload: Dict[str, Any] = {}
+    result_payload: Dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentBridgeExecutionResponse(BaseModel):
@@ -340,4 +340,96 @@ class AgentBridgeExecutionResponse(BaseModel):
     command_text: Optional[str] = None
     audit_notes: List[str]
     result_summary: Optional[str] = None
-    result_payload: Dict[str, Any] = {}
+    result_payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentBridgeMemoryEntry(BaseModel):
+    memory_id: str
+    run_id: Optional[str] = None
+    automation_id: Optional[str] = None
+    source_kind: str
+    event_type: str
+    workflow: str
+    summary: str
+    evidence_payload: Dict[str, Any]
+    decision_status: str
+    human_review_required: bool
+    created_at: datetime
+
+
+class AgentBridgeMemoryResponse(BaseModel):
+    entries: List[AgentBridgeMemoryEntry]
+
+
+class AgentBridgeAuditDashboardResponse(BaseModel):
+    direct_external_actions: bool
+    execution_count: int
+    memory_event_count: int
+    active_automation_count: int
+    due_automation_count: int
+    waiting_approval_count: int
+    completed_count: int
+    blocked_count: int
+    needs_review_count: int
+    next_due_at: Optional[datetime] = None
+    guardrails: List[str]
+    recent_memory: List[AgentBridgeMemoryEntry]
+
+
+AgentBridgeAutomationCadence = Literal["manual", "daily", "weekly"]
+AgentBridgeAutomationStatus = Literal["active", "paused"]
+
+
+class AgentBridgeAutomationCreateRequest(BaseModel):
+    name: str = Field(..., min_length=2)
+    workflow: str = Field(..., min_length=2)
+    target: AgentBridgeTarget
+    execution_profile: Optional[str] = None
+    source_context: str = Field(..., min_length=5)
+    requested_outcome: Optional[str] = None
+    cadence: AgentBridgeAutomationCadence = "manual"
+    status: AgentBridgeAutomationStatus = "active"
+    max_retries: int = Field(default=2, ge=0, le=5)
+    operator_notes: Optional[str] = None
+
+
+class AgentBridgeAutomationResponse(BaseModel):
+    automation_id: str
+    name: str
+    workflow: str
+    target: AgentBridgeTarget
+    target_label: str
+    execution_profile: str
+    cadence: AgentBridgeAutomationCadence
+    status: AgentBridgeAutomationStatus
+    source_context: str
+    requested_outcome: Optional[str] = None
+    operator_notes: Optional[str] = None
+    approval_required: bool
+    direct_external_actions: bool
+    max_retries: int
+    retry_count: int
+    next_due_at: Optional[datetime] = None
+    last_checked_at: Optional[datetime] = None
+    last_run_id: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentBridgeAutomationListResponse(BaseModel):
+    automations: List[AgentBridgeAutomationResponse]
+
+
+class AgentBridgeAutomationTickResponse(BaseModel):
+    checked_at: datetime
+    generated_execution_count: int
+    generated_executions: List[AgentBridgeExecutionResponse]
+    skipped: List[str]
+    direct_external_actions: bool
+
+
+class AgentBridgeAutomationRetryResponse(BaseModel):
+    automation_id: str
+    retry_count: int
+    generated_execution: AgentBridgeExecutionResponse
+    direct_external_actions: bool

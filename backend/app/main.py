@@ -236,6 +236,42 @@ def record_agent_bridge_execution_result(
         raise HTTPException(status_code=404, detail="Agent Bridge execution not found")
     return result
 
+@app.get("/api/integrations/agent-bridge/memory", response_model=schemas.AgentBridgeMemoryResponse)
+def list_agent_bridge_memory(db: Session = Depends(get_db)):
+    return integrations.list_agent_bridge_memory(db)
+
+@app.get("/api/integrations/agent-bridge/audit-dashboard", response_model=schemas.AgentBridgeAuditDashboardResponse)
+def get_agent_bridge_audit_dashboard(db: Session = Depends(get_db)):
+    return integrations.get_agent_bridge_audit_dashboard(db)
+
+@app.get("/api/integrations/agent-bridge/automations", response_model=schemas.AgentBridgeAutomationListResponse)
+def list_agent_bridge_automations(db: Session = Depends(get_db)):
+    return integrations.list_agent_bridge_automations(db)
+
+@app.post("/api/integrations/agent-bridge/automations", response_model=schemas.AgentBridgeAutomationResponse)
+def create_agent_bridge_automation(req: schemas.AgentBridgeAutomationCreateRequest, db: Session = Depends(get_db)):
+    try:
+        return integrations.create_agent_bridge_automation(db, req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+@app.post("/api/integrations/agent-bridge/automations/run-due", response_model=schemas.AgentBridgeAutomationTickResponse)
+def run_due_agent_bridge_automations(db: Session = Depends(get_db)):
+    return integrations.run_due_agent_bridge_automations(db)
+
+@app.post(
+    "/api/integrations/agent-bridge/automations/{automation_id}/retry",
+    response_model=schemas.AgentBridgeAutomationRetryResponse,
+)
+def retry_agent_bridge_automation(automation_id: str, db: Session = Depends(get_db)):
+    try:
+        result = integrations.retry_agent_bridge_automation(db, automation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not result:
+        raise HTTPException(status_code=404, detail="Agent Bridge automation not found")
+    return result
+
 # --- Push Notifications ---
 @app.get("/api/push/vapid-public-key", response_model=schemas.VapidPublicKeyResponse)
 def get_vapid_public_key():

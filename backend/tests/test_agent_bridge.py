@@ -145,3 +145,120 @@ def test_agent_bridge_execution_rejects_wrong_profile_for_target():
 
     assert response.status_code == 400
     assert "Unsupported execution_profile" in response.json()["detail"]
+
+
+def test_agent_bridge_memory_layer_records_execution_lifecycle():
+    created = client.post(
+        "/api/integrations/agent-bridge/executions",
+        json={
+            "target": "skc_agent_os",
+            "workflow": "memory_layer_check",
+            "execution_profile": "internal_review",
+            "source_context": "Capture source-of-truth memory for a controlled internal review.",
+            "requested_outcome": "Keep audit-visible preparation history.",
+            "approved_by_kevin": False,
+        },
+    ).json()
+
+    client.post(
+        f"/api/integrations/agent-bridge/executions/{created['run_id']}/result",
+        json={
+            "status": "needs_review",
+            "result_summary": "Internal review prepared a human-review checklist.",
+            "result_payload": {"client_action_approved": False},
+        },
+    )
+
+    memory_response = client.get("/api/integrations/agent-bridge/memory")
+
+    assert memory_response.status_code == 200
+    memory_payload = memory_response.json()
+    matching_entries = [
+        entry for entry in memory_payload["entries"]
+        if entry["run_id"] == created["run_id"]
+    ]
+    event_types = {entry["event_type"] for entry in matching_entries}
+    assert {"execution_ticket_created", "execution_result_recorded"}.issubset(event_types)
+    assert all(entry["human_review_required"] is True for entry in matching_entries)
+
+    dashboard_response = client.get("/api/integrations/agent-bridge/audit-dashboard")
+
+    assert dashboard_response.status_code == 200
+    dashboard = dashboard_response.json()
+    assert dashboard["memory_event_count"] >= len(matching_entries)
+    assert dashboard["direct_external_actions"] is False
+    assert any("No auto-send" in rule for rule in dashboard["guardrails"])
+
+
+def test_agent_bridge_automation_engine_creates_approval_gated_due_ticket():
+    created_rule_response = client.post(
+        "/api/integrations/agent-bridge/automations",
+        json={
+            "name": "Daily public research prep",
+            "workflow": "daily_public_research_prep",
+            "target": "openclaw",
+            "execution_profile": "browsertest_public_research",
+            "source_context": "Prepare public-only daily market research inputs without login or private data.",
+            "requested_outcome": "Create a review-only public research package.",
+            "cadence": "daily",
+            "status": "active",
+            "max_retries": 2,
+        },
+    )
+
+    assert created_rule_response.status_code == 200
+    created_rule = created_rule_response.json()
+    assert created_rule["status"] == "active"
+    assert created_rule["approval_required"] is True
+    assert created_rule["direct_external_actions"] is False
+
+    tick_response = client.post("/api/integrations/agent-bridge/automations/run-due")
+
+    assert tick_response.status_code == 200
+    tick_payload = tick_response.json()
+    generated = [
+        execution for execution in tick_payload["generated_executions"]
+        if execution["execution_package"].get("automation_id") == created_rule["automation_id"]
+    ]
+    assert generated
+    assert generated[0]["status"] == "waiting_kevin_approval"
+    assert generated[0]["approved_by_kevin"] is False
+    assert "openclaw run --agent browsertest" in generated[0]["command_text"]
+
+    automations_response = client.get("/api/integrations/agent-bridge/automations")
+
+    assert automations_response.status_code == 200
+    automations = automations_response.json()["automations"]
+    matching_rules = [
+        rule for rule in automations
+        if rule["automation_id"] == created_rule["automation_id"]
+    ]
+    assert matching_rules
+    assert matching_rules[0]["last_run_id"] == generated[0]["run_id"]
+
+
+def test_agent_bridge_automation_retry_remains_preparation_only():
+    created_rule = client.post(
+        "/api/integrations/agent-bridge/automations",
+        json={
+            "name": "Chrome UI retry prep",
+            "workflow": "chrome_ui_retry_prep",
+            "target": "codex_chrome_extension",
+            "execution_profile": "skc_ui_test",
+            "source_context": "Prepare a browser-side UI check retry without submitting forms.",
+            "cadence": "manual",
+            "status": "active",
+            "max_retries": 1,
+        },
+    ).json()
+
+    retry_response = client.post(
+        f"/api/integrations/agent-bridge/automations/{created_rule['automation_id']}/retry"
+    )
+
+    assert retry_response.status_code == 200
+    retry_payload = retry_response.json()
+    assert retry_payload["retry_count"] == 1
+    assert retry_payload["generated_execution"]["status"] == "waiting_kevin_approval"
+    assert retry_payload["generated_execution"]["approved_by_kevin"] is False
+    assert retry_payload["generated_execution"]["execution_package"]["automation_id"] == created_rule["automation_id"]

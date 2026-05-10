@@ -198,3 +198,52 @@ class AgentBridgeRun(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AgentBridgeMemory(Base):
+    """Source-of-truth memory event for Agent Bridge workflow history."""
+    __tablename__ = "agent_bridge_memory"
+
+    id = Column(Integer, primary_key=True, index=True)
+    memory_id = Column(String, unique=True, index=True)
+    run_id = Column(String, nullable=True, index=True)
+    automation_id = Column(String, nullable=True, index=True)
+    source_kind = Column(String, index=True)  # execution, automation, audit
+    event_type = Column(String, index=True)
+    workflow = Column(String, index=True)
+    summary = Column(Text)
+    evidence_payload = Column(Text, default="{}")
+    decision_status = Column(String, default="waiting_review", index=True)
+    human_review_required = Column(Integer, default=1)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AgentBridgeAutomation(Base):
+    """Approval-gated automation rule that prepares Agent Bridge execution tickets."""
+    __tablename__ = "agent_bridge_automations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    automation_id = Column(String, unique=True, index=True)
+    name = Column(String)
+    workflow = Column(String, index=True)
+    target = Column(String, index=True)
+    target_label = Column(String)
+    execution_profile = Column(String)
+    cadence = Column(String, default="manual", index=True)  # manual, daily, weekly
+    status = Column(String, default="active", index=True)  # active, paused
+
+    source_context = Column(Text)
+    requested_outcome = Column(Text, nullable=True)
+    operator_notes = Column(Text, nullable=True)
+
+    approval_required = Column(Integer, default=1)
+    direct_external_actions = Column(Integer, default=0)
+    max_retries = Column(Integer, default=2)
+    retry_count = Column(Integer, default=0)
+
+    next_due_at = Column(DateTime, nullable=True, index=True)
+    last_checked_at = Column(DateTime, nullable=True)
+    last_run_id = Column(String, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

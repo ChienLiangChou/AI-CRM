@@ -9,8 +9,8 @@ The sequence is:
 1. Use v1 in real work.
 2. Collect friction.
 3. Fix the highest-friction workflow.
-4. Build source-of-truth memory.
-5. Add Automation Engine v1 only after real usage proves what should be automated.
+4. Use source-of-truth memory.
+5. Use Automation Engine v1 for preparation-only work after real usage proves what should be automated.
 
 ## 2. Week 1: use v1 and collect friction
 
@@ -54,11 +54,21 @@ Possible fixes:
 
 Pick one workflow. Do not widen scope across the whole system.
 
-## 4. Week 3: build source-of-truth memory layer
+## 4. Week 3: source-of-truth memory layer
 
 Goal: make SKC Agent OS better at remembering reusable operating context.
 
-Candidate memory objects:
+Implemented v1 surface:
+
+- Agent Bridge memory events;
+- execution ticket lifecycle history;
+- approval updates;
+- recorded external runner results;
+- automation rule events;
+- recent memory feed;
+- audit dashboard metrics.
+
+Memory candidates to keep expanding:
 
 - client preference memory;
 - property/listing memory;
@@ -69,13 +79,23 @@ Candidate memory objects:
 - workflow-specific SOPs;
 - approval outcomes.
 
-Memory must be visible, reviewable, and correctable. It should not silently change client-facing behavior.
+Memory must be visible, reviewable, and correctable. It must not silently change client-facing behavior.
 
 ## 5. Week 4: Automation Engine v1
 
 Goal: automate preparation only after real friction data identifies the safest and most valuable target.
 
-Controlled execution layer v1 is the first safe bridge toward Automation Engine v1. It should:
+Implemented v1 surface:
+
+- create preparation-only automation rules;
+- support manual, daily, and weekly cadence;
+- run due checks that create waiting-approval execution tickets;
+- prepare retry tickets within a retry limit;
+- preserve automation memory events;
+- expose active, due, waiting-approval, blocked, and review counts;
+- keep `direct_external_actions` false.
+
+Controlled execution layer v1 and Automation Engine v1 should:
 
 - schedule preparation tasks;
 - create run records;
@@ -83,12 +103,12 @@ Controlled execution layer v1 is the first safe bridge toward Automation Engine 
 - prepare drafts or recommendations;
 - route to approval;
 - preserve audit notes;
-- let Kevin stop or override.
+- let Kevin stop or override;
 - create external runner tickets for OpenClaw and Codex Chrome;
 - require Kevin approval before external execution scope is treated as ready;
 - record external runner results back into SKC Agent OS.
 
-Controlled execution layer v1 and future Automation Engine v1 must not:
+Controlled execution layer v1 and Automation Engine v1 must not:
 
 - auto-send;
 - auto-submit;
@@ -162,7 +182,7 @@ The 30-day phase succeeds if:
 
 Backlog candidates:
 
-- source-of-truth memory layer;
+- source-of-truth memory expansion;
 - workflow-specific approval queues;
 - stronger blocked reason taxonomy;
 - better Gmail draft review screen;
@@ -171,5 +191,5 @@ Backlog candidates:
 - paperwork deadline visibility;
 - safe Codex Chrome browser evidence capture workflow;
 - OpenClaw public-research import pattern;
-- Automation Engine v1 for the highest-value preparation workflow;
+- Automation Engine v1 workflow tuning for the highest-value preparation workflow;
 - strategy coordination only after enough production evidence exists.

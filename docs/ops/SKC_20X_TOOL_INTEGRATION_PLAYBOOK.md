@@ -31,6 +31,17 @@ For approved external work, use the Agent Bridge execution layer:
 6. Record the result back into SKC Agent OS.
 7. Keep client-facing action pending Kevin review.
 
+For recurring preparation work, use the Automation Engine v1 layer:
+
+1. Create an automation rule only for preparation work.
+2. Choose OpenClaw, Codex Chrome, or SKC internal review as the target.
+3. Choose a scoped execution profile.
+4. Use manual, daily, or weekly cadence.
+5. Run due checks to create waiting-approval execution tickets.
+6. Retry only within the configured retry limit.
+7. Record results back into SKC Agent OS memory and audit history.
+8. Stop before any send, submit, sign, pricing, negotiation, tenant-screening, or legal/compliance-sensitive decision.
+
 ## 3. When to use SKC Agent OS
 
 Use SKC Agent OS for production operating workflows:
@@ -50,6 +61,15 @@ Use SKC Agent OS for production operating workflows:
 - run history and review-first workflow state.
 
 SKC Agent OS is the source of truth.
+
+The current product layer includes Agent Bridge memory and an audit dashboard. Use it to inspect:
+
+- execution lifecycle history;
+- approval updates;
+- result summaries;
+- blocked and needs-review states;
+- active and due automation rules;
+- guardrails that keep external action approval-gated.
 
 ## 4. When to use OpenClaw
 
@@ -124,6 +144,8 @@ Stop for Kevin before:
 - any high-risk state-changing action.
 
 Agent Bridge execution tickets do not remove these stop conditions. They only make approved external work traceable.
+
+Automation Engine v1 also does not remove these stop conditions. It creates preparation tickets only.
 
 ## 8. OpenClaw approved agents
 

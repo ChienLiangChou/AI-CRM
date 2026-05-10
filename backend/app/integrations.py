@@ -1,6 +1,6 @@
 import json
 import shlex
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
@@ -191,6 +191,7 @@ def get_agent_bridge_status() -> schemas.AgentBridgeStatusResponse:
 def create_agent_bridge_execution(
     db: Session,
     request: schemas.AgentBridgeExecutionCreateRequest,
+    automation_id: str | None = None,
 ) -> schemas.AgentBridgeExecutionResponse:
     profile = _resolve_profile(request.target, request.execution_profile)
     created_at = datetime.now(timezone.utc)
@@ -206,7 +207,7 @@ def create_agent_bridge_execution(
     )
     summary = _summarize_request(session_request)
     handoff = _build_target_handoff(request.target, session_request, summary)
-    package = _build_execution_package(request, profile, handoff.prompt, summary)
+    package = _build_execution_package(request, profile, handoff.prompt, summary, automation_id)
     command_text = _build_command_text(request.target, profile, handoff.prompt)
     approved_at = created_at if request.approved_by_kevin else None
     status = "ready_for_external_runner" if request.approved_by_kevin else "waiting_kevin_approval"
@@ -244,6 +245,22 @@ def create_agent_bridge_execution(
     db.add(db_run)
     db.commit()
     db.refresh(db_run)
+    _record_memory_event(
+        db,
+        source_kind="execution",
+        event_type="execution_ticket_created",
+        workflow=db_run.workflow,
+        summary=f"Created {db_run.target_label} ticket: {db_run.summary}",
+        run_id=db_run.run_id,
+        automation_id=automation_id,
+        evidence_payload={
+            "status": db_run.status,
+            "target": db_run.target,
+            "execution_profile": db_run.execution_profile,
+            "direct_external_actions": False,
+        },
+        decision_status=db_run.status,
+    )
     return _run_to_response(db_run)
 
 
@@ -283,6 +300,20 @@ def approve_agent_bridge_execution(
     db_run.audit_notes = json.dumps(audit_notes)
     db.commit()
     db.refresh(db_run)
+    _record_memory_event(
+        db,
+        source_kind="execution",
+        event_type="execution_approval_updated",
+        workflow=db_run.workflow,
+        summary=f"Approval updated for execution ticket {db_run.run_id}.",
+        run_id=db_run.run_id,
+        evidence_payload={
+            "approved_by_kevin": bool(db_run.approved_by_kevin),
+            "status": db_run.status,
+            "direct_external_actions": False,
+        },
+        decision_status=db_run.status,
+    )
     return _run_to_response(db_run)
 
 
@@ -305,7 +336,254 @@ def record_agent_bridge_execution_result(
     db_run.audit_notes = json.dumps(audit_notes)
     db.commit()
     db.refresh(db_run)
+    _record_memory_event(
+        db,
+        source_kind="execution",
+        event_type="execution_result_recorded",
+        workflow=db_run.workflow,
+        summary=request.result_summary,
+        run_id=db_run.run_id,
+        evidence_payload={
+            "status": request.status,
+            "result_payload": request.result_payload,
+            "client_action_approved": False,
+            "direct_external_actions": False,
+        },
+        decision_status=request.status,
+    )
     return _run_to_response(db_run)
+
+
+def list_agent_bridge_memory(
+    db: Session,
+    limit: int = 50,
+) -> schemas.AgentBridgeMemoryResponse:
+    entries = (
+        db.query(models.AgentBridgeMemory)
+        .order_by(models.AgentBridgeMemory.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return schemas.AgentBridgeMemoryResponse(entries=[_memory_to_response(entry) for entry in entries])
+
+
+def get_agent_bridge_audit_dashboard(db: Session) -> schemas.AgentBridgeAuditDashboardResponse:
+    now = datetime.utcnow()
+    recent_memory = (
+        db.query(models.AgentBridgeMemory)
+        .order_by(models.AgentBridgeMemory.created_at.desc())
+        .limit(8)
+        .all()
+    )
+    next_due = (
+        db.query(models.AgentBridgeAutomation)
+        .filter(
+            models.AgentBridgeAutomation.status == "active",
+            models.AgentBridgeAutomation.next_due_at.isnot(None),
+            models.AgentBridgeAutomation.next_due_at >= now,
+        )
+        .order_by(models.AgentBridgeAutomation.next_due_at.asc())
+        .first()
+    )
+    return schemas.AgentBridgeAuditDashboardResponse(
+        direct_external_actions=False,
+        execution_count=db.query(models.AgentBridgeRun).count(),
+        memory_event_count=db.query(models.AgentBridgeMemory).count(),
+        active_automation_count=(
+            db.query(models.AgentBridgeAutomation)
+            .filter(models.AgentBridgeAutomation.status == "active")
+            .count()
+        ),
+        due_automation_count=(
+            db.query(models.AgentBridgeAutomation)
+            .filter(
+                models.AgentBridgeAutomation.status == "active",
+                models.AgentBridgeAutomation.next_due_at.isnot(None),
+                models.AgentBridgeAutomation.next_due_at <= now,
+            )
+            .count()
+        ),
+        waiting_approval_count=(
+            db.query(models.AgentBridgeRun)
+            .filter(models.AgentBridgeRun.status == "waiting_kevin_approval")
+            .count()
+        ),
+        completed_count=(
+            db.query(models.AgentBridgeRun)
+            .filter(models.AgentBridgeRun.status == "completed")
+            .count()
+        ),
+        blocked_count=(
+            db.query(models.AgentBridgeRun)
+            .filter(models.AgentBridgeRun.status == "blocked")
+            .count()
+        ),
+        needs_review_count=(
+            db.query(models.AgentBridgeRun)
+            .filter(models.AgentBridgeRun.status == "needs_review")
+            .count()
+        ),
+        next_due_at=next_due.next_due_at if next_due else None,
+        guardrails=[
+            "No auto-send, auto-submit, auto-sign, or hidden external action.",
+            "Automation Engine v1 only prepares approval-gated execution tickets.",
+            "Kevin remains final approver for client-facing, legal, pricing, negotiation, tenant-screening, and browser state-changing decisions.",
+            "OpenClaw and Codex Chrome work remains scoped, supervised, and result-recorded back into SKC Agent OS.",
+        ],
+        recent_memory=[_memory_to_response(entry) for entry in recent_memory],
+    )
+
+
+def create_agent_bridge_automation(
+    db: Session,
+    request: schemas.AgentBridgeAutomationCreateRequest,
+) -> schemas.AgentBridgeAutomationResponse:
+    profile = _resolve_profile(request.target, request.execution_profile)
+    created_at = datetime.utcnow()
+    automation_id = f"auto-{created_at.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    db_automation = models.AgentBridgeAutomation(
+        automation_id=automation_id,
+        name=request.name,
+        workflow=request.workflow,
+        target=request.target,
+        target_label=profile["label"],
+        execution_profile=request.execution_profile or _default_profile(request.target),
+        cadence=request.cadence,
+        status=request.status,
+        source_context=request.source_context,
+        requested_outcome=request.requested_outcome,
+        operator_notes=request.operator_notes,
+        approval_required=1,
+        direct_external_actions=0,
+        max_retries=request.max_retries,
+        retry_count=0,
+        next_due_at=created_at if request.status == "active" and request.cadence != "manual" else None,
+    )
+    db.add(db_automation)
+    db.commit()
+    db.refresh(db_automation)
+    _record_memory_event(
+        db,
+        source_kind="automation",
+        event_type="automation_rule_created",
+        workflow=db_automation.workflow,
+        summary=f"Created approval-gated automation rule: {db_automation.name}.",
+        automation_id=db_automation.automation_id,
+        evidence_payload={
+            "target": db_automation.target,
+            "execution_profile": db_automation.execution_profile,
+            "cadence": db_automation.cadence,
+            "direct_external_actions": False,
+        },
+        decision_status=db_automation.status,
+    )
+    return _automation_to_response(db_automation)
+
+
+def list_agent_bridge_automations(db: Session) -> schemas.AgentBridgeAutomationListResponse:
+    automations = (
+        db.query(models.AgentBridgeAutomation)
+        .order_by(models.AgentBridgeAutomation.created_at.desc())
+        .limit(25)
+        .all()
+    )
+    return schemas.AgentBridgeAutomationListResponse(
+        automations=[_automation_to_response(automation) for automation in automations]
+    )
+
+
+def run_due_agent_bridge_automations(db: Session) -> schemas.AgentBridgeAutomationTickResponse:
+    checked_at = datetime.utcnow()
+    due_rules = (
+        db.query(models.AgentBridgeAutomation)
+        .filter(
+            models.AgentBridgeAutomation.status == "active",
+            models.AgentBridgeAutomation.next_due_at.isnot(None),
+            models.AgentBridgeAutomation.next_due_at <= checked_at,
+        )
+        .order_by(models.AgentBridgeAutomation.next_due_at.asc())
+        .limit(10)
+        .all()
+    )
+    generated: list[schemas.AgentBridgeExecutionResponse] = []
+    skipped: list[str] = []
+
+    for automation in due_rules:
+        execution = _generate_automation_execution(db, automation, reason="scheduled_due_check")
+        generated.append(execution)
+        automation.last_checked_at = checked_at
+        automation.last_run_id = execution.run_id
+        automation.next_due_at = _next_due_at(automation.cadence, checked_at)
+        automation.updated_at = checked_at
+        db.commit()
+        db.refresh(automation)
+        _record_memory_event(
+            db,
+            source_kind="automation",
+            event_type="automation_due_check",
+            workflow=automation.workflow,
+            summary=f"Automation rule {automation.name} prepared ticket {execution.run_id}.",
+            run_id=execution.run_id,
+            automation_id=automation.automation_id,
+            evidence_payload={
+                "status": execution.status,
+                "next_due_at": automation.next_due_at.isoformat() if automation.next_due_at else None,
+                "direct_external_actions": False,
+            },
+            decision_status=execution.status,
+        )
+
+    return schemas.AgentBridgeAutomationTickResponse(
+        checked_at=checked_at,
+        generated_execution_count=len(generated),
+        generated_executions=generated,
+        skipped=skipped,
+        direct_external_actions=False,
+    )
+
+
+def retry_agent_bridge_automation(
+    db: Session,
+    automation_id: str,
+) -> schemas.AgentBridgeAutomationRetryResponse | None:
+    automation = (
+        db.query(models.AgentBridgeAutomation)
+        .filter(models.AgentBridgeAutomation.automation_id == automation_id)
+        .first()
+    )
+    if not automation:
+        return None
+    if automation.retry_count >= automation.max_retries:
+        raise ValueError("Automation retry limit reached")
+
+    automation.retry_count += 1
+    automation.last_checked_at = datetime.utcnow()
+    automation.updated_at = automation.last_checked_at
+    execution = _generate_automation_execution(db, automation, reason="manual_retry")
+    automation.last_run_id = execution.run_id
+    db.commit()
+    db.refresh(automation)
+    _record_memory_event(
+        db,
+        source_kind="automation",
+        event_type="automation_retry_prepared",
+        workflow=automation.workflow,
+        summary=f"Prepared retry {automation.retry_count} for automation rule {automation.name}.",
+        run_id=execution.run_id,
+        automation_id=automation.automation_id,
+        evidence_payload={
+            "retry_count": automation.retry_count,
+            "max_retries": automation.max_retries,
+            "direct_external_actions": False,
+        },
+        decision_status=execution.status,
+    )
+    return schemas.AgentBridgeAutomationRetryResponse(
+        automation_id=automation.automation_id,
+        retry_count=automation.retry_count,
+        generated_execution=execution,
+        direct_external_actions=False,
+    )
 
 
 def create_agent_bridge_session(
@@ -388,8 +666,9 @@ def _build_execution_package(
     profile: dict,
     prompt: str,
     summary: str,
+    automation_id: str | None = None,
 ) -> dict:
-    return {
+    package = {
         "target": request.target,
         "target_label": profile["label"],
         "execution_profile": request.execution_profile or _default_profile(request.target),
@@ -408,6 +687,9 @@ def _build_execution_package(
             "Return recommendation for Kevin review only.",
         ],
     }
+    if automation_id:
+        package["automation_id"] = automation_id
+    return package
 
 
 def _build_command_text(target: str, profile: dict, prompt: str) -> str | None:
@@ -443,6 +725,111 @@ def _run_to_response(run: models.AgentBridgeRun) -> schemas.AgentBridgeExecution
         result_summary=run.result_summary,
         result_payload=_json_loads_dict(run.result_payload),
     )
+
+
+def _memory_to_response(memory: models.AgentBridgeMemory) -> schemas.AgentBridgeMemoryEntry:
+    return schemas.AgentBridgeMemoryEntry(
+        memory_id=memory.memory_id,
+        run_id=memory.run_id,
+        automation_id=memory.automation_id,
+        source_kind=memory.source_kind,
+        event_type=memory.event_type,
+        workflow=memory.workflow,
+        summary=memory.summary,
+        evidence_payload=_json_loads_dict(memory.evidence_payload),
+        decision_status=memory.decision_status,
+        human_review_required=bool(memory.human_review_required),
+        created_at=memory.created_at,
+    )
+
+
+def _automation_to_response(
+    automation: models.AgentBridgeAutomation,
+) -> schemas.AgentBridgeAutomationResponse:
+    return schemas.AgentBridgeAutomationResponse(
+        automation_id=automation.automation_id,
+        name=automation.name,
+        workflow=automation.workflow,
+        target=automation.target,
+        target_label=automation.target_label,
+        execution_profile=automation.execution_profile,
+        cadence=automation.cadence,
+        status=automation.status,
+        source_context=automation.source_context,
+        requested_outcome=automation.requested_outcome,
+        operator_notes=automation.operator_notes,
+        approval_required=bool(automation.approval_required),
+        direct_external_actions=bool(automation.direct_external_actions),
+        max_retries=automation.max_retries,
+        retry_count=automation.retry_count,
+        next_due_at=automation.next_due_at,
+        last_checked_at=automation.last_checked_at,
+        last_run_id=automation.last_run_id,
+        created_at=automation.created_at,
+        updated_at=automation.updated_at,
+    )
+
+
+def _record_memory_event(
+    db: Session,
+    *,
+    source_kind: str,
+    event_type: str,
+    workflow: str,
+    summary: str,
+    run_id: str | None = None,
+    automation_id: str | None = None,
+    evidence_payload: dict | None = None,
+    decision_status: str = "waiting_review",
+) -> models.AgentBridgeMemory:
+    created_at = datetime.utcnow()
+    memory = models.AgentBridgeMemory(
+        memory_id=f"mem-{created_at.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}",
+        run_id=run_id,
+        automation_id=automation_id,
+        source_kind=source_kind,
+        event_type=event_type,
+        workflow=workflow,
+        summary=summary,
+        evidence_payload=json.dumps(evidence_payload or {}),
+        decision_status=decision_status,
+        human_review_required=1,
+    )
+    db.add(memory)
+    db.commit()
+    db.refresh(memory)
+    return memory
+
+
+def _generate_automation_execution(
+    db: Session,
+    automation: models.AgentBridgeAutomation,
+    *,
+    reason: str,
+) -> schemas.AgentBridgeExecutionResponse:
+    request = schemas.AgentBridgeExecutionCreateRequest(
+        target=automation.target,
+        workflow=automation.workflow,
+        execution_profile=automation.execution_profile,
+        source_context=(
+            f"{automation.source_context}\n\n"
+            f"Automation rule: {automation.name}\n"
+            f"Automation reason: {reason}\n"
+            "Prepare only. Do not execute external actions without Kevin approval."
+        ),
+        requested_outcome=automation.requested_outcome,
+        approved_by_kevin=False,
+        operator_notes=automation.operator_notes,
+    )
+    return create_agent_bridge_execution(db, request, automation_id=automation.automation_id)
+
+
+def _next_due_at(cadence: str, from_time: datetime) -> datetime | None:
+    if cadence == "daily":
+        return from_time + timedelta(days=1)
+    if cadence == "weekly":
+        return from_time + timedelta(days=7)
+    return None
 
 
 def _json_loads_dict(value: str | None) -> dict:

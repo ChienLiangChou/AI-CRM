@@ -13,6 +13,8 @@ The integration is deliberately review-gated. SKC Agent OS prepares structured h
 
 The controlled execution layer adds durable execution tickets. A ticket can be approved by Kevin, handed to OpenClaw or Codex Chrome as a bounded external runner package, and then written back into SKC Agent OS as a reviewed result. Ticket creation, approval, and result recording still do not send, submit, sign, or mutate external accounts.
 
+The source-of-truth memory layer records bridge lifecycle events, execution approvals, external results, and automation activity as reviewable audit history. The Automation Engine v1 prepares scheduled or retried execution tickets only. It never runs OpenClaw, drives Chrome, sends email, submits forms, signs documents, or approves client-facing action.
+
 ### Backend API
 
 - `GET /api/integrations/agent-bridge/status`
@@ -31,6 +33,18 @@ The controlled execution layer adds durable execution tickets. A ticket can be a
   - Marks Kevin approval for the bounded ticket scope.
 - `POST /api/integrations/agent-bridge/executions/{run_id}/result`
   - Records the external runner or browser result back into SKC Agent OS for human review.
+- `GET /api/integrations/agent-bridge/memory`
+  - Returns recent source-of-truth memory events for Agent Bridge workflow history.
+- `GET /api/integrations/agent-bridge/audit-dashboard`
+  - Returns execution, memory, automation, blocked, waiting-approval, and guardrail metrics.
+- `GET /api/integrations/agent-bridge/automations`
+  - Returns approval-gated automation rules.
+- `POST /api/integrations/agent-bridge/automations`
+  - Creates a preparation-only automation rule for OpenClaw, Codex Chrome, or SKC internal review.
+- `POST /api/integrations/agent-bridge/automations/run-due`
+  - Checks due automation rules and prepares waiting-approval execution tickets.
+- `POST /api/integrations/agent-bridge/automations/{automation_id}/retry`
+  - Prepares a retry ticket within the rule's retry limit.
 
 ### Frontend Surface
 
@@ -43,6 +57,8 @@ The page includes:
 - toggles for OpenClaw and Codex Chrome extension handoffs;
 - review state, approval requirements, audit notes, and copyable handoff prompts.
 - controlled execution tickets with target/profile selection, Kevin approval status, copyable runner packages, and result recording.
+- source-of-truth memory and audit dashboard metrics.
+- Automation Engine v1 rule creation, due checks, and approval-gated retry preparation.
 
 ### Safety Model
 
@@ -51,6 +67,7 @@ The page includes:
 - Gmail, WhatsApp, SignNow, Acrobat, MLS/REALM/TRREB, and other external surfaces remain human-review gated.
 - Bridge sessions are draft and evidence preparation only. They do not send, sign, submit, purchase, delete, or message externally.
 - Execution tickets are bounded runner packages, not unrestricted shell or browser automation.
+- Automation rules only create waiting-approval execution tickets. Kevin remains final approver before any external runner scope or client-facing action.
 
 ## Local Development
 

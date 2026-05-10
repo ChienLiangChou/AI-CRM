@@ -162,6 +162,9 @@ Allowed:
 - create checklists;
 - prepare follow-up tasks;
 - generate audit notes;
+- create approval-gated external runner tickets;
+- record external runner results into source-of-truth memory;
+- run preparation-only automation due checks;
 - create low-risk OpenClaw dummy artifacts;
 - visually check approved browser state using Codex Chrome.
 
@@ -189,6 +192,15 @@ Approved v1 Manual Mode modules:
 
 Listing Alert Recommendation v1 has an approval-gated production path with Gmail OAuth intake, REALM extraction, client match hardening, Automatic Mode v1, and Gmail draft preparation without auto-send.
 
+Agent Bridge product-layer integration now includes:
+
+- Layer 1: SKC Agent OS handoff packages for OpenClaw and Codex Chrome;
+- Layer 2: controlled execution tickets with Kevin approval gates and result recording;
+- Layer 3: source-of-truth memory events and audit dashboard metrics;
+- Layer 4: Automation Engine v1 for preparation-only rules, due checks, and retry tickets.
+
+These layers do not execute OpenClaw directly, drive Chrome directly, send, submit, sign, scrape broadly, or approve client-facing decisions.
+
 ## 11. Current next-phase / experimental surfaces
 
 Do not treat these as completed production modules unless Kevin explicitly approves:
@@ -197,7 +209,7 @@ Do not treat these as completed production modules unless Kevin explicitly appro
 - Event Strategy Review;
 - Daily Market Scan;
 - Authenticated MLS Access;
-- OpenClaw shell / prototype;
+- direct OpenClaw shell execution from SKC Agent OS;
 - experimental work in `stash@{0}`.
 
 These may be planned, tested, or documented, but they should not be mixed into release checkpoints without explicit approval.
