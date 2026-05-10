@@ -25,6 +25,13 @@ This repository is the AI-CRM codebase that powers the SKC Agent OS product. Tre
 - `render.yaml` contains deployment configuration.
 - Operational notes that guide agents should live under `docs/ops/` when they are not runtime code.
 
+## 20X Operating Docs
+
+- `docs/ops/SKC_20X_REAL_ESTATE_OPERATING_MODEL.md`
+- `docs/ops/SKC_20X_TOOL_INTEGRATION_PLAYBOOK.md`
+- `docs/ops/SKC_20X_FIRST_WEEK_USAGE_CHECKLIST.md`
+- `docs/ops/SKC_20X_30_DAY_ROADMAP.md`
+
 ## Local Commands
 
 - Backend local startup normally runs from `backend/` with `.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000`.

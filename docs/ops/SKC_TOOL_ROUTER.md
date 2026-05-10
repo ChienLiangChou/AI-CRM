@@ -25,6 +25,13 @@ Use this guide before choosing tools for SKC Agent OS / AI-CRM work. The goal is
 7. If the user asks to commit, stage only the files that belong to the task and leave unrelated dirty files alone.
 8. If stashes exist, inspect only when useful. Do not apply, pop, merge, or delete a stash unless the user explicitly asks.
 
+## 20X Operating References
+
+- Use `docs/ops/SKC_20X_REAL_ESTATE_OPERATING_MODEL.md` for the high-level 20X operating model.
+- Use `docs/ops/SKC_20X_TOOL_INTEGRATION_PLAYBOOK.md` for SKC Agent OS, OpenClaw, Codex App / IDE, and Codex Chrome routing.
+- Use `docs/ops/SKC_20X_FIRST_WEEK_USAGE_CHECKLIST.md` for daily usage and friction logging.
+- Use `docs/ops/SKC_20X_30_DAY_ROADMAP.md` for phase planning.
+
 ## SKC Workflow Boundaries
 
 - Listing alert and daily market scan automation may prepare recommendations, packets, and status outputs, but they must not auto-contact clients or external parties.
