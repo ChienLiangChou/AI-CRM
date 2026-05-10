@@ -165,6 +165,57 @@ export interface MaintenanceReportResponse {
     urgency?: string;
 }
 
+export interface AgentBridgeCapability {
+    key: string;
+    label: string;
+    status: string;
+    product_surface: string;
+    description: string;
+    guardrails: string[];
+    evidence: string[];
+    next_action: string;
+}
+
+export interface AgentBridgeStatusResponse {
+    product: string;
+    mode: string;
+    bridge_status: string;
+    direct_external_actions: boolean;
+    safety_boundary: string;
+    capabilities: AgentBridgeCapability[];
+}
+
+export interface AgentBridgeSessionRequest {
+    workflow: string;
+    source_context: string;
+    client_name?: string;
+    property_address?: string;
+    requested_outcome?: string;
+    include_openclaw: boolean;
+    include_codex_chrome: boolean;
+}
+
+export interface AgentBridgeHandoff {
+    target: string;
+    target_label: string;
+    status: string;
+    title: string;
+    instructions: string[];
+    prompt: string;
+    approval_required: boolean;
+}
+
+export interface AgentBridgeSessionResponse {
+    session_id: string;
+    status: string;
+    created_at: string;
+    workflow: string;
+    summary: string;
+    approvals_required: string[];
+    handoffs: AgentBridgeHandoff[];
+    audit_notes: string[];
+}
+
 export const crmService = {
     // --- Contacts ---
     getContacts: async () => {
@@ -278,6 +329,17 @@ export const crmService = {
             message,
             photos,
         });
+        return response.data;
+    },
+
+    // --- Agent Bridge Integrations ---
+    getAgentBridgeStatus: async () => {
+        const response = await api.get<AgentBridgeStatusResponse>('/integrations/agent-bridge/status');
+        return response.data;
+    },
+
+    createAgentBridgeSession: async (data: AgentBridgeSessionRequest) => {
+        const response = await api.post<AgentBridgeSessionResponse>('/integrations/agent-bridge/sessions', data);
         return response.data;
     },
 };

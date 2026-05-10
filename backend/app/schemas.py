@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
@@ -241,3 +241,55 @@ class PushUnsubscribeRequest(BaseModel):
 
 class VapidPublicKeyResponse(BaseModel):
     public_key: str
+
+
+# --- Agent Bridge Integration Schemas ---
+class AgentBridgeCapability(BaseModel):
+    key: str
+    label: str
+    status: str
+    product_surface: str
+    description: str
+    guardrails: List[str]
+    evidence: List[str]
+    next_action: str
+
+
+class AgentBridgeStatusResponse(BaseModel):
+    product: str
+    mode: str
+    bridge_status: str
+    direct_external_actions: bool
+    safety_boundary: str
+    capabilities: List[AgentBridgeCapability]
+
+
+class AgentBridgeSessionRequest(BaseModel):
+    workflow: str = Field(default="listing_research", min_length=2)
+    source_context: str = Field(..., min_length=5)
+    client_name: Optional[str] = None
+    property_address: Optional[str] = None
+    requested_outcome: Optional[str] = None
+    include_openclaw: bool = True
+    include_codex_chrome: bool = True
+
+
+class AgentBridgeHandoff(BaseModel):
+    target: str
+    target_label: str
+    status: str
+    title: str
+    instructions: List[str]
+    prompt: str
+    approval_required: bool
+
+
+class AgentBridgeSessionResponse(BaseModel):
+    session_id: str
+    status: str
+    created_at: datetime
+    workflow: str
+    summary: str
+    approvals_required: List[str]
+    handoffs: List[AgentBridgeHandoff]
+    audit_notes: List[str]

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { X, Mail, Globe, Sparkles, Loader2, Pencil, Trash2, Save, Phone, MessageSquare, Calendar, Plus } from 'lucide-react';
 import { crmService } from '../services/api';
 import type { Contact, EmailDraftResponse, Interaction } from '../services/api';
@@ -49,11 +49,7 @@ const ContactModal: React.FC<Props> = ({ contact, onClose, onUpdate, onDelete })
     const [newInteraction, setNewInteraction] = useState({ interaction_type: 'email', notes: '' });
     const [addingInteraction, setAddingInteraction] = useState(false);
 
-    useEffect(() => {
-        loadInteractions();
-    }, [contact.id]);
-
-    const loadInteractions = async () => {
+    const loadInteractions = useCallback(async () => {
         setLoadingInteractions(true);
         try {
             const data = await crmService.getInteractions(contact.id);
@@ -63,7 +59,11 @@ const ContactModal: React.FC<Props> = ({ contact, onClose, onUpdate, onDelete })
         } finally {
             setLoadingInteractions(false);
         }
-    };
+    }, [contact.id]);
+
+    useEffect(() => {
+        void loadInteractions();
+    }, [loadInteractions]);
 
     const handleDraftEmail = async () => {
         setLoadingEmail(true);

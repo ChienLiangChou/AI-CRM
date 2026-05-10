@@ -7,18 +7,20 @@ import {
   sendTestPush,
 } from "../services/pushNotifications";
 
+const isNotificationSupported = () =>
+  "Notification" in window && "serviceWorker" in navigator;
+
 const NotificationToggle = () => {
   const [subscribed, setSubscribed] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [supported, setSupported] = useState(true);
+  const [supported] = useState(isNotificationSupported);
 
   useEffect(() => {
-    if (!("Notification" in window) || !("serviceWorker" in navigator)) {
-      setSupported(false);
+    if (!supported) {
       return;
     }
     isPushSubscribed().then(setSubscribed);
-  }, []);
+  }, [supported]);
 
   const handleToggle = async () => {
     setLoading(true);

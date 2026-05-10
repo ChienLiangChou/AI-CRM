@@ -4,6 +4,15 @@ import type { Contact, Nudge, SegmentGroup, PipelineInsightsResponse, VoiceMemoR
 import { Target, TrendingUp, Users, Phone, Mail, ArrowRight, RefreshCw, AlertTriangle, Zap, Flame, Snowflake, Moon, Mic, Send } from 'lucide-react';
 import './Dashboard.css';
 
+type MemoExtractedData = {
+    areas?: unknown;
+    budget?: unknown;
+    likes?: unknown;
+    dislikes?: unknown;
+};
+
+const asStringList = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+
 const Dashboard = () => {
     const [contacts, setContacts] = useState<Contact[]>([]);
     const [nudges, setNudges] = useState<Nudge[]>([]);
@@ -134,11 +143,16 @@ const Dashboard = () => {
                             {memoResult.extracted_data && (
                                 <div className="text-xs text-gray-400 space-y-1">
                                     {(() => {
-                                        const d = memoResult.extracted_data as any; return (<>
-                                            {d.areas && <p>📍 Areas: {d.areas.join(', ')}</p>}
-                                            {d.budget && <p>💰 Budget: ${Number(d.budget).toLocaleString()}</p>}
-                                            {d.likes && <p>👍 Likes: {d.likes.join(', ')}</p>}
-                                            {d.dislikes && <p>👎 Dislikes: {d.dislikes.join(', ')}</p>}
+                                        const d = memoResult.extracted_data as MemoExtractedData;
+                                        const areas = asStringList(d.areas);
+                                        const likes = asStringList(d.likes);
+                                        const dislikes = asStringList(d.dislikes);
+                                        const budget = typeof d.budget === 'number' || typeof d.budget === 'string' ? Number(d.budget) : null;
+                                        return (<>
+                                            {areas.length > 0 && <p>📍 Areas: {areas.join(', ')}</p>}
+                                            {budget !== null && Number.isFinite(budget) && <p>💰 Budget: ${budget.toLocaleString()}</p>}
+                                            {likes.length > 0 && <p>👍 Likes: {likes.join(', ')}</p>}
+                                            {dislikes.length > 0 && <p>👎 Dislikes: {dislikes.join(', ')}</p>}
                                         </>);
                                     })()}
                                 </div>

@@ -4,6 +4,7 @@ import Dashboard from './pages/Dashboard';
 import Contacts from './pages/Contacts';
 import Pipeline from './pages/Pipeline';
 import Prospector from './pages/Prospector';
+import AgentBridge from './pages/AgentBridge';
 
 function App() {
   return (
@@ -15,6 +16,7 @@ function App() {
           <Route path="/contacts" element={<Contacts />} />
           <Route path="/pipeline" element={<Pipeline />} />
           <Route path="/find-leads" element={<Prospector />} />
+          <Route path="/agent-bridge" element={<AgentBridge />} />
         </Routes>
       </Layout>
     </Router>

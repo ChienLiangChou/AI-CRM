@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List
 
-from . import crud, models, schemas
+from . import crud, integrations, models, schemas
 from .database import engine, get_db, SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -193,6 +193,15 @@ def market_trigger_workflow(req: schemas.MarketTriggerRequest, db: Session = Dep
 @app.post("/api/workflow/maintenance-report", response_model=schemas.MaintenanceReportResponse)
 def maintenance_report_workflow(req: schemas.MaintenanceReportRequest, db: Session = Depends(get_db)):
     return crud.workflow_maintenance_report(db, req.tenant_email, req.message, req.photos)
+
+# --- Agent Bridge Integrations ---
+@app.get("/api/integrations/agent-bridge/status", response_model=schemas.AgentBridgeStatusResponse)
+def get_agent_bridge_status():
+    return integrations.get_agent_bridge_status()
+
+@app.post("/api/integrations/agent-bridge/sessions", response_model=schemas.AgentBridgeSessionResponse)
+def create_agent_bridge_session(req: schemas.AgentBridgeSessionRequest):
+    return integrations.create_agent_bridge_session(req)
 
 # --- Push Notifications ---
 @app.get("/api/push/vapid-public-key", response_model=schemas.VapidPublicKeyResponse)
