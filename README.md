@@ -11,6 +11,8 @@ The product-level Agent Bridge connects SKC Agent OS with two external operator 
 
 The integration is deliberately review-gated. SKC Agent OS prepares structured handoff packages, approval requirements, and audit notes. It does not execute OpenClaw commands, change OpenClaw workspaces, store credentials, send messages, submit browser forms, sign documents, or mutate CRM data from a bridge session.
 
+The controlled execution layer adds durable execution tickets. A ticket can be approved by Kevin, handed to OpenClaw or Codex Chrome as a bounded external runner package, and then written back into SKC Agent OS as a reviewed result. Ticket creation, approval, and result recording still do not send, submit, sign, or mutate external accounts.
+
 ### Backend API
 
 - `GET /api/integrations/agent-bridge/status`
@@ -21,6 +23,14 @@ The integration is deliberately review-gated. SKC Agent OS prepares structured h
   - Accepts SKC workflow context, optional client/property handles, and target toggles.
   - Returns OpenClaw and/or Codex Chrome extension handoff prompts.
   - Returns approval requirements and audit notes for operator review.
+- `GET /api/integrations/agent-bridge/executions`
+  - Returns recent controlled execution tickets.
+- `POST /api/integrations/agent-bridge/executions`
+  - Creates an approval-gated external runner ticket for OpenClaw, Codex Chrome, or SKC internal review.
+- `POST /api/integrations/agent-bridge/executions/{run_id}/approve`
+  - Marks Kevin approval for the bounded ticket scope.
+- `POST /api/integrations/agent-bridge/executions/{run_id}/result`
+  - Records the external runner or browser result back into SKC Agent OS for human review.
 
 ### Frontend Surface
 
@@ -32,6 +42,7 @@ The page includes:
 - a bridge composer for workflow context, client, property/task handle, and requested outcome;
 - toggles for OpenClaw and Codex Chrome extension handoffs;
 - review state, approval requirements, audit notes, and copyable handoff prompts.
+- controlled execution tickets with target/profile selection, Kevin approval status, copyable runner packages, and result recording.
 
 ### Safety Model
 
@@ -39,6 +50,7 @@ The page includes:
 - Browser work must use already-authorized tabs and must preserve visible evidence such as listing IDs, attachments, floor plans, dates, and filenames.
 - Gmail, WhatsApp, SignNow, Acrobat, MLS/REALM/TRREB, and other external surfaces remain human-review gated.
 - Bridge sessions are draft and evidence preparation only. They do not send, sign, submit, purchase, delete, or message externally.
+- Execution tickets are bounded runner packages, not unrestricted shell or browser automation.
 
 ## Local Development
 

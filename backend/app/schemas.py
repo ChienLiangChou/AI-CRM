@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 
 # Interaction Schemas
 class InteractionBase(BaseModel):
@@ -293,3 +293,51 @@ class AgentBridgeSessionResponse(BaseModel):
     approvals_required: List[str]
     handoffs: List[AgentBridgeHandoff]
     audit_notes: List[str]
+
+
+AgentBridgeTarget = Literal["openclaw", "codex_chrome_extension", "skc_agent_os"]
+
+
+class AgentBridgeExecutionCreateRequest(BaseModel):
+    target: AgentBridgeTarget
+    workflow: str = Field(default="listing_research", min_length=2)
+    execution_profile: Optional[str] = None
+    source_context: str = Field(..., min_length=5)
+    client_name: Optional[str] = None
+    property_address: Optional[str] = None
+    requested_outcome: Optional[str] = None
+    approved_by_kevin: bool = False
+    operator_notes: Optional[str] = None
+
+
+class AgentBridgeExecutionApproveRequest(BaseModel):
+    approved_by_kevin: bool = True
+    operator_notes: Optional[str] = None
+
+
+class AgentBridgeExecutionResultRequest(BaseModel):
+    status: Literal["completed", "blocked", "needs_review"] = "completed"
+    result_summary: str = Field(..., min_length=3)
+    result_payload: Dict[str, Any] = {}
+
+
+class AgentBridgeExecutionResponse(BaseModel):
+    run_id: str
+    target: AgentBridgeTarget
+    target_label: str
+    execution_profile: str
+    status: str
+    workflow: str
+    summary: str
+    safety_boundary: str
+    approval_required: bool
+    approved_by_kevin: bool
+    created_at: datetime
+    updated_at: datetime
+    approved_at: Optional[datetime] = None
+    handoff_prompt: str
+    execution_package: Dict[str, Any]
+    command_text: Optional[str] = None
+    audit_notes: List[str]
+    result_summary: Optional[str] = None
+    result_payload: Dict[str, Any] = {}

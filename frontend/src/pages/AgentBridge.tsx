@@ -3,6 +3,8 @@ import { AlertTriangle, ArrowRight, RefreshCw, Send, Sparkles, Target, Zap } fro
 import { crmService } from '../services/api';
 import type {
     AgentBridgeCapability,
+    AgentBridgeExecutionResponse,
+    AgentBridgeTarget,
     AgentBridgeSessionResponse,
     AgentBridgeStatusResponse,
 } from '../services/api';
@@ -10,13 +12,35 @@ import './AgentBridge.css';
 
 const defaultContext = 'Review the available SKC client and property context, prepare bounded OpenClaw research, and prepare Codex Chrome extension browser evidence review before any external action.';
 
+const executionProfileOptions: Record<AgentBridgeTarget, { value: string; label: string }[]> = {
+    openclaw: [
+        { value: 'standalone_sop', label: 'OpenClaw standalone SOP' },
+        { value: 'browsertest_public_research', label: 'OpenClaw public research' },
+        { value: 'formtest_dummy_listing_package', label: 'OpenClaw dummy listing package' },
+        { value: 'emaildrafttest_dummy_email', label: 'OpenClaw dummy email draft' },
+        { value: 'localfilestest_one_file_summary', label: 'OpenClaw one-file summary' },
+    ],
+    codex_chrome_extension: [
+        { value: 'skc_ui_test', label: 'Chrome SKC UI test' },
+        { value: 'gmail_draft_check', label: 'Chrome Gmail draft check' },
+        { value: 'gmail_thread_summary', label: 'Chrome approved Gmail thread summary' },
+        { value: 'listing_tab_comparison', label: 'Chrome listing tab comparison' },
+    ],
+    skc_agent_os: [
+        { value: 'internal_review', label: 'SKC internal review' },
+    ],
+};
+
 const AgentBridge = () => {
     const [status, setStatus] = useState<AgentBridgeStatusResponse | null>(null);
     const [session, setSession] = useState<AgentBridgeSessionResponse | null>(null);
+    const [executions, setExecutions] = useState<AgentBridgeExecutionResponse[]>([]);
     const [loading, setLoading] = useState(true);
     const [submitting, setSubmitting] = useState(false);
+    const [executionSubmitting, setExecutionSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
+    const [resultDrafts, setResultDrafts] = useState<Record<string, string>>({});
     const [form, setForm] = useState({
         workflow: 'seller_listing_safety',
         client_name: '',
@@ -26,12 +50,28 @@ const AgentBridge = () => {
         include_openclaw: true,
         include_codex_chrome: true,
     });
+    const [executionForm, setExecutionForm] = useState<{
+        target: AgentBridgeTarget;
+        execution_profile: string;
+        approved_by_kevin: boolean;
+        operator_notes: string;
+    }>({
+        target: 'openclaw',
+        execution_profile: 'browsertest_public_research',
+        approved_by_kevin: false,
+        operator_notes: '',
+    });
 
     const loadStatus = async () => {
         setLoading(true);
         setError(null);
         try {
-            setStatus(await crmService.getAgentBridgeStatus());
+            const [bridgeStatus, executionData] = await Promise.all([
+                crmService.getAgentBridgeStatus(),
+                crmService.listAgentBridgeExecutions(),
+            ]);
+            setStatus(bridgeStatus);
+            setExecutions(executionData);
         } catch (e) {
             console.error('Failed to load Agent Bridge status:', e);
             setError('Agent Bridge status could not be loaded.');
@@ -69,6 +109,76 @@ const AgentBridge = () => {
             setError('Agent Bridge session could not be created.');
         } finally {
             setSubmitting(false);
+        }
+    };
+
+    const createExecution = async () => {
+        if (!form.source_context.trim()) {
+            setError('Source context is required.');
+            return;
+        }
+
+        setExecutionSubmitting(true);
+        setError(null);
+        try {
+            const execution = await crmService.createAgentBridgeExecution({
+                target: executionForm.target,
+                workflow: form.workflow,
+                execution_profile: executionForm.execution_profile,
+                client_name: form.client_name || undefined,
+                property_address: form.property_address || undefined,
+                requested_outcome: form.requested_outcome || undefined,
+                source_context: form.source_context,
+                approved_by_kevin: executionForm.approved_by_kevin,
+                operator_notes: executionForm.operator_notes || undefined,
+            });
+            setExecutions((current) => [execution, ...current.filter((item) => item.run_id !== execution.run_id)]);
+        } catch (e) {
+            console.error('Failed to create Agent Bridge execution:', e);
+            setError('Agent Bridge execution ticket could not be created.');
+        } finally {
+            setExecutionSubmitting(false);
+        }
+    };
+
+    const approveExecution = async (runId: string) => {
+        setError(null);
+        try {
+            const execution = await crmService.approveAgentBridgeExecution(runId, {
+                approved_by_kevin: true,
+                operator_notes: 'Kevin approval confirmed in SKC Agent OS.',
+            });
+            setExecutions((current) => current.map((item) => item.run_id === runId ? execution : item));
+        } catch (e) {
+            console.error('Failed to approve Agent Bridge execution:', e);
+            setError('Agent Bridge execution could not be approved.');
+        }
+    };
+
+    const recordResult = async (execution: AgentBridgeExecutionResponse) => {
+        const resultSummary = resultDrafts[execution.run_id]?.trim();
+        if (!resultSummary) {
+            setError('Result summary is required before recording an external result.');
+            return;
+        }
+
+        setError(null);
+        try {
+            const updated = await crmService.recordAgentBridgeExecutionResult(execution.run_id, {
+                status: 'completed',
+                result_summary: resultSummary,
+                result_payload: {
+                    target: execution.target,
+                    execution_profile: execution.execution_profile,
+                    external_action_taken: false,
+                    recorded_from: 'Agent Bridge UI',
+                },
+            });
+            setExecutions((current) => current.map((item) => item.run_id === execution.run_id ? updated : item));
+            setResultDrafts((current) => ({ ...current, [execution.run_id]: '' }));
+        } catch (e) {
+            console.error('Failed to record Agent Bridge execution result:', e);
+            setError('Agent Bridge execution result could not be recorded.');
         }
     };
 
@@ -198,14 +308,16 @@ const AgentBridge = () => {
                         </label>
                     </div>
 
-                    <button
-                        onClick={createSession}
-                        disabled={submitting || !form.source_context.trim()}
-                        className="btn btn-primary bridge-submit"
-                    >
-                        <Send size={14} />
-                        {submitting ? 'Creating...' : 'Create handoff'}
-                    </button>
+                    <div className="bridge-action-row">
+                        <button
+                            onClick={createSession}
+                            disabled={submitting || !form.source_context.trim()}
+                            className="btn btn-primary"
+                        >
+                            <Send size={14} />
+                            {submitting ? 'Creating...' : 'Create handoff'}
+                        </button>
+                    </div>
                 </div>
 
                 <aside className="bridge-review glass-panel">
@@ -239,6 +351,131 @@ const AgentBridge = () => {
                         </div>
                     )}
                 </aside>
+            </section>
+
+            <section className="execution-layer glass-panel">
+                <div className="panel-header execution-header">
+                    <div>
+                        <p className="status-label">Controlled execution layer v1</p>
+                        <h2><Zap size={18} /> External runner tickets</h2>
+                    </div>
+                    <span className="status-pill">approval gated</span>
+                </div>
+
+                <div className="execution-create">
+                    <label className="field">
+                        <span>Target</span>
+                        <select
+                            value={executionForm.target}
+                            onChange={(e) => {
+                                const nextTarget = e.target.value as AgentBridgeTarget;
+                                setExecutionForm({
+                                    ...executionForm,
+                                    target: nextTarget,
+                                    execution_profile: executionProfileOptions[nextTarget][0].value,
+                                });
+                            }}
+                            className="input-field"
+                        >
+                            <option value="openclaw">OpenClaw</option>
+                            <option value="codex_chrome_extension">Codex Chrome</option>
+                            <option value="skc_agent_os">SKC internal review</option>
+                        </select>
+                    </label>
+                    <label className="field">
+                        <span>Execution profile</span>
+                        <select
+                            value={executionForm.execution_profile}
+                            onChange={(e) => setExecutionForm({ ...executionForm, execution_profile: e.target.value })}
+                            className="input-field"
+                        >
+                            {executionProfileOptions[executionForm.target].map((profile) => (
+                                <option key={profile.value} value={profile.value}>{profile.label}</option>
+                            ))}
+                        </select>
+                    </label>
+                    <label className="field execution-notes">
+                        <span>Operator notes</span>
+                        <input
+                            value={executionForm.operator_notes}
+                            onChange={(e) => setExecutionForm({ ...executionForm, operator_notes: e.target.value })}
+                            className="input-field"
+                            placeholder="Optional approval scope notes"
+                        />
+                    </label>
+                    <label className="bridge-toggle execution-approval">
+                        <input
+                            type="checkbox"
+                            checked={executionForm.approved_by_kevin}
+                            onChange={(e) => setExecutionForm({ ...executionForm, approved_by_kevin: e.target.checked })}
+                        />
+                        <span>Kevin approval confirmed</span>
+                    </label>
+                    <button
+                        onClick={createExecution}
+                        disabled={executionSubmitting || !form.source_context.trim()}
+                        className="btn btn-accent execution-create-button"
+                    >
+                        <Zap size={14} />
+                        {executionSubmitting ? 'Creating...' : 'Create execution ticket'}
+                    </button>
+                </div>
+
+                <div className="execution-list">
+                    {executions.length > 0 ? executions.map((execution) => (
+                        <article key={execution.run_id} className="execution-card">
+                            <div className="execution-card-top">
+                                <div>
+                                    <p className="status-label">{execution.target_label}</p>
+                                    <h3>{execution.workflow}</h3>
+                                    <small>{execution.run_id}</small>
+                                </div>
+                                <span className="status-pill">{execution.status.replaceAll('_', ' ')}</span>
+                            </div>
+                            <p className="execution-summary">{execution.summary}</p>
+                            <div className="execution-command">
+                                <span>Execution package</span>
+                                <pre>{execution.command_text || execution.handoff_prompt}</pre>
+                            </div>
+                            <div className="execution-card-actions">
+                                {!execution.approved_by_kevin && (
+                                    <button onClick={() => approveExecution(execution.run_id)} className="btn btn-primary">
+                                        Approve ticket
+                                    </button>
+                                )}
+                                <button
+                                    onClick={() => copyPrompt(execution.run_id, execution.command_text || execution.handoff_prompt)}
+                                    className="btn btn-ghost"
+                                >
+                                    {copiedTarget === execution.run_id ? 'Copied' : 'Copy execution package'}
+                                </button>
+                            </div>
+                            <div className="execution-result">
+                                <textarea
+                                    value={resultDrafts[execution.run_id] || ''}
+                                    onChange={(e) => setResultDrafts({ ...resultDrafts, [execution.run_id]: e.target.value })}
+                                    className="input-field"
+                                    rows={3}
+                                    placeholder="Paste external runner or browser result summary for SKC review..."
+                                />
+                                <button onClick={() => recordResult(execution)} className="btn btn-ghost">
+                                    Record result
+                                </button>
+                            </div>
+                            {execution.result_summary && (
+                                <div className="recorded-result">
+                                    <span>Recorded result</span>
+                                    <p>{execution.result_summary}</p>
+                                </div>
+                            )}
+                        </article>
+                    )) : (
+                        <div className="empty-executions">
+                            <Zap size={24} />
+                            <p>No execution tickets yet.</p>
+                        </div>
+                    )}
+                </div>
             </section>
 
             {session && (

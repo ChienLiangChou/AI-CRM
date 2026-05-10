@@ -67,3 +67,81 @@ def test_agent_bridge_session_can_stay_internal_only():
     payload = response.json()
     assert [handoff["target"] for handoff in payload["handoffs"]] == ["skc_agent_os"]
     assert payload["handoffs"][0]["approval_required"] is True
+
+
+def test_agent_bridge_execution_creates_openclaw_ticket_without_running_command():
+    response = client.post(
+        "/api/integrations/agent-bridge/executions",
+        json={
+            "target": "openclaw",
+            "workflow": "public_research",
+            "execution_profile": "browsertest_public_research",
+            "source_context": "Prepare public-only research for a dummy seller listing readiness checklist.",
+            "requested_outcome": "Return source links and risks for Kevin review.",
+            "approved_by_kevin": False,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["target"] == "openclaw"
+    assert payload["status"] == "waiting_kevin_approval"
+    assert payload["approval_required"] is True
+    assert payload["approved_by_kevin"] is False
+    assert "openclaw run --agent browsertest" in payload["command_text"]
+    assert "No email, browser submit, signature action" in " ".join(payload["audit_notes"])
+    assert "No MLS/TRREB/REALM" in " ".join(payload["execution_package"]["rules"])
+
+
+def test_agent_bridge_execution_approve_and_record_result():
+    created = client.post(
+        "/api/integrations/agent-bridge/executions",
+        json={
+            "target": "codex_chrome_extension",
+            "workflow": "ui_check",
+            "execution_profile": "skc_ui_test",
+            "source_context": "Check the already-open SKC Agent OS Agent Bridge page.",
+            "approved_by_kevin": False,
+        },
+    ).json()
+
+    approved = client.post(
+        f"/api/integrations/agent-bridge/executions/{created['run_id']}/approve",
+        json={"approved_by_kevin": True, "operator_notes": "Kevin approved UI check scope."},
+    )
+
+    assert approved.status_code == 200
+    approved_payload = approved.json()
+    assert approved_payload["status"] == "ready_for_external_runner"
+    assert approved_payload["approved_by_kevin"] is True
+    assert approved_payload["command_text"].startswith("Codex Chrome supervised prompt:")
+
+    result = client.post(
+        f"/api/integrations/agent-bridge/executions/{created['run_id']}/result",
+        json={
+            "status": "completed",
+            "result_summary": "Agent Bridge page was visible and review-gated.",
+            "result_payload": {"visible_page": "Agent Bridge", "external_action_taken": False},
+        },
+    )
+
+    assert result.status_code == 200
+    result_payload = result.json()
+    assert result_payload["status"] == "completed"
+    assert result_payload["result_summary"] == "Agent Bridge page was visible and review-gated."
+    assert result_payload["result_payload"]["external_action_taken"] is False
+
+
+def test_agent_bridge_execution_rejects_wrong_profile_for_target():
+    response = client.post(
+        "/api/integrations/agent-bridge/executions",
+        json={
+            "target": "codex_chrome_extension",
+            "workflow": "bad_profile",
+            "execution_profile": "browsertest_public_research",
+            "source_context": "This should be rejected because the profile belongs to OpenClaw.",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Unsupported execution_profile" in response.json()["detail"]

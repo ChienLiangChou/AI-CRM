@@ -21,6 +21,16 @@ Start with the task type:
 5. Does it send, submit, sign, decide pricing, decide negotiation, decide screening, or touch sensitive data?
    - Stop for Kevin.
 
+For approved external work, use the Agent Bridge execution layer:
+
+1. Create an execution ticket in SKC Agent OS.
+2. Confirm the target and execution profile.
+3. Mark Kevin approval only after the exact scope is approved.
+4. Copy the bounded OpenClaw command or Codex Chrome prompt.
+5. Run the external task inside the approved tool/session.
+6. Record the result back into SKC Agent OS.
+7. Keep client-facing action pending Kevin review.
+
 ## 3. When to use SKC Agent OS
 
 Use SKC Agent OS for production operating workflows:
@@ -112,6 +122,8 @@ Stop for Kevin before:
 - tenant screening actions;
 - payment, banking, tax, or ID data handling;
 - any high-risk state-changing action.
+
+Agent Bridge execution tickets do not remove these stop conditions. They only make approved external work traceable.
 
 ## 8. OpenClaw approved agents
 
@@ -296,6 +308,8 @@ Do not send.
 
 Use SKC Agent OS. It owns Gmail OAuth intake, REALM email extraction, client matching, Automatic Mode v1, approval-gated Gmail drafts, and audit trail. Stop before send.
 
+If a low-risk external support task is needed, create an Agent Bridge execution ticket and record the result back into SKC Agent OS.
+
 ### Gmail draft check
 
 Use Codex Chrome only in the already-authorized Gmail tab. Check draft existence and visible metadata. Do not send or edit.
@@ -308,9 +322,13 @@ Use SKC Agent OS for the production checklist. Use Codex App only for code/docs 
 
 Use OpenClaw `browsertest` for public-only research with no login, no private data, and no external messaging. Bring the result back to SKC Agent OS or docs as evidence.
 
+Preferred second-layer path: create an OpenClaw `browsertest_public_research` execution ticket in Agent Bridge, copy the generated package, run it in the approved OpenClaw workspace, then paste the result summary into the ticket.
+
 ### UI testing
 
 Use Codex App for automated local tests/build. Use Codex Chrome for supervised visual checks in the already-open app.
+
+Preferred second-layer path: create a Codex Chrome `skc_ui_test` execution ticket, use the generated prompt in the already-open browser session, then record visible results and blockers in SKC Agent OS.
 
 ### Code fix
 

@@ -203,6 +203,39 @@ def get_agent_bridge_status():
 def create_agent_bridge_session(req: schemas.AgentBridgeSessionRequest):
     return integrations.create_agent_bridge_session(req)
 
+@app.get("/api/integrations/agent-bridge/executions", response_model=List[schemas.AgentBridgeExecutionResponse])
+def list_agent_bridge_executions(db: Session = Depends(get_db)):
+    return integrations.list_agent_bridge_executions(db)
+
+@app.post("/api/integrations/agent-bridge/executions", response_model=schemas.AgentBridgeExecutionResponse)
+def create_agent_bridge_execution(req: schemas.AgentBridgeExecutionCreateRequest, db: Session = Depends(get_db)):
+    try:
+        return integrations.create_agent_bridge_execution(db, req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+@app.post("/api/integrations/agent-bridge/executions/{run_id}/approve", response_model=schemas.AgentBridgeExecutionResponse)
+def approve_agent_bridge_execution(
+    run_id: str,
+    req: schemas.AgentBridgeExecutionApproveRequest,
+    db: Session = Depends(get_db),
+):
+    result = integrations.approve_agent_bridge_execution(db, run_id, req)
+    if not result:
+        raise HTTPException(status_code=404, detail="Agent Bridge execution not found")
+    return result
+
+@app.post("/api/integrations/agent-bridge/executions/{run_id}/result", response_model=schemas.AgentBridgeExecutionResponse)
+def record_agent_bridge_execution_result(
+    run_id: str,
+    req: schemas.AgentBridgeExecutionResultRequest,
+    db: Session = Depends(get_db),
+):
+    result = integrations.record_agent_bridge_execution_result(db, run_id, req)
+    if not result:
+        raise HTTPException(status_code=404, detail="Agent Bridge execution not found")
+    return result
+
 # --- Push Notifications ---
 @app.get("/api/push/vapid-public-key", response_model=schemas.VapidPublicKeyResponse)
 def get_vapid_public_key():

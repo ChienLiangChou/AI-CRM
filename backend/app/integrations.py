@@ -1,7 +1,11 @@
+import json
+import shlex
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from . import schemas
+from sqlalchemy.orm import Session
+
+from . import models, schemas
 
 
 SAFETY_BOUNDARY = (
@@ -9,6 +13,106 @@ SAFETY_BOUNDARY = (
     "and Codex Chrome extension handoffs, but it does not send messages, submit "
     "forms, mutate CRM data, or modify OpenClaw workspaces."
 )
+
+OPENCLAW_PROFILES = {
+    "standalone_sop": {
+        "agent": "standalone",
+        "workspace": "/Users/kevinchou/OpenClaw_Workspaces/openclaw-standalone",
+        "label": "OpenClaw standalone SOP/workflow map",
+        "rules": [
+            "Use dummy examples only.",
+            "Do not access client or tenant data.",
+            "Do not send or submit anything.",
+        ],
+    },
+    "browsertest_public_research": {
+        "agent": "browsertest",
+        "workspace": "/Users/kevinchou/OpenClaw_Workspaces/openclaw-browser-test",
+        "label": "OpenClaw public-only browser research",
+        "rules": [
+            "No login.",
+            "No MLS/TRREB/REALM.",
+            "No client/private data.",
+            "No downloads or external messaging.",
+        ],
+    },
+    "formtest_dummy_listing_package": {
+        "agent": "formtest",
+        "workspace": "/Users/kevinchou/OpenClaw_Workspaces/openclaw-form-test",
+        "label": "OpenClaw dummy listing package",
+        "rules": [
+            "Use fake data only.",
+            "Do not submit forms.",
+            "Do not access real accounts.",
+        ],
+    },
+    "emaildrafttest_dummy_email": {
+        "agent": "emaildrafttest",
+        "workspace": "/Users/kevinchou/OpenClaw_Workspaces/openclaw-email-draft-test",
+        "label": "OpenClaw dummy email draft",
+        "rules": [
+            "Use fake names and fake property details.",
+            "Do not send, queue, or connect to email.",
+            "Return draft text only.",
+        ],
+    },
+    "localfilestest_one_file_summary": {
+        "agent": "localfilestest",
+        "workspace": "/Users/kevinchou/OpenClaw_Workspaces/openclaw-local-files-test",
+        "label": "OpenClaw one-file summary",
+        "rules": [
+            "Use only one explicitly approved absolute file path.",
+            "Do not read folders.",
+            "Do not inspect neighboring files.",
+        ],
+    },
+}
+
+CHROME_PROFILES = {
+    "skc_ui_test": {
+        "label": "Codex Chrome SKC UI test",
+        "rules": [
+            "Inspect only the already-open SKC Agent OS page.",
+            "Do not submit forms or change settings.",
+            "Return visible result and blockers.",
+        ],
+    },
+    "gmail_draft_check": {
+        "label": "Codex Chrome Gmail draft check",
+        "rules": [
+            "Use only the already-authorized Gmail tab.",
+            "Check draft existence only.",
+            "Do not send, edit, delete, archive, label, or change account settings.",
+        ],
+    },
+    "gmail_thread_summary": {
+        "label": "Codex Chrome approved Gmail thread summary",
+        "rules": [
+            "Summarize only the explicitly approved open thread.",
+            "Do not open other emails.",
+            "Do not reply, forward, download, label, or archive.",
+        ],
+    },
+    "listing_tab_comparison": {
+        "label": "Codex Chrome already-open listing tab comparison",
+        "rules": [
+            "Compare only already-open listing tabs.",
+            "Do not login, scrape broadly, or open new searches.",
+            "Return visible listing facts and needs-confirmation notes.",
+        ],
+    },
+}
+
+SKC_INTERNAL_PROFILES = {
+    "internal_review": {
+        "label": "SKC Agent OS internal review",
+        "rules": [
+            "Review CRM context before choosing an external tool.",
+            "Keep all client-facing action approval-gated.",
+            "Return checklist and next recommended tool.",
+        ],
+    }
+}
 
 
 def get_agent_bridge_status() -> schemas.AgentBridgeStatusResponse:
@@ -84,6 +188,126 @@ def get_agent_bridge_status() -> schemas.AgentBridgeStatusResponse:
     )
 
 
+def create_agent_bridge_execution(
+    db: Session,
+    request: schemas.AgentBridgeExecutionCreateRequest,
+) -> schemas.AgentBridgeExecutionResponse:
+    profile = _resolve_profile(request.target, request.execution_profile)
+    created_at = datetime.now(timezone.utc)
+    run_id = f"exec-{created_at.strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}"
+    session_request = schemas.AgentBridgeSessionRequest(
+        workflow=request.workflow,
+        source_context=request.source_context,
+        client_name=request.client_name,
+        property_address=request.property_address,
+        requested_outcome=request.requested_outcome,
+        include_openclaw=request.target == "openclaw",
+        include_codex_chrome=request.target == "codex_chrome_extension",
+    )
+    summary = _summarize_request(session_request)
+    handoff = _build_target_handoff(request.target, session_request, summary)
+    package = _build_execution_package(request, profile, handoff.prompt, summary)
+    command_text = _build_command_text(request.target, profile, handoff.prompt)
+    approved_at = created_at if request.approved_by_kevin else None
+    status = "ready_for_external_runner" if request.approved_by_kevin else "waiting_kevin_approval"
+
+    audit_notes = [
+        "Execution ticket created inside SKC Agent OS.",
+        "No email, browser submit, signature action, account mutation, or OpenClaw command was executed by ticket creation.",
+        "External execution requires Kevin approval and the generated bounded execution package.",
+    ]
+    if request.approved_by_kevin:
+        audit_notes.append("Kevin approval was marked as confirmed by the operator.")
+
+    db_run = models.AgentBridgeRun(
+        run_id=run_id,
+        target=request.target,
+        target_label=profile["label"],
+        execution_profile=request.execution_profile or _default_profile(request.target),
+        workflow=request.workflow,
+        status=status,
+        client_name=request.client_name,
+        property_address=request.property_address,
+        requested_outcome=request.requested_outcome,
+        source_context=request.source_context,
+        summary=summary,
+        handoff_prompt=handoff.prompt,
+        execution_package=json.dumps(package),
+        command_text=command_text,
+        audit_notes=json.dumps(audit_notes),
+        approval_required=1,
+        approved_by_kevin=1 if request.approved_by_kevin else 0,
+        approved_at=approved_at,
+        operator_notes=request.operator_notes,
+        result_payload="{}",
+    )
+    db.add(db_run)
+    db.commit()
+    db.refresh(db_run)
+    return _run_to_response(db_run)
+
+
+def list_agent_bridge_executions(db: Session) -> list[schemas.AgentBridgeExecutionResponse]:
+    runs = (
+        db.query(models.AgentBridgeRun)
+        .order_by(models.AgentBridgeRun.created_at.desc())
+        .limit(25)
+        .all()
+    )
+    return [_run_to_response(run) for run in runs]
+
+
+def approve_agent_bridge_execution(
+    db: Session,
+    run_id: str,
+    request: schemas.AgentBridgeExecutionApproveRequest,
+) -> schemas.AgentBridgeExecutionResponse | None:
+    db_run = db.query(models.AgentBridgeRun).filter(models.AgentBridgeRun.run_id == run_id).first()
+    if not db_run:
+        return None
+    if not request.approved_by_kevin:
+        db_run.status = "waiting_kevin_approval"
+        db_run.approved_by_kevin = 0
+        db_run.approved_at = None
+    else:
+        db_run.status = "ready_for_external_runner"
+        db_run.approved_by_kevin = 1
+        db_run.approved_at = datetime.now(timezone.utc)
+
+    db_run.operator_notes = request.operator_notes or db_run.operator_notes
+    db_run.updated_at = datetime.utcnow()
+    audit_notes = _json_loads_list(db_run.audit_notes)
+    audit_notes.append(
+        "Execution ticket approval updated. No external command, browser action, send, submit, or sign action was performed by this API call."
+    )
+    db_run.audit_notes = json.dumps(audit_notes)
+    db.commit()
+    db.refresh(db_run)
+    return _run_to_response(db_run)
+
+
+def record_agent_bridge_execution_result(
+    db: Session,
+    run_id: str,
+    request: schemas.AgentBridgeExecutionResultRequest,
+) -> schemas.AgentBridgeExecutionResponse | None:
+    db_run = db.query(models.AgentBridgeRun).filter(models.AgentBridgeRun.run_id == run_id).first()
+    if not db_run:
+        return None
+    db_run.status = request.status
+    db_run.result_summary = request.result_summary
+    db_run.result_payload = json.dumps(request.result_payload)
+    db_run.updated_at = datetime.utcnow()
+    audit_notes = _json_loads_list(db_run.audit_notes)
+    audit_notes.append(
+        "External tool result was recorded in SKC Agent OS for human review. Recording a result does not approve client-facing action."
+    )
+    db_run.audit_notes = json.dumps(audit_notes)
+    db.commit()
+    db.refresh(db_run)
+    return _run_to_response(db_run)
+
+
 def create_agent_bridge_session(
     request: schemas.AgentBridgeSessionRequest,
 ) -> schemas.AgentBridgeSessionResponse:
@@ -120,6 +344,125 @@ def create_agent_bridge_session(
             "Use the generated handoff text as the reviewed bridge between SKC Agent OS and the external agent surface.",
         ],
     )
+
+
+def _resolve_profile(target: str, profile_name: str | None) -> dict:
+    profile = profile_name or _default_profile(target)
+    profiles = _profiles_for_target(target)
+    if profile not in profiles:
+        allowed = ", ".join(sorted(profiles))
+        raise ValueError(f"Unsupported execution_profile '{profile}'. Allowed profiles: {allowed}")
+    return profiles[profile]
+
+
+def _default_profile(target: str) -> str:
+    if target == "openclaw":
+        return "browsertest_public_research"
+    if target == "codex_chrome_extension":
+        return "skc_ui_test"
+    return "internal_review"
+
+
+def _profiles_for_target(target: str) -> dict:
+    if target == "openclaw":
+        return OPENCLAW_PROFILES
+    if target == "codex_chrome_extension":
+        return CHROME_PROFILES
+    return SKC_INTERNAL_PROFILES
+
+
+def _build_target_handoff(
+    target: str,
+    request: schemas.AgentBridgeSessionRequest,
+    summary: str,
+) -> schemas.AgentBridgeHandoff:
+    if target == "openclaw":
+        return _build_openclaw_handoff(request, summary)
+    if target == "codex_chrome_extension":
+        return _build_chrome_handoff(request, summary)
+    return _build_skc_review_handoff(request, summary)
+
+
+def _build_execution_package(
+    request: schemas.AgentBridgeExecutionCreateRequest,
+    profile: dict,
+    prompt: str,
+    summary: str,
+) -> dict:
+    return {
+        "target": request.target,
+        "target_label": profile["label"],
+        "execution_profile": request.execution_profile or _default_profile(request.target),
+        "workflow": request.workflow,
+        "summary": summary,
+        "approval_required": True,
+        "approved_by_kevin": request.approved_by_kevin,
+        "operator_notes": request.operator_notes,
+        "safety_boundary": SAFETY_BOUNDARY,
+        "rules": profile["rules"],
+        "handoff_prompt": prompt,
+        "result_contract": [
+            "Return evidence gathered.",
+            "Return blockers and what could not be verified.",
+            "Return source handles, URLs, filenames, or visible page/listing IDs where available.",
+            "Return recommendation for Kevin review only.",
+        ],
+    }
+
+
+def _build_command_text(target: str, profile: dict, prompt: str) -> str | None:
+    if target == "openclaw":
+        quoted_prompt = shlex.quote(prompt)
+        workspace = shlex.quote(profile["workspace"])
+        agent = shlex.quote(profile["agent"])
+        return f"cd {workspace} && openclaw run --agent {agent} --task {quoted_prompt}"
+    if target == "codex_chrome_extension":
+        return f"Codex Chrome supervised prompt:\n\n{prompt}"
+    return None
+
+
+def _run_to_response(run: models.AgentBridgeRun) -> schemas.AgentBridgeExecutionResponse:
+    return schemas.AgentBridgeExecutionResponse(
+        run_id=run.run_id,
+        target=run.target,
+        target_label=run.target_label,
+        execution_profile=run.execution_profile,
+        status=run.status,
+        workflow=run.workflow,
+        summary=run.summary,
+        safety_boundary=SAFETY_BOUNDARY,
+        approval_required=bool(run.approval_required),
+        approved_by_kevin=bool(run.approved_by_kevin),
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        approved_at=run.approved_at,
+        handoff_prompt=run.handoff_prompt,
+        execution_package=_json_loads_dict(run.execution_package),
+        command_text=run.command_text,
+        audit_notes=_json_loads_list(run.audit_notes),
+        result_summary=run.result_summary,
+        result_payload=_json_loads_dict(run.result_payload),
+    )
+
+
+def _json_loads_dict(value: str | None) -> dict:
+    if not value:
+        return {}
+    try:
+        data = json.loads(value)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _json_loads_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        data = json.loads(value)
+        return data if isinstance(data, list) else []
+    except json.JSONDecodeError:
+        return []
 
 
 def _summarize_request(request: schemas.AgentBridgeSessionRequest) -> str:

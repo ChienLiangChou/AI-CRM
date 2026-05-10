@@ -75,7 +75,7 @@ Memory must be visible, reviewable, and correctable. It should not silently chan
 
 Goal: automate preparation only after real friction data identifies the safest and most valuable target.
 
-Automation Engine v1 should:
+Controlled execution layer v1 is the first safe bridge toward Automation Engine v1. It should:
 
 - schedule preparation tasks;
 - create run records;
@@ -84,8 +84,11 @@ Automation Engine v1 should:
 - route to approval;
 - preserve audit notes;
 - let Kevin stop or override.
+- create external runner tickets for OpenClaw and Codex Chrome;
+- require Kevin approval before external execution scope is treated as ready;
+- record external runner results back into SKC Agent OS.
 
-Automation Engine v1 must not:
+Controlled execution layer v1 and future Automation Engine v1 must not:
 
 - auto-send;
 - auto-submit;

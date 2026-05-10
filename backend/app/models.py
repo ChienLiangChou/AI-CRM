@@ -163,3 +163,38 @@ class PushSubscription(Base):
     p256dh = Column(String)
     auth = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AgentBridgeRun(Base):
+    """Controlled execution ticket for SKC Agent Bridge external tool handoffs."""
+    __tablename__ = "agent_bridge_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String, unique=True, index=True)
+    target = Column(String, index=True)  # openclaw, codex_chrome_extension, skc_agent_os
+    target_label = Column(String)
+    execution_profile = Column(String)
+    workflow = Column(String, index=True)
+    status = Column(String, default="waiting_kevin_approval", index=True)
+
+    client_name = Column(String, nullable=True)
+    property_address = Column(String, nullable=True)
+    requested_outcome = Column(Text, nullable=True)
+    source_context = Column(Text)
+    summary = Column(Text)
+
+    handoff_prompt = Column(Text)
+    execution_package = Column(Text, default="{}")
+    command_text = Column(Text, nullable=True)
+    audit_notes = Column(Text, default="[]")
+
+    approval_required = Column(Integer, default=1)
+    approved_by_kevin = Column(Integer, default=0)
+    approved_at = Column(DateTime, nullable=True)
+    operator_notes = Column(Text, nullable=True)
+
+    result_summary = Column(Text, nullable=True)
+    result_payload = Column(Text, default="{}")
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

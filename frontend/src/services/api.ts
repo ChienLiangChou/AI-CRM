@@ -216,6 +216,53 @@ export interface AgentBridgeSessionResponse {
     audit_notes: string[];
 }
 
+export type AgentBridgeTarget = 'openclaw' | 'codex_chrome_extension' | 'skc_agent_os';
+
+export interface AgentBridgeExecutionCreateRequest {
+    target: AgentBridgeTarget;
+    workflow: string;
+    execution_profile?: string;
+    source_context: string;
+    client_name?: string;
+    property_address?: string;
+    requested_outcome?: string;
+    approved_by_kevin: boolean;
+    operator_notes?: string;
+}
+
+export interface AgentBridgeExecutionApproveRequest {
+    approved_by_kevin: boolean;
+    operator_notes?: string;
+}
+
+export interface AgentBridgeExecutionResultRequest {
+    status: 'completed' | 'blocked' | 'needs_review';
+    result_summary: string;
+    result_payload: Record<string, unknown>;
+}
+
+export interface AgentBridgeExecutionResponse {
+    run_id: string;
+    target: AgentBridgeTarget;
+    target_label: string;
+    execution_profile: string;
+    status: string;
+    workflow: string;
+    summary: string;
+    safety_boundary: string;
+    approval_required: boolean;
+    approved_by_kevin: boolean;
+    created_at: string;
+    updated_at: string;
+    approved_at?: string;
+    handoff_prompt: string;
+    execution_package: Record<string, unknown>;
+    command_text?: string;
+    audit_notes: string[];
+    result_summary?: string;
+    result_payload: Record<string, unknown>;
+}
+
 export const crmService = {
     // --- Contacts ---
     getContacts: async () => {
@@ -340,6 +387,26 @@ export const crmService = {
 
     createAgentBridgeSession: async (data: AgentBridgeSessionRequest) => {
         const response = await api.post<AgentBridgeSessionResponse>('/integrations/agent-bridge/sessions', data);
+        return response.data;
+    },
+
+    listAgentBridgeExecutions: async () => {
+        const response = await api.get<AgentBridgeExecutionResponse[]>('/integrations/agent-bridge/executions');
+        return response.data;
+    },
+
+    createAgentBridgeExecution: async (data: AgentBridgeExecutionCreateRequest) => {
+        const response = await api.post<AgentBridgeExecutionResponse>('/integrations/agent-bridge/executions', data);
+        return response.data;
+    },
+
+    approveAgentBridgeExecution: async (runId: string, data: AgentBridgeExecutionApproveRequest) => {
+        const response = await api.post<AgentBridgeExecutionResponse>(`/integrations/agent-bridge/executions/${runId}/approve`, data);
+        return response.data;
+    },
+
+    recordAgentBridgeExecutionResult: async (runId: string, data: AgentBridgeExecutionResultRequest) => {
+        const response = await api.post<AgentBridgeExecutionResponse>(`/integrations/agent-bridge/executions/${runId}/result`, data);
         return response.data;
     },
 };
