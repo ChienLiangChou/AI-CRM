@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { crmService } from '../services/api';
-import type { Contact, SmartSearchResult } from '../services/api';
-import { Sparkles, Filter, Plus } from 'lucide-react';
+import type { Contact, LegacyVoiceMemoReviewResponse, SmartSearchResult } from '../services/api';
+import { AlertTriangle, Sparkles, Filter, Plus } from 'lucide-react';
 import ContactModal from '../components/ContactModal';
 import AddContactModal from '../components/AddContactModal';
 import './Contacts.css';
@@ -13,16 +14,33 @@ const Contacts = () => {
     const [loading, setLoading] = useState(false);
     const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
     const [showAddModal, setShowAddModal] = useState(false);
+    const [legacyVoiceMemoReview, setLegacyVoiceMemoReview] = useState<LegacyVoiceMemoReviewResponse | null>(null);
+    const [searchParams] = useSearchParams();
+    const [deepLinkHandled, setDeepLinkHandled] = useState(false);
+    const focusedContactId = Number(searchParams.get('contact_id') || '');
 
     useEffect(() => {
         loadContacts();
     }, []);
 
+    useEffect(() => {
+        if (deepLinkHandled || !focusedContactId || !contacts.length) return;
+        const focusedContact = contacts.find((contact) => contact.id === focusedContactId);
+        if (!focusedContact) return;
+        setSelectedContact(focusedContact);
+        setQuery(focusedContact.name);
+        setDeepLinkHandled(true);
+    }, [contacts, deepLinkHandled, focusedContactId]);
+
     const loadContacts = async () => {
         setLoading(true);
         try {
-            const data = await crmService.getContacts();
+            const [data, legacyReview] = await Promise.all([
+                crmService.getContacts(),
+                crmService.getLegacyVoiceMemoReview(),
+            ]);
             setContacts(data);
+            setLegacyVoiceMemoReview(legacyReview);
         } catch (error) {
             console.error('Failed', error);
         } finally {
@@ -71,6 +89,14 @@ const Contacts = () => {
         setContacts(prev => [newContact, ...prev]);
     };
 
+    const openContactById = (contactId?: number | null) => {
+        if (!contactId) return;
+        const contact = contacts.find((item) => item.id === contactId);
+        if (!contact) return;
+        setSelectedContact(contact);
+        setQuery(contact.name);
+    };
+
     return (
         <div className="contacts-page animate-fade-in">
             <div className="page-header flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-4 sm:mb-6">
@@ -103,6 +129,52 @@ const Contacts = () => {
                     </div>
                 )}
             </div>
+
+            {legacyVoiceMemoReview && legacyVoiceMemoReview.count > 0 && (
+                <div className="glass-panel mb-6 p-4 border border-amber-400/30 bg-amber-400/5">
+                    <div className="flex items-start gap-3">
+                        <AlertTriangle className="text-amber-300 shrink-0 mt-0.5" size={18} />
+                        <div className="min-w-0 flex-1">
+                            <div className="font-semibold text-amber-100">Legacy voice memo review needed</div>
+                            <p className="text-sm text-amber-100/80 mt-1">
+                                New voice memos now save to named contacts, but older generic Voice Memo Lead records still need manual review before cleanup.
+                            </p>
+                            <div className="mt-3 space-y-2">
+                                {legacyVoiceMemoReview.items.slice(0, 3).map((item) => (
+                                    <div key={`${item.contact_id}-${item.interaction_id || 'contact'}`} className="rounded-md border border-white/10 bg-slate-900/60 p-3 text-sm">
+                                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                                            <div className="min-w-0">
+                                                <div className="font-medium text-white">
+                                                    {item.contact_name}
+                                                    {item.suggested_name ? ` -> possible ${item.suggested_name}` : ''}
+                                                </div>
+                                                <div className="text-gray-400 truncate">{item.evidence_snippet}</div>
+                                                <div className="text-xs text-amber-100/70 mt-1">{item.safety_note}</div>
+                                            </div>
+                                            <div className="flex gap-2 shrink-0">
+                                                <button
+                                                    className="btn btn-ghost text-xs px-3 py-2"
+                                                    onClick={() => openContactById(item.contact_id)}
+                                                >
+                                                    Open Legacy
+                                                </button>
+                                                {item.suggested_existing_contact_id ? (
+                                                    <button
+                                                        className="btn btn-primary text-xs px-3 py-2"
+                                                        onClick={() => openContactById(item.suggested_existing_contact_id)}
+                                                    >
+                                                        Open {item.suggested_existing_contact_name}
+                                                    </button>
+                                                ) : null}
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Contacts List — Desktop: table, Mobile: cards */}
             <div className="contacts-list glass-panel">

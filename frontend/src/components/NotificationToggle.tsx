@@ -10,15 +10,12 @@ import {
 const NotificationToggle = () => {
   const [subscribed, setSubscribed] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [supported, setSupported] = useState(true);
+  const [supported] = useState(() => "Notification" in window && "serviceWorker" in navigator);
 
   useEffect(() => {
-    if (!("Notification" in window) || !("serviceWorker" in navigator)) {
-      setSupported(false);
-      return;
-    }
+    if (!supported) return;
     isPushSubscribed().then(setSubscribed);
-  }, []);
+  }, [supported]);
 
   const handleToggle = async () => {
     setLoading(true);

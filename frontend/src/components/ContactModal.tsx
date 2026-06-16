@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
-import { X, Mail, Globe, Sparkles, Loader2, Pencil, Trash2, Save, Phone, MessageSquare, Calendar, Plus } from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { X, Mail, Globe, Sparkles, Loader2, Pencil, Trash2, Save, Phone, MessageSquare, Calendar, Plus, CheckCircle2, AlertCircle, ClipboardCheck, ArrowRight } from 'lucide-react';
 import { crmService } from '../services/api';
-import type { Contact, EmailDraftResponse, Interaction } from '../services/api';
+import type { Contact, EmailDraftResponse, Interaction, LeadQualification } from '../services/api';
 
 interface Props {
     contact: Contact;
@@ -24,11 +24,13 @@ const ContactModal: React.FC<Props> = ({ contact, onClose, onUpdate, onDelete })
     // AI features
     const [loadingEmail, setLoadingEmail] = useState(false);
     const [loadingEnrich, setLoadingEnrich] = useState(false);
+    const [loadingQualification, setLoadingQualification] = useState(false);
     const [emailDraft, setEmailDraft] = useState<EmailDraftResponse | null>(null);
 
     // Edit mode
     const [editing, setEditing] = useState(false);
     const [saving, setSaving] = useState(false);
+    const [saveFeedback, setSaveFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
     const [editForm, setEditForm] = useState({
         name: contact.name,
         email: contact.email || '',
@@ -49,11 +51,7 @@ const ContactModal: React.FC<Props> = ({ contact, onClose, onUpdate, onDelete })
     const [newInteraction, setNewInteraction] = useState({ interaction_type: 'email', notes: '' });
     const [addingInteraction, setAddingInteraction] = useState(false);
 
-    useEffect(() => {
-        loadInteractions();
-    }, [contact.id]);
-
-    const loadInteractions = async () => {
+    const loadInteractions = useCallback(async () => {
         setLoadingInteractions(true);
         try {
             const data = await crmService.getInteractions(contact.id);
@@ -63,7 +61,12 @@ const ContactModal: React.FC<Props> = ({ contact, onClose, onUpdate, onDelete })
         } finally {
             setLoadingInteractions(false);
         }
-    };
+    }, [contact.id]);
+
+    useEffect(() => {
+        loadInteractions();
+        setSaveFeedback(null);
+    }, [loadInteractions]);
 
     const handleDraftEmail = async () => {
         setLoadingEmail(true);
@@ -89,19 +92,58 @@ const ContactModal: React.FC<Props> = ({ contact, onClose, onUpdate, onDelete })
         }
     };
 
+    const handleQualify = async () => {
+        setLoadingQualification(true);
+        setSaveFeedback(null);
+        try {
+            const result = await crmService.qualifyContact(contact.id);
+            onUpdate(result.contact);
+            setSaveFeedback({
+                type: 'success',
+                message: `Qualified ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
+            });
+        } catch (error) {
+            console.error('Failed to qualify lead:', error);
+            setSaveFeedback({
+                type: 'error',
+                message: 'Qualification failed. Review the contact details and try again.',
+            });
+        } finally {
+            setLoadingQualification(false);
+        }
+    };
+
     const handleEditChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
         const { name, value } = e.target;
+        setSaveFeedback(null);
         setEditForm(prev => ({ ...prev, [name]: name === 'stage_id' ? Number(value) : value }));
     };
 
     const handleSave = async () => {
         setSaving(true);
+        setSaveFeedback(null);
         try {
             const updated = await crmService.updateContact(contact.id, editForm);
             onUpdate(updated);
+            setEditForm({
+                name: updated.name,
+                email: updated.email || '',
+                phone: updated.phone || '',
+                company: updated.company || '',
+                notes: updated.notes || '',
+                stage_id: updated.stage_id || 1,
+            });
             setEditing(false);
+            setSaveFeedback({
+                type: 'success',
+                message: `Saved ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
+            });
         } catch (error) {
             console.error('Failed to update contact:', error);
+            setSaveFeedback({
+                type: 'error',
+                message: 'Save failed. Your changes are still on screen; try again.',
+            });
         } finally {
             setSaving(false);
         }
@@ -127,6 +169,8 @@ const ContactModal: React.FC<Props> = ({ contact, onClose, onUpdate, onDelete })
         try {
             const created = await crmService.createInteraction(contact.id, newInteraction);
             setInteractions(prev => [created, ...prev]);
+            const result = await crmService.qualifyContact(contact.id);
+            onUpdate(result.contact);
             setNewInteraction({ interaction_type: 'email', notes: '' });
             setShowAddInteraction(false);
         } catch (error) {
@@ -153,6 +197,24 @@ const ContactModal: React.FC<Props> = ({ contact, onClose, onUpdate, onDelete })
     };
 
     const stageName = STAGES.find(s => s.id === contact.stage_id)?.name || 'Unassigned';
+    const qualification = (() => {
+        if (!contact.qualification_json) return null;
+        try {
+            const parsed = JSON.parse(contact.qualification_json) as LeadQualification;
+            return parsed?.schema_version === 'lead_qualification_v2' ? parsed : null;
+        } catch {
+            return null;
+        }
+    })();
+    const qualificationRoute = qualification?.recommended_route || contact.qualification_route || 'unqualified';
+    const qualificationLabel = qualificationRoute.replace(/_/g, ' ');
+    const qualificationTone = qualification?.status === 'qualified'
+        ? 'text-green-300 bg-green-500/10 border-green-500/30'
+        : qualification?.status === 'needs_clarification'
+            ? 'text-amber-200 bg-amber-500/10 border-amber-500/30'
+            : qualification?.status === 'low_intent'
+                ? 'text-gray-300 bg-gray-500/10 border-gray-500/30'
+                : 'text-blue-200 bg-blue-500/10 border-blue-500/30';
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
@@ -193,7 +255,14 @@ const ContactModal: React.FC<Props> = ({ contact, onClose, onUpdate, onDelete })
                     <div className="flex items-center gap-2">
                         {!editing ? (
                             <>
-                                <button onClick={() => setEditing(true)} className="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-400 hover:text-blue-400" title="Edit">
+                                <button
+                                    onClick={() => {
+                                        setSaveFeedback(null);
+                                        setEditing(true);
+                                    }}
+                                    className="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-400 hover:text-blue-400"
+                                    title="Edit"
+                                >
                                     <Pencil size={18} />
                                 </button>
                                 <button onClick={() => setShowDeleteConfirm(true)} className="p-2 hover:bg-red-500/20 rounded-full transition-colors text-gray-400 hover:text-red-400" title="Delete">
@@ -207,7 +276,7 @@ const ContactModal: React.FC<Props> = ({ contact, onClose, onUpdate, onDelete })
                                 className="btn bg-green-500/20 text-green-400 hover:bg-green-500/30 border border-green-500/30 text-sm py-1.5 px-4"
                             >
                                 {saving ? <Loader2 className="animate-spin" size={16} /> : <Save size={16} />}
-                                Save
+                                {saving ? 'Saving...' : 'Save'}
                             </button>
                         )}
                         <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-full transition-colors text-gray-400 hover:text-white">
@@ -215,6 +284,19 @@ const ContactModal: React.FC<Props> = ({ contact, onClose, onUpdate, onDelete })
                         </button>
                     </div>
                 </div>
+
+                {saveFeedback && (
+                    <div
+                        aria-live="polite"
+                        className={`mx-6 mt-4 flex items-center gap-2 rounded-xl border px-4 py-3 text-sm relative z-10 animate-fade-in ${saveFeedback.type === 'success'
+                            ? 'bg-green-500/10 border-green-500/30 text-green-300'
+                            : 'bg-red-500/10 border-red-500/30 text-red-300'
+                            }`}
+                    >
+                        {saveFeedback.type === 'success' ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
+                        <span>{saveFeedback.message}</span>
+                    </div>
+                )}
 
                 {/* Delete Confirmation */}
                 {showDeleteConfirm && (
@@ -269,8 +351,19 @@ const ContactModal: React.FC<Props> = ({ contact, onClose, onUpdate, onDelete })
                                 <div className={`text-3xl font-bold ${contact.lead_score >= 80 ? 'text-red-400' : contact.lead_score >= 50 ? 'text-orange-400' : 'text-blue-400'}`}>
                                     {Math.round(contact.lead_score)}
                                 </div>
+                                <div className={`mt-2 inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs capitalize ${qualificationTone}`}>
+                                    <ClipboardCheck size={13} />
+                                    {qualificationLabel}
+                                </div>
                             </div>
-                            <div className="flex gap-3">
+                            <div className="flex flex-wrap justify-end gap-3">
+                                <button
+                                    onClick={handleQualify}
+                                    disabled={loadingQualification}
+                                    className="btn bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/30">
+                                    {loadingQualification ? <Loader2 className="animate-spin" size={18} /> : <ClipboardCheck size={18} />}
+                                    Qualify Lead
+                                </button>
                                 <button
                                     onClick={handleEnrich}
                                     disabled={loadingEnrich}
@@ -286,6 +379,67 @@ const ContactModal: React.FC<Props> = ({ contact, onClose, onUpdate, onDelete })
                                     Draft Email
                                 </button>
                             </div>
+                        </div>
+                    )}
+
+                    {!editing && qualification && (
+                        <div className="rounded-xl border border-white/10 bg-black/20 p-5">
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                <div>
+                                    <h3 className="text-sm font-semibold uppercase tracking-wider text-gray-300 flex items-center gap-2">
+                                        <ClipboardCheck size={16} /> Qualification
+                                    </h3>
+                                    <p className="mt-2 text-sm text-gray-300">{qualification.summary}</p>
+                                    <p className="mt-1 text-xs text-gray-500">{qualification.routing_reason}</p>
+                                </div>
+                                <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                                    <div className="rounded-md border border-white/10 bg-white/5 px-3 py-2">
+                                        <div className="text-gray-500">Intent</div>
+                                        <div className="mt-1 font-semibold capitalize text-white">{qualification.intent}</div>
+                                    </div>
+                                    <div className="rounded-md border border-white/10 bg-white/5 px-3 py-2">
+                                        <div className="text-gray-500">Urgency</div>
+                                        <div className="mt-1 font-semibold capitalize text-white">{qualification.urgency}</div>
+                                    </div>
+                                    <div className="rounded-md border border-white/10 bg-white/5 px-3 py-2">
+                                        <div className="text-gray-500">Confidence</div>
+                                        <div className="mt-1 font-semibold text-white">{Math.round(qualification.confidence * 100)}%</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                                <div>
+                                    <div className="text-xs font-semibold uppercase tracking-wider text-gray-500">Evidence</div>
+                                    <div className="mt-2 space-y-1">
+                                        {qualification.evidence.length ? qualification.evidence.map((item) => (
+                                            <div key={item} className="flex items-center gap-2 text-sm text-gray-300">
+                                                <CheckCircle2 size={14} className="text-green-400 shrink-0" />
+                                                <span>{item}</span>
+                                            </div>
+                                        )) : (
+                                            <div className="text-sm text-gray-500">No evidence captured yet.</div>
+                                        )}
+                                    </div>
+                                </div>
+                                <div>
+                                    <div className="text-xs font-semibold uppercase tracking-wider text-gray-500">Next Actions</div>
+                                    <div className="mt-2 space-y-1">
+                                        {qualification.next_actions.map((item) => (
+                                            <div key={item} className="flex items-start gap-2 text-sm text-gray-300">
+                                                <ArrowRight size={14} className="mt-0.5 text-blue-300 shrink-0" />
+                                                <span>{item}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {qualification.missing_fields.length > 0 && (
+                                <div className="mt-4 rounded-lg border border-amber-400/20 bg-amber-400/5 p-3 text-sm text-amber-100">
+                                    Missing: {qualification.missing_fields.join(', ')}
+                                </div>
+                            )}
                         </div>
                     )}
 

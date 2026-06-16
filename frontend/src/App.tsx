@@ -4,6 +4,7 @@ import Dashboard from './pages/Dashboard';
 import Contacts from './pages/Contacts';
 import Pipeline from './pages/Pipeline';
 import Prospector from './pages/Prospector';
+import Watchlists from './pages/Watchlists';
 
 function App() {
   return (
@@ -14,6 +15,7 @@ function App() {
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/contacts" element={<Contacts />} />
           <Route path="/pipeline" element={<Pipeline />} />
+          <Route path="/watchlists" element={<Watchlists />} />
           <Route path="/find-leads" element={<Prospector />} />
         </Routes>
       </Layout>

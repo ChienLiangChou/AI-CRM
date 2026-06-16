@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Users, Trello, Sparkles } from 'lucide-react';
+import { BellRing, LayoutDashboard, Users, Trello, Sparkles } from 'lucide-react';
 import NotificationToggle from './NotificationToggle';
 import './Layout.css';
 
@@ -7,6 +7,7 @@ const navItems = [
     { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
     { to: '/contacts', icon: Users, label: 'Contacts' },
     { to: '/pipeline', icon: Trello, label: 'Pipeline' },
+    { to: '/watchlists', icon: BellRing, label: 'Watchlists' },
     { to: '/find-leads', icon: Sparkles, label: 'Leads' },
 ];
 

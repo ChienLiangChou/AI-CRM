@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ForeignKey, JSON
+from sqlalchemy import Boolean, Column, Integer, String, Float, DateTime, Text, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from .database import Base
@@ -41,6 +41,10 @@ class Contact(Base):
     # Tags & Scoring
     tags = Column(String, nullable=True, default="")
     lead_score = Column(Float, default=0.0)
+    qualification_status = Column(String, nullable=True, default="unqualified")
+    qualification_route = Column(String, nullable=True)
+    qualification_json = Column(Text, nullable=True, default="{}")
+    qualification_updated_at = Column(DateTime, nullable=True)
     mood_score = Column(Integer, nullable=True)  # 1-10
     mood_notes = Column(String, nullable=True)
     source = Column(String, nullable=True)  # referral, open_house, online, cold_call, social_media
@@ -60,6 +64,8 @@ class Contact(Base):
     stage_id = Column(Integer, ForeignKey("pipeline_stages.id"))
     stage = relationship("PipelineStage", back_populates="contacts")
     interactions = relationship("Interaction", back_populates="contact", cascade="all, delete-orphan")
+    watchlists = relationship("ClientWatchlist", back_populates="contact", cascade="all, delete-orphan")
+    watchlist_alerts = relationship("WatchlistAlert", back_populates="contact")
     
     # Properties relationships (as owner or tenant)
     owned_properties = relationship("Property", back_populates="owner", foreign_keys="Property.owner_client_id")
@@ -98,6 +104,9 @@ class Property(Base):
     monthly_expenses = Column(Float, nullable=True)
     cap_rate = Column(Float, nullable=True)
     annual_roi = Column(Float, nullable=True)
+    listed_at = Column(DateTime, nullable=True)
+    sold_at = Column(DateTime, nullable=True)
+    leased_at = Column(DateTime, nullable=True)
     
     # Links
     mls_number = Column(String, nullable=True)
@@ -116,6 +125,118 @@ class Property(Base):
     tenant_client_id = Column(Integer, ForeignKey("contacts.id"), nullable=True)
     owner = relationship("Contact", back_populates="owned_properties", foreign_keys=[owner_client_id])
     tenant = relationship("Contact", back_populates="rented_properties", foreign_keys=[tenant_client_id])
+    watchlist_alerts = relationship("WatchlistAlert", back_populates="property")
+
+
+class ClientWatchlist(Base):
+    """Saved listing/comp search criteria for one client."""
+    __tablename__ = "client_watchlists"
+
+    id = Column(Integer, primary_key=True, index=True)
+    contact_id = Column(Integer, ForeignKey("contacts.id"), index=True)
+    name = Column(String)
+    watch_type = Column(String, index=True)  # buyer_listing_match, seller_listing_and_sold, tenant_rental_match, landlord_rental_market
+    status = Column(String, default="active", index=True)  # active, paused
+    criteria_json = Column(Text, nullable=True, default="{}")
+    schedule_json = Column(Text, nullable=True, default='{"times":["09:00"],"timezone":"America/Toronto"}')
+    notification_channel = Column(String, default="codex_app")  # codex_app, app_push, in_app
+    review_mode = Column(String, default="manual_review")  # manual_review, auto_create_draft, auto_gmail_draft, auto_send_approved
+    data_source = Column(String, default="internal_properties")  # internal_properties, mls_adapter
+    source_query = Column(Text, nullable=True)  # optional Gmail/REALM/TRREB search query for this watchlist
+    last_checked_at = Column(DateTime, nullable=True)
+    next_check_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    contact = relationship("Contact", back_populates="watchlists")
+    alerts = relationship("WatchlistAlert", back_populates="watchlist", cascade="all, delete-orphan")
+
+
+class WatchlistAlert(Base):
+    """Reviewable result produced by a client watchlist check."""
+    __tablename__ = "watchlist_alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    watchlist_id = Column(Integer, ForeignKey("client_watchlists.id"), index=True)
+    contact_id = Column(Integer, ForeignKey("contacts.id"), index=True)
+    property_id = Column(Integer, ForeignKey("properties.id"), nullable=True, index=True)
+    interaction_id = Column(Integer, ForeignKey("interactions.id"), nullable=True, index=True)
+    alert_type = Column(String, index=True)  # new_listing, sold_comp, leased_comp, system_notice
+    title = Column(String)
+    summary = Column(Text)
+    analysis = Column(Text)
+    source = Column(String, default="internal_properties")
+    source_url = Column(String, nullable=True)
+    payload_json = Column(Text, nullable=True, default="{}")
+    status = Column(String, default="pending_review", index=True)  # pending_review, draft_created, dismissed
+    created_at = Column(DateTime, default=datetime.utcnow)
+    reviewed_at = Column(DateTime, nullable=True)
+
+    watchlist = relationship("ClientWatchlist", back_populates="alerts")
+    contact = relationship("Contact", back_populates="watchlist_alerts")
+    property = relationship("Property", back_populates="watchlist_alerts")
+    interaction = relationship("Interaction")
+    notifications = relationship("WatchlistNotification", back_populates="alert", cascade="all, delete-orphan")
+
+
+class PropertyFeedConfig(Base):
+    """Saved listing-feed import settings for scheduled watchlist checks."""
+    __tablename__ = "property_feed_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    gmail_feed_enabled = Column(Boolean, default=False)
+    gmail_query = Column(String, default="newer_than:14d (MLS OR listing OR sold OR leased OR REALM OR TRREB)")
+    gmail_max_results = Column(Integer, default=10)
+    last_import_at = Column(DateTime, nullable=True)
+    last_import_message = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class WatchlistNotification(Base):
+    """Delivery/audit log for watchlist alert notifications."""
+    __tablename__ = "watchlist_notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    alert_id = Column(Integer, ForeignKey("watchlist_alerts.id"), index=True)
+    watchlist_id = Column(Integer, ForeignKey("client_watchlists.id"), index=True)
+    contact_id = Column(Integer, ForeignKey("contacts.id"), index=True)
+    channel = Column(String, index=True)  # codex_app, app_push, in_app
+    status = Column(String, default="queued", index=True)
+    title = Column(String)
+    body = Column(Text)
+    error = Column(String, nullable=True)
+    delivered_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    alert = relationship("WatchlistAlert", back_populates="notifications")
+    watchlist = relationship("ClientWatchlist")
+    contact = relationship("Contact")
+
+
+class WatchlistRunLog(Base):
+    """Scheduled/manual watchlist run evidence for Kevin review."""
+    __tablename__ = "watchlist_run_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_type = Column(String, default="manual", index=True)  # manual, scheduled, codex_automation
+    status = Column(String, default="success", index=True)  # success, failed
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    checked_count = Column(Integer, default=0)
+    created_alerts = Column(Integer, default=0)
+    matched_properties = Column(Integer, default=0)
+    active_count = Column(Integer, default=0)
+    due_count = Column(Integer, default=0)
+    not_due_count = Column(Integer, default=0)
+    pending_alert_count = Column(Integer, default=0)
+    draft_alert_count = Column(Integer, default=0)
+    sent_alert_count = Column(Integer, default=0)
+    source_status = Column(String, nullable=True)
+    message = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)
+    payload_json = Column(Text, nullable=True, default="{}")
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class Interaction(Base):
@@ -162,4 +283,36 @@ class PushSubscription(Base):
     endpoint = Column(String, unique=True, index=True)
     p256dh = Column(String)
     auth = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class GmailOAuthConnection(Base):
+    """Encrypted Gmail OAuth connection for review-gated client email drafts."""
+    __tablename__ = "gmail_oauth_connections"
+
+    id = Column(Integer, primary_key=True, index=True)
+    connection_key = Column(String, unique=True, index=True)
+    gmail_user_id = Column(String, default="me")
+    account_email = Column(String, nullable=True)
+    status = Column(String, default="disconnected")
+    granted_scopes = Column(Text, nullable=True, default="[]")
+    encrypted_refresh_token = Column(Text, nullable=True)
+    refresh_token_updated_at = Column(DateTime, nullable=True)
+    connected_at = Column(DateTime, nullable=True)
+    last_refreshed_at = Column(DateTime, nullable=True)
+    last_error = Column(String, nullable=True)
+    last_error_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class GmailOAuthState(Base):
+    """Short-lived OAuth state guard. Stores only a hash of the browser state."""
+    __tablename__ = "gmail_oauth_states"
+
+    id = Column(Integer, primary_key=True, index=True)
+    connection_key = Column(String, index=True)
+    state_hash = Column(String, unique=True, index=True)
+    expires_at = Column(DateTime)
+    used_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
